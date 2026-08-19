@@ -23,6 +23,24 @@ def invoke(expression: str) -> subprocess.CompletedProcess[str]:
 
 
 class InferenceSessionTests(unittest.TestCase):
+    def test_stop_adds_lifecycle_fields_to_state_loaded_from_json(self) -> None:
+        expression = r"""
+        function Get-SessionConfig { [pscustomobject]@{ port=8100; state_file='C:\fixture\state.json' } }
+        function Read-SessionState {
+          [pscustomobject]@{ phase='healthy'; pid=4242; profile='stable-16k'; cleanup_paused=$false }
+        }
+        function Get-ProcessOnPort { return $null }
+        function Restore-CleanupProcess { param($Session,$State) }
+        function Save-SessionState { param($State,$Session); $global:savedState = $State }
+        Stop-InferenceSessionCore | Out-Null
+        $global:savedState | ConvertTo-Json -Compress
+        """
+        result = invoke(expression)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observed = json.loads(result.stdout.splitlines()[-1])
+        self.assertEqual(observed["phase"], "stopped")
+        self.assertRegex(observed["stopped_at"], r"^\d{4}-\d{2}-\d{2}T")
+
     def test_idle_cold_start_uses_the_real_resolved_session_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

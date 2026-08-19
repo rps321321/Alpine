@@ -82,6 +82,8 @@ exit 0
             launch_id = "0123456789abcdef0123456789abcdef"
             invocation_log = install / "logs" / "launcher-errors" / f"{launch_id}.log"
             failure_log = install / "logs" / "launcher-last-error.log"
+            failure_log.parent.mkdir(parents=True)
+            failure_log.write_text("stale failure\n", encoding="utf-8")
             environment = os.environ.copy()
             environment["LOCALMODEL_TEST_TOKEN"] = "environment-secret-value"
             environment["LOCALMODEL_SHORT_SECRET"] = "zz"
@@ -111,6 +113,7 @@ exit 0
                 env=environment,
             )
             self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("could not publish", result.stderr)
             observed = failure_log.read_text(encoding="utf-8")
             self.assertIn("PowerShell startup failed", observed)
             self.assertIn("<REDACTED>", observed)

@@ -57,12 +57,14 @@ function Write-AtomicLauncherText {
     $parent = Split-Path $Path -Parent
     if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
+    $backup = "$Path.$([Guid]::NewGuid().ToString('N')).bak"
     try {
         [IO.File]::WriteAllText($temporary, $Content, [Text.UTF8Encoding]::new($false))
-        if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temporary, $Path, $null) }
+        if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temporary, $Path, $backup) }
         else { [IO.File]::Move($temporary, $Path) }
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+        if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
     }
 }
 

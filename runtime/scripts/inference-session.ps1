@@ -343,6 +343,7 @@ function Start-InferenceSessionCore {
         transaction_id = [Guid]::NewGuid().ToString('N')
         phase = 'starting'
         started_at = (Get-Date).ToUniversalTime().ToString('o')
+        stopped_at = $null
         pid = $null
         process_started_at = $null
         profile = $Profile
@@ -443,7 +444,8 @@ function Stop-InferenceSessionCore {
         if ($state) {
             Restore-CleanupProcess $session $state
             $state.phase = 'stopped'
-            $state.stopped_at = (Get-Date).ToUniversalTime().ToString('o')
+            $state | Add-Member -NotePropertyName stopped_at `
+                -NotePropertyValue (Get-Date).ToUniversalTime().ToString('o') -Force
             Save-SessionState $state $session
         }
         return [pscustomobject]@{ Stopped = [bool]$process; State = $state }
