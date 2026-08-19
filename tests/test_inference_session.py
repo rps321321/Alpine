@@ -41,13 +41,21 @@ class InferenceSessionTests(unittest.TestCase):
         $process = [pscustomobject]@{ Id=42; Path='C:\\runtime\\llama-server.exe' }
         @(
           Test-InferenceProcessIdentity $session $state $process '"C:\\runtime\\llama-server.exe" --port 8100'
+          Test-InferenceProcessIdentity $session $state $process '"C:\\runtime\\llama-server.exe" "--port" "8100"'
+          Test-InferenceProcessIdentity $session $state $process '"C:\\runtime\\llama-server.exe" "--port=8100"'
+          Test-InferenceProcessIdentity $session $state $process '"C:\\runtime\\llama-server.exe" --port="8100"'
           Test-InferenceProcessIdentity $session $state $process '"C:\\runtime\\llama-server.exe" --port 9999'
+          Test-InferenceProcessIdentity $session $state $process '"C:\\runtime\\llama-server.exe" --model "note --port 8100 text"'
+          Test-InferenceProcessIdentity $session $state $process '"C:\\runtime\\llama-server.exe" --port 81000'
           Test-InferenceProcessIdentity $session $state ([pscustomobject]@{ Id=99; Path='C:\\runtime\\llama-server.exe' }) '"C:\\runtime\\llama-server.exe" --port 8100'
         ) | ConvertTo-Json -Compress
         """
         result = invoke(expression)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), [True, False, False])
+        self.assertEqual(
+            json.loads(result.stdout),
+            [True, True, True, True, False, False, False, False],
+        )
 
     def test_transaction_handles_idle_reuse_replace_restore_and_start_failure(self) -> None:
         expression = r"""

@@ -17,12 +17,63 @@ function Resolve-InferenceSessionPlan {
     return 'replace'
 }
 
+function Split-WindowsCommandLine {
+    param([string]$CommandLine)
+    if (-not ('LocalModel.WindowsCommandLine' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace LocalModel {
+    public static class WindowsCommandLine {
+        [DllImport("shell32.dll", SetLastError = true)]
+        private static extern IntPtr CommandLineToArgvW(
+            [MarshalAs(UnmanagedType.LPWStr)] string commandLine,
+            out int argumentCount);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
+        public static string[] Split(string commandLine) {
+            int count;
+            IntPtr arguments = CommandLineToArgvW(commandLine, out count);
+            if (arguments == IntPtr.Zero) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            try {
+                string[] result = new string[count];
+                for (int index = 0; index < count; index++) {
+                    IntPtr argument = Marshal.ReadIntPtr(arguments, index * IntPtr.Size);
+                    result[index] = Marshal.PtrToStringUni(argument);
+                }
+                return result;
+            }
+            finally {
+                LocalFree(arguments);
+            }
+        }
+    }
+}
+'@
+    }
+    return [LocalModel.WindowsCommandLine]::Split($CommandLine)
+}
+
 function Test-CommandLinePort {
     param([string]$CommandLine, [int]$Port)
     if (-not $CommandLine) { return $false }
-    $escaped = [Regex]::Escape([string]$Port)
-    $pattern = '(?i)(?:^|\s)--port(?:=|\s+)["'']?{0}(?:["'']?(?:\s|$))' -f $escaped
-    return [bool]($CommandLine -match $pattern)
+    try { $arguments = @(Split-WindowsCommandLine $CommandLine) }
+    catch { return $false }
+    for ($index = 0; $index -lt $arguments.Count; $index++) {
+        $argument = [string]$arguments[$index]
+        if ($argument -ieq '--port') {
+            if ($index + 1 -lt $arguments.Count -and [string]$arguments[$index + 1] -eq [string]$Port) { return $true }
+            continue
+        }
+        if ($argument -imatch '^--port=(\d+)$' -and $Matches[1] -eq [string]$Port) { return $true }
+    }
+    return $false
 }
 
 function Test-InferenceProcessIdentity {
