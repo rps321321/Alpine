@@ -37,7 +37,7 @@ function Test-InferenceProcessIdentity {
     return Test-CommandLinePort $CommandLine ([int]$Session.port)
 }
 
-function Get-InferenceSessionStatus {
+function Get-InferenceSessionStatusCore {
     param([string]$InstallRoot)
     $resolved = Get-ResolvedSession -InstallRoot $InstallRoot
     $session = $resolved.Session
@@ -62,9 +62,17 @@ function Get-InferenceSessionStatus {
     }
 }
 
+function Get-InferenceSessionStatus {
+    param([string]$InstallRoot, [int]$LockTimeoutMilliseconds = 15000)
+    $session = Get-SessionConfig $InstallRoot
+    $lock = Enter-InterprocessLock "$($session.state_file).session.lock" $LockTimeoutMilliseconds
+    try { return Get-InferenceSessionStatusCore -InstallRoot $InstallRoot }
+    finally { Exit-InterprocessLock $lock }
+}
+
 function Get-InferenceSessionSnapshot {
     param([string]$InstallRoot)
-    $status = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+    $status = Get-InferenceSessionStatusCore -InstallRoot $InstallRoot
     if ($status.Foreign) {
         throw "Inference Session port is owned by an unrecognized listener; refusing to capture it."
     }
@@ -74,8 +82,24 @@ function Get-InferenceSessionSnapshot {
         Profile = [string]$status.Profile
         Vision = [bool]$status.Vision
         Runtime = [string]$status.Runtime
+        Fallback = $status.Fallback
+        Arguments = @(Get-PropertyValue $status.State 'arguments' @())
+        Environment = Get-PropertyValue $status.State 'environment' ([pscustomobject]@{})
         State = $status.State
     }
+}
+
+function Test-RestoredInferenceState {
+    param($Status, $Snapshot)
+    if (-not $Status.Healthy -or $Status.Profile -ne $Snapshot.Profile -or
+        [bool]$Status.Vision -ne [bool]$Snapshot.Vision -or $Status.Runtime -ne $Snapshot.Runtime -or
+        [string]$Status.Fallback -ne [string]$Snapshot.Fallback) { return $false }
+    $observedArguments = @(Get-PropertyValue $Status.State 'arguments' @()) | ConvertTo-Json -Depth 8 -Compress
+    $expectedArguments = @(Get-PropertyValue $Snapshot 'Arguments' @()) | ConvertTo-Json -Depth 8 -Compress
+    if ($observedArguments -ne $expectedArguments) { return $false }
+    $observedEnvironment = Get-PropertyValue $Status.State 'environment' ([pscustomobject]@{}) | ConvertTo-Json -Depth 8 -Compress
+    $expectedEnvironment = Get-PropertyValue $Snapshot 'Environment' ([pscustomobject]@{}) | ConvertTo-Json -Depth 8 -Compress
+    return $observedEnvironment -eq $expectedEnvironment
 }
 
 function Enter-InferenceCapacityLease {
@@ -225,127 +249,126 @@ function Restore-CleanupProcess {
         $start = [string](Get-PropertyValue $Session.cleanup 'start_script' '')
         if (-not $start) { throw 'Cleanup restoration requested without a start script.' }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $start
-        $health = [string](Get-PropertyValue $Session.cleanup 'health' '')
-        if ($health -and -not (Wait-HttpOk $health 120)) { throw "Cleanup health check failed: $health" }
         $process = Get-ProcessOnPort $port
     }
     $commandLine = if ($process) { Get-CommandLine ([int]$process.Id) } else { $null }
     if (-not $process -or -not $process.Path -or ([IO.Path]::GetFullPath([string]$process.Path) -ine [IO.Path]::GetFullPath($expected)) -or -not (Test-CommandLinePort $commandLine $port)) {
         throw "Cleanup restoration did not produce the configured process on port $port."
     }
+    $health = [string](Get-PropertyValue $Session.cleanup 'health' '')
+    if (-not $health) { throw 'Cleanup restoration requires a configured health endpoint.' }
+    if (-not (Wait-HttpOk $health 120)) { throw "Cleanup health check failed: $health" }
 }
 
 function Start-InferenceSessionCore {
     [CmdletBinding()]
-    param([string]$InstallRoot, [string]$Profile, [switch]$Vision)
-        $resolved = Get-ResolvedSession -InstallRoot $InstallRoot -Name $Profile -RequireRuntime
-        $session = $resolved.Session
-        $profileConfig = $resolved.Profile
-        $Profile = $resolved.ProfileName
-        $current = Get-InferenceSessionStatus -InstallRoot $InstallRoot
-        $plan = Resolve-InferenceSessionPlan $current $Profile ([bool]$Vision)
-        if ($plan -eq 'reuse') { return [pscustomobject]@{ Started = $false; Status = $current } }
-        if ($plan -eq 'refuse') { throw "Port $($session.port) is occupied by a foreign listener; refusing to steal it." }
-        if ($plan -eq 'replace') { throw "A different or unhealthy owned Inference Session is active; stop or restore it transactionally before starting $Profile." }
-        foreach ($path in @($resolved.ServerPath, $resolved.Model, $resolved.ChatTemplate)) {
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required file missing: $path" }
-        }
-        if ($Vision -and -not (Test-Path -LiteralPath $resolved.Mmproj -PathType Leaf)) {
-            throw "Vision projector missing: $($resolved.Mmproj)"
-        }
-        Ensure-LocalApiKey $session
-        Write-AtomicText $session.base_url_file "$($resolved.BaseUrl)/v1" ([Text.Encoding]::ASCII)
-        $logs = Join-Path $session.root 'logs'
-        New-Item -ItemType Directory -Force -Path $logs | Out-Null
-        $outLog = Join-Path $logs 'session-out.log'
-        $errLog = Join-Path $logs 'session-err.log'
-
-        $cleanupPaused = $false
-        $cleanupPid = $null
+    param([string]$InstallRoot, [string]$Profile, [switch]$Vision, [switch]$ForceFallback)
+    $resolved = Get-ResolvedSession -InstallRoot $InstallRoot -Name $Profile -RequireRuntime
+    $session = $resolved.Session
+    $profileConfig = $resolved.Profile
+    $Profile = $resolved.ProfileName
+    $current = Get-InferenceSessionStatusCore -InstallRoot $InstallRoot
+    $plan = Resolve-InferenceSessionPlan $current $Profile ([bool]$Vision)
+    if ($plan -eq 'reuse') { return [pscustomobject]@{ Started = $false; Status = $current } }
+    if ($plan -eq 'refuse') { throw "Port $($session.port) is occupied by a foreign listener; refusing to steal it." }
+    if ($plan -eq 'replace') { throw "A different or unhealthy owned Inference Session is active; stop or restore it transactionally before starting $Profile." }
+    foreach ($path in @($resolved.ServerPath, $resolved.Model, $resolved.ChatTemplate)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required file missing: $path" }
+    }
+    if ($Vision -and -not (Test-Path -LiteralPath $resolved.Mmproj -PathType Leaf)) {
+        throw "Vision projector missing: $($resolved.Mmproj)"
+    }
+    Ensure-LocalApiKey $session
+    Write-AtomicText $session.base_url_file "$($resolved.BaseUrl)/v1" ([Text.Encoding]::ASCII)
+    $logs = Join-Path $session.root 'logs'
+    New-Item -ItemType Directory -Force -Path $logs | Out-Null
+    $outLog = Join-Path $logs 'session-out.log'
+    $errLog = Join-Path $logs 'session-err.log'
+    $state = [ordered]@{
+        schema = 1
+        transaction_id = [Guid]::NewGuid().ToString('N')
+        phase = 'starting'
+        started_at = (Get-Date).ToUniversalTime().ToString('o')
+        pid = $null
+        process_started_at = $null
+        profile = $Profile
+        runtime = $resolved.RuntimeName
+        server = [string]$resolved.ServerPath
+        server_sha256 = $null
+        runtime_build_sha256 = $null
+        vision = [bool]$Vision
+        cleanup_paused = $false
+        cleanup_pid = $null
+        fallback = if ($ForceFallback) { 'mtp-only' } else { $null }
+    }
+    $process = $null
+    try {
         if (Test-CleanupEnabled $session) {
             $cleanupPort = [int](Get-PropertyValue $session.cleanup 'port' 0)
             $cleanupProcess = if ($cleanupPort -gt 0) { Get-ProcessOnPort $cleanupPort } else { $null }
             $cleanupExe = [string](Get-PropertyValue $session.cleanup 'exe' '')
             $cleanupCommand = if ($cleanupProcess) { Get-CommandLine ([int]$cleanupProcess.Id) } else { $null }
             if ($cleanupProcess -and $cleanupProcess.Path -and ($cleanupProcess.Path -ieq $cleanupExe) -and (Test-CommandLinePort $cleanupCommand $cleanupPort)) {
-                $cleanupPid = [int]$cleanupProcess.Id
-                Stop-Process -Id $cleanupPid -Force
+                $state.cleanup_pid = [int]$cleanupProcess.Id
+                Stop-Process -Id $state.cleanup_pid -Force
+                $state.cleanup_paused = $true
                 if (-not (Wait-PortFree $cleanupPort 30)) { throw "Cleanup port $cleanupPort did not become free." }
-                $cleanupPaused = $true
             }
         }
-
-        $state = [ordered]@{
-            schema = 1
-            transaction_id = [Guid]::NewGuid().ToString('N')
-            phase = 'starting'
-            started_at = (Get-Date).ToUniversalTime().ToString('o')
-            pid = $null
-            process_started_at = $null
-            profile = $Profile
-            runtime = $resolved.RuntimeName
-            server = [string]$resolved.ServerPath
-            server_sha256 = Get-FileSha256 ([string]$resolved.ServerPath)
-            runtime_build_sha256 = $null
-            vision = [bool]$Vision
-            cleanup_paused = $cleanupPaused
-            cleanup_pid = $cleanupPid
-            fallback = $null
-        }
+        $state.server_sha256 = Get-FileSha256 ([string]$resolved.ServerPath)
         $runtimeBuildManifest = Join-Path (Split-Path ([string]$resolved.ServerPath) -Parent) 'build-manifest.json'
         if (Test-Path -LiteralPath $runtimeBuildManifest -PathType Leaf) {
             $state.runtime_build_sha256 = Get-FileSha256 $runtimeBuildManifest
         }
-        $arguments = New-InferenceArguments $session $profileConfig ([string]$resolved.ServerPath) ([bool]$Vision)
+        $arguments = New-InferenceArguments $session $profileConfig ([string]$resolved.ServerPath) ([bool]$Vision) -Fallback:$ForceFallback
         $state.arguments = @($arguments)
         $state.profile_sha256 = Get-FileSha256 (Join-Path $session.root "profiles\$Profile.json")
         $state.environment = [ordered]@{
-            LLAMA_NGRAM_MOD_RESET_ON_BEGIN = if ([bool]$profileConfig.ngram_reset_on_begin) { '1' } else { $null }
+            LLAMA_NGRAM_MOD_RESET_ON_BEGIN = if (-not $ForceFallback -and [bool]$profileConfig.ngram_reset_on_begin) { '1' } else { $null }
         }
         Save-SessionState $state $session
-
-        $process = $null
-        try {
-            Write-Host "Starting $Profile on $($resolved.BaseUrl)/health"
-            $process = Start-InferenceProcess ([string]$resolved.ServerPath) $arguments $outLog $errLog ([bool]$profileConfig.ngram_reset_on_begin)
+        Write-Host "Starting $Profile on $($resolved.BaseUrl)/health"
+        $resetNgram = -not $ForceFallback -and [bool]$profileConfig.ngram_reset_on_begin
+        $process = Start-InferenceProcess ([string]$resolved.ServerPath) $arguments $outLog $errLog $resetNgram
+        $state.pid = [int]$process.Id
+        try { $state.process_started_at = $process.StartTime.ToUniversalTime().ToString('o') } catch { $state.process_started_at = $null }
+        Save-SessionState $state $session
+        if (-not (Test-StartedProcessHealthy $resolved $state $process 600)) {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+            Wait-PortFree ([int]$session.port) 30 | Out-Null
+            if ($ForceFallback) { throw 'Pinned MTP-only start failed.' }
+            Write-Warning 'Optimized speculative mode failed health; retrying the pinned MTP-only fallback.'
+            $arguments = New-InferenceArguments $session $profileConfig ([string]$resolved.ServerPath) ([bool]$Vision) -Fallback
+            $process = Start-InferenceProcess ([string]$resolved.ServerPath) $arguments $outLog $errLog $false
             $state.pid = [int]$process.Id
+            $state.fallback = 'mtp-only'
+            $state.arguments = @($arguments)
+            $state.environment.LLAMA_NGRAM_MOD_RESET_ON_BEGIN = $null
             try { $state.process_started_at = $process.StartTime.ToUniversalTime().ToString('o') } catch { $state.process_started_at = $null }
             Save-SessionState $state $session
-            if (-not (Test-StartedProcessHealthy $resolved $state $process 600)) {
-                if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-                Wait-PortFree ([int]$session.port) 30 | Out-Null
-                Write-Warning 'Optimized speculative mode failed health; retrying the pinned MTP-only fallback.'
-                $arguments = New-InferenceArguments $session $profileConfig ([string]$resolved.ServerPath) ([bool]$Vision) -Fallback
-                $process = Start-InferenceProcess ([string]$resolved.ServerPath) $arguments $outLog $errLog $false
-                $state.pid = [int]$process.Id
-                $state.fallback = 'mtp-only'
-                $state.arguments = @($arguments)
-                $state.environment.LLAMA_NGRAM_MOD_RESET_ON_BEGIN = $null
-                try { $state.process_started_at = $process.StartTime.ToUniversalTime().ToString('o') } catch { $state.process_started_at = $null }
-                Save-SessionState $state $session
-                if (-not (Test-StartedProcessHealthy $resolved $state $process 600)) { throw 'Both optimized and MTP-only starts failed.' }
-            }
-            $state.phase = 'healthy'
-            $state.healthy_at = (Get-Date).ToUniversalTime().ToString('o')
-            Save-SessionState $state $session
-            Write-Host "Healthy: $Profile pid=$($process.Id) context=$($profileConfig.context)"
-            return [pscustomobject]@{ Started = $true; Status = (Get-InferenceSessionStatus -InstallRoot $InstallRoot) }
-        } catch {
-            $startupFailure = $_
-            if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-            Wait-PortFree ([int]$session.port) 30 | Out-Null
-            $cleanupFailure = $null
-            try { Restore-CleanupProcess $session $state } catch { $cleanupFailure = $_ }
-            $state.phase = 'failed'
-            $state.failed = $startupFailure.Exception.Message
-            if ($cleanupFailure) { $state.cleanup_restore_failed = $cleanupFailure.Exception.Message }
-            $state.failed_at = (Get-Date).ToUniversalTime().ToString('o')
-            Save-SessionState $state $session
-            if ($cleanupFailure) {
-                throw "Inference start failed: $($startupFailure.Exception.Message) Cleanup restoration also failed: $($cleanupFailure.Exception.Message)"
-            }
-            throw $startupFailure
+            if (-not (Test-StartedProcessHealthy $resolved $state $process 600)) { throw 'Both optimized and MTP-only starts failed.' }
         }
+        $state.phase = 'healthy'
+        $state.healthy_at = (Get-Date).ToUniversalTime().ToString('o')
+        Save-SessionState $state $session
+        Write-Host "Healthy: $Profile pid=$($process.Id) context=$($profileConfig.context)"
+        return [pscustomobject]@{ Started = $true; Status = (Get-InferenceSessionStatusCore -InstallRoot $InstallRoot) }
+    } catch {
+        $startupFailure = $_
+        if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+        Wait-PortFree ([int]$session.port) 30 | Out-Null
+        $cleanupFailure = $null
+        try { Restore-CleanupProcess $session $state } catch { $cleanupFailure = $_ }
+        $state.phase = 'failed'
+        $state.failed = $startupFailure.Exception.Message
+        if ($cleanupFailure) { $state.cleanup_restore_failed = $cleanupFailure.Exception.Message }
+        $state.failed_at = (Get-Date).ToUniversalTime().ToString('o')
+        Save-SessionState $state $session
+        if ($cleanupFailure) {
+            throw "Inference start failed: $($startupFailure.Exception.Message) Cleanup restoration also failed: $($cleanupFailure.Exception.Message)"
+        }
+        throw $startupFailure
+    }
 }
 
 function Stop-InferenceSessionCore {
@@ -407,14 +430,14 @@ function Enter-InferenceSession {
         $changed = $false
         try {
             $prior = Get-InferenceSessionSnapshot -InstallRoot $InstallRoot
-            $current = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+            $current = Get-InferenceSessionStatusCore -InstallRoot $InstallRoot
             $selected = if ($Profile) { $Profile } else { (Get-ResolvedSession -InstallRoot $InstallRoot).ProfileName }
             $plan = Resolve-InferenceSessionPlan $current $selected ([bool]$Vision)
             if ($plan -eq 'refuse') { throw 'Inference Session is owned by a foreign listener.' }
             $changed = $plan -in @('start', 'replace')
             if ($plan -eq 'replace') { Stop-InferenceSessionCore -InstallRoot $InstallRoot | Out-Null }
             if ($changed) { Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile $selected -Vision:$Vision | Out-Null }
-            $after = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+            $after = Get-InferenceSessionStatusCore -InstallRoot $InstallRoot
             if (-not $after.Active -or -not $after.Healthy -or $after.Profile -ne $selected -or [bool]$after.Vision -ne [bool]$Vision) {
                 throw 'Requested Inference Session did not pass post-transition health verification.'
             }
@@ -436,6 +459,9 @@ function Enter-InferenceSession {
                     profile = [string]$prior.Profile
                     vision = [bool]$prior.Vision
                     runtime = [string]$prior.Runtime
+                    fallback = $prior.Fallback
+                    arguments = @($prior.Arguments)
+                    environment = $prior.Environment
                     session_identity = [string](Get-PropertyValue $prior.State 'transaction_id' '')
                 }
             }
@@ -443,12 +469,13 @@ function Enter-InferenceSession {
             $original = $_
             if ($changed -and $null -ne $prior) {
                 try {
-                    $failed = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+                    $failed = Get-InferenceSessionStatusCore -InstallRoot $InstallRoot
                     if ($failed.Active) { Stop-InferenceSessionCore -InstallRoot $InstallRoot | Out-Null }
                     if ($prior.Active) {
-                        Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile $prior.Profile -Vision:$prior.Vision | Out-Null
-                        $restored = Get-InferenceSessionStatus -InstallRoot $InstallRoot
-                        if (-not $restored.Healthy -or $restored.Profile -ne $prior.Profile -or [bool]$restored.Vision -ne [bool]$prior.Vision) {
+                        $forceFallback = [string]$prior.Fallback -eq 'mtp-only'
+                        Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile $prior.Profile -Vision:$prior.Vision -ForceFallback:$forceFallback | Out-Null
+                        $restored = Get-InferenceSessionStatusCore -InstallRoot $InstallRoot
+                        if (-not (Test-RestoredInferenceState $restored $prior)) {
                             throw 'Rollback health verification failed.'
                         }
                     }
@@ -474,7 +501,7 @@ function Exit-InferenceSession {
         $session = Get-SessionConfig $InstallRoot
         $lock = Enter-InterprocessLock "$($session.state_file).session.lock" $LockTimeoutMilliseconds
         try {
-            $current = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+            $current = Get-InferenceSessionStatusCore -InstallRoot $InstallRoot
             if ($current.Foreign) { throw 'Cannot restore the prior Session because the port now has a foreign listener.' }
             if ($current.Active) {
                 $currentIdentity = [string](Get-PropertyValue $current.State 'transaction_id' '')
@@ -486,13 +513,14 @@ function Exit-InferenceSession {
             }
             $prior = Get-PropertyValue $Acquisition 'prior' $null
             if ($prior -and [bool](Get-PropertyValue $prior 'active' $false)) {
-                Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile ([string]$prior.profile) -Vision:([bool]$prior.vision) | Out-Null
-                $restored = Get-InferenceSessionStatus -InstallRoot $InstallRoot
-                if (-not $restored.Healthy -or $restored.Profile -ne $prior.profile -or [bool]$restored.Vision -ne [bool]$prior.vision) {
+                $forceFallback = [string](Get-PropertyValue $prior 'fallback' '') -eq 'mtp-only'
+                Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile ([string]$prior.profile) -Vision:([bool]$prior.vision) -ForceFallback:$forceFallback | Out-Null
+                $restored = Get-InferenceSessionStatusCore -InstallRoot $InstallRoot
+                if (-not (Test-RestoredInferenceState $restored $prior)) {
                     throw 'The pre-Harness Inference Session did not pass restoration health verification.'
                 }
             } else {
-                $restored = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+                $restored = Get-InferenceSessionStatusCore -InstallRoot $InstallRoot
                 if ($restored.Active -or $restored.Foreign) { throw 'The pre-Harness idle state was not restored.' }
             }
         } finally {

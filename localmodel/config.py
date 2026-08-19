@@ -188,19 +188,21 @@ def select_active_profile(install_root: Path, name: str) -> Path:
     root = install_root.expanduser().resolve()
     resolve_session(root, name, require_runtime=True)
     path = root / "config" / "session.json"
-    with FileLease(path.with_suffix(".lock"), {"kind": "session-config", "profile": name}):
-        session = read_json(path)
-        # Revalidate under the mutation lock so setup/profile changes cannot race selection.
-        resolve_session(root, name, require_runtime=True)
-        backup = path.with_name(
-            "session.json.backup-"
-            + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-            + "-"
-            + uuid.uuid4().hex[:8]
-        )
-        shutil.copy2(path, backup)
-        session["active_profile"] = name
-        write_json_atomic(path, session, sort_keys=False)
+    with FileLease(root / ".setup.lock", {"kind": "profile-selection", "profile": name}):
+        with FileLease(path.with_suffix(".lock"), {"kind": "session-config", "profile": name}):
+            session = read_json(path)
+            # Revalidate while holding both mutation locks so setup cannot publish
+            # a replacement Session Config under this selection transaction.
+            resolve_session(root, name, require_runtime=True)
+            backup = path.with_name(
+                "session.json.backup-"
+                + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+                + "-"
+                + uuid.uuid4().hex[:8]
+            )
+            shutil.copy2(path, backup)
+            session["active_profile"] = name
+            write_json_atomic(path, session, sort_keys=False)
     return backup
 
 
@@ -210,6 +212,15 @@ def sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
         while chunk := handle.read(chunk_size):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def hardware_manifest_identity(root: Path = REPO_ROOT) -> dict[str, str] | None:
+    candidates = sorted((root / "inventory").glob("hardware-*.json"))
+    candidates += sorted((root / "inventory").glob("hardware-*.json"))
+    if not candidates:
+        return None
+    manifest = candidates[-1]
+    return {"path": manifest.relative_to(root).as_posix(), "sha256": sha256(manifest)}
 
 
 def tree_sha256(root: Path, paths: list[Path]) -> str:

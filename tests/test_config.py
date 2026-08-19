@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from localmodel.config import ConfigError, resolve_session, select_active_profile
+from localmodel.locking import LeaseBusyError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -180,6 +182,40 @@ class SessionConfigTests(unittest.TestCase):
             self.assertEqual(resolve_session(root).profile_name, "candidate-16k")
             self.assertEqual(json.loads(backup.read_text(encoding="utf-8"))["active_profile"], "stable-16k")
             self.assertFalse(list((root / "config").glob("session.json.*.tmp")))
+
+    def test_profile_selection_cannot_race_the_powershell_setup_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture(root)
+            candidate = json.loads((root / "profiles" / "stable-16k.json").read_text(encoding="utf-8"))
+            candidate.update({"name": "candidate-16k", "status": "candidate"})
+            (root / "profiles" / "candidate-16k.json").write_text(json.dumps(candidate), encoding="utf-8")
+            ready = root / "setup-ready"
+            module = REPO_ROOT / "runtime" / "scripts" / "setup-transaction.ps1"
+            script = (
+                f". '{module}'; $lock=Enter-SetupLock '{root}' 1000; "
+                f"[IO.File]::WriteAllText('{ready}', 'ready'); Start-Sleep -Seconds 30"
+            )
+            owner = subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-Command", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists(), f"setup-lock owner exited with {owner.poll()}")
+                with self.assertRaises(LeaseBusyError):
+                    select_active_profile(root, "candidate-16k")
+                self.assertEqual(resolve_session(root).profile_name, "stable-16k")
+            finally:
+                owner.kill()
+                owner.communicate(timeout=10)
+
+            select_active_profile(root, "candidate-16k")
+            self.assertEqual(resolve_session(root).profile_name, "candidate-16k")
 
 
 if __name__ == "__main__":

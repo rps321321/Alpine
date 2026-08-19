@@ -88,6 +88,8 @@ def qualify_run_row(run: Any, target: str = "candidate") -> dict[str, Any]:
 def _run_identity(run: Any) -> dict[str, Any]:
     config = json.loads(run["config_json"])
     launch = config.get("launch", {})
+    hardware = config.get("hardware") if isinstance(config.get("hardware"), dict) else {}
+    hardware_sha256 = hardware.get("sha256") if hardware.get("path") == run["hardware_manifest"] else None
     return {
         "profile": run["profile"],
         "model_sha256": run["model_sha256"],
@@ -96,6 +98,7 @@ def _run_identity(run: Any) -> dict[str, Any]:
         "runtime": launch.get("runtime"),
         "server_sha256": launch.get("server_sha256"),
         "runtime_identity": launch.get("runtime_build_sha256") or launch.get("server_sha256"),
+        "hardware_sha256": hardware_sha256,
     }
 
 

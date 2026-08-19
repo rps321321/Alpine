@@ -102,8 +102,7 @@ function Install-Artifact($Artifact) {
     Write-Host "Downloading $($Artifact.filename)"
     & curl.exe --fail --location --retry 6 --retry-all-errors --continue-at - --output $partial $Artifact.url
     if ($LASTEXITCODE -ne 0) { throw "Download failed: $($Artifact.url)" }
-    Assert-Artifact $partial $Artifact
-    Move-Item -LiteralPath $partial -Destination $destination
+    Publish-VerifiedDownload $partial $destination ([long]$Artifact.size) ([string]$Artifact.sha256)
     return $destination
 }
 
@@ -323,26 +322,12 @@ function Write-SessionConfig([string]$OfficialServer, [string]$CustomServer, [st
     if ($selectedProfile.runtime -eq 'custom' -and -not $CustomServer) {
         throw "$Profile requires the custom runtime, but setup was asked for Official only."
     }
-    $activeServer = if ($selectedProfile.runtime -eq 'custom') { $CustomServer } else { $OfficialServer }
-    $config = [ordered]@{
-        schema = 3
-        root = $InstallRoot
-        host = '127.0.0.1'
-        port = 8100
-        active_profile = $Profile
-        runtimes = [ordered]@{
-            official = $OfficialServer
-            custom = $CustomServer
-        }
-        llama_server = $activeServer
-        model = Join-Path $InstallRoot ([string]$manifest.model.relative_path -replace '/', '\')
-        mmproj = Join-Path $InstallRoot ([string]$manifest.mmproj.relative_path -replace '/', '\')
-        chat_template = Join-Path $InstallRoot ([string]$manifest.chat_template.relative_path -replace '/', '\')
-        api_key_file = Join-Path $configDir 'api-key.txt'
-        base_url_file = Join-Path $configDir 'base-url.txt'
-        state_file = Join-Path $InstallRoot 'logs\session-state.json'
-        cleanup = $cleanup
-    }
+    $config = New-SessionConfigDocument -InstallRoot $InstallRoot -ProfileName $Profile `
+        -ProfileRuntime ([string]$selectedProfile.runtime) -OfficialServer $OfficialServer -CustomServer $CustomServer `
+        -ModelPath (Join-Path $InstallRoot ([string]$manifest.model.relative_path -replace '/', '\')) `
+        -MmprojPath (Join-Path $InstallRoot ([string]$manifest.mmproj.relative_path -replace '/', '\')) `
+        -ChatTemplatePath (Join-Path $InstallRoot ([string]$manifest.chat_template.relative_path -replace '/', '\')) `
+        -Cleanup $cleanup
     $json = $config | ConvertTo-Json -Depth 8
     Write-AtomicText $path ($json + [Environment]::NewLine)
 }

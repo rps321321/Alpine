@@ -52,7 +52,7 @@ function Wait-PortFree {
         if (-not (Get-NetTCPConnection -LocalPort $benchmark.Port -State Listen -ErrorAction SilentlyContinue)) { return }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
-    throw 'Port 8100 did not become free.'
+    throw "Port $($benchmark.Port) did not become free."
 }
 
 $active = $null

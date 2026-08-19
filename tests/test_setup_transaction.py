@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import tempfile
 import time
@@ -22,6 +23,48 @@ def invoke(expression: str) -> subprocess.CompletedProcess[str]:
 
 
 class SetupTransactionTests(unittest.TestCase):
+    def test_staged_session_config_contains_only_final_installation_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            install = Path(directory) / "install"
+            stage = install / ".stage"
+            expression = (
+                f"$config=New-SessionConfigDocument -InstallRoot '{install}' -ProfileName stable-16k "
+                f"-ProfileRuntime official -OfficialServer '{install / 'runtime-official' / 'llama-server.exe'}' "
+                f"-CustomServer '' -ModelPath '{install / 'models' / 'model.gguf'}' "
+                f"-MmprojPath '{install / 'models' / 'mmproj.gguf'}' -ChatTemplatePath '{install / 'config' / 'chat.jinja'}' "
+                "-Cleanup ([ordered]@{enabled=$false}); $config | ConvertTo-Json -Depth 5 -Compress"
+            )
+            result = invoke(expression)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = json.loads(result.stdout)
+            self.assertEqual(Path(config["api_key_file"]), install / "config" / "api-key.txt")
+            self.assertEqual(Path(config["base_url_file"]), install / "config" / "base-url.txt")
+            self.assertNotIn(str(stage), result.stdout)
+
+    def test_interrupted_download_remains_resumable_and_is_not_published_early(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            partial = root / "artifact.bin.part"
+            destination = root / "artifact.bin"
+            complete = b"complete-artifact"
+            partial.write_bytes(complete[:5])
+            digest = hashlib.sha256(complete).hexdigest()
+
+            incomplete = invoke(
+                f"Publish-VerifiedDownload '{partial}' '{destination}' {len(complete)} '{digest}'"
+            )
+            self.assertNotEqual(incomplete.returncode, 0)
+            self.assertTrue(partial.is_file())
+            self.assertFalse(destination.exists())
+
+            partial.write_bytes(complete)
+            resumed = invoke(
+                f"Publish-VerifiedDownload '{partial}' '{destination}' {len(complete)} '{digest}'"
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(destination.read_bytes(), complete)
+            self.assertFalse(partial.exists())
+
     def test_bundle_publication_replaces_all_items_and_removes_marker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

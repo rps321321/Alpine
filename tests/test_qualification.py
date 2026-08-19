@@ -18,6 +18,7 @@ IDENTITY = {
     "runtime": "custom",
     "server_sha256": "server-1",
     "runtime_identity": "build-1",
+    "hardware_sha256": "hardware-1",
 }
 
 
@@ -45,7 +46,9 @@ def create_run(store: ResultStore, run_id: str, kind: str, *, identity: dict[str
         "profile": identity["profile"],
         "model_sha256": identity["model_sha256"],
         "backend_commit": identity["backend_commit"],
+        "hardware_manifest": "inventory/hardware-fixture.json",
         "config": {
+            "hardware": {"path": "inventory/hardware-fixture.json", "sha256": identity["hardware_sha256"]},
             "launch": {
                 "profile_sha256": identity["profile_sha256"],
                 "runtime": identity["runtime"],
@@ -124,6 +127,19 @@ class CompleteQualificationTests(unittest.TestCase):
             try:
                 create_run(store, "micro", "micro")
                 mismatched = {**IDENTITY, "backend_commit": "other-backend"}
+                create_run(store, "context", "context", identity=mismatched)
+                result = qualify_run(store, "micro", "validated")
+                evidence = next(item for item in result["evidence"] if item["name"] == "near-limit-context-stress")
+                self.assertEqual(evidence["status"], "identity-mismatched")
+            finally:
+                store.close()
+
+    def test_context_evidence_from_different_hardware_cannot_qualify(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ResultStore(Path(directory) / "results.sqlite3")
+            try:
+                create_run(store, "micro", "micro")
+                mismatched = {**IDENTITY, "hardware_sha256": "other-machine"}
                 create_run(store, "context", "context", identity=mismatched)
                 result = qualify_run(store, "micro", "validated")
                 evidence = next(item for item in result["evidence"] if item["name"] == "near-limit-context-stress")

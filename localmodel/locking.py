@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,10 +66,16 @@ class FileLease:
             return
         handle, self.file = self.file, None
         try:
-            try:
-                self.metadata_path.unlink()
-            except FileNotFoundError:
-                pass
+            for attempt in range(200):
+                try:
+                    self.metadata_path.unlink()
+                    break
+                except FileNotFoundError:
+                    break
+                except PermissionError:
+                    if attempt == 199:
+                        raise
+                    time.sleep(0.01)
             handle.seek(0)
             if os.name == "nt":
                 import msvcrt

@@ -9,7 +9,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import REPO_ROOT, artifact_manifest, git_commit, read_json, resolve_session, sha256, tree_sha256
+from .config import (
+    REPO_ROOT,
+    artifact_manifest,
+    git_commit,
+    hardware_manifest_identity,
+    read_json,
+    resolve_session,
+    sha256,
+    tree_sha256,
+)
 from .lifecycle import BenchmarkLifecycle, PowerShellSessionAdapter, parse_agent_events, run_powershell, utc_now
 
 
@@ -29,14 +38,17 @@ def run_agentbenchmark(
     resolved = resolve_session(install_root, profile_name, require_runtime=True)
     profile = resolved.profile
     artifacts = artifact_manifest()
+    hardware = hardware_manifest_identity()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     result_root = REPO_ROOT / "results"
     suite_files = [path for path in task_root.rglob("*") if path.is_file()]
     record = {
         "id": run_id, "started_at": utc_now(), "status": "running", "kind": "agent",
-        "profile": profile_name, "git_commit": git_commit(), "hardware_manifest": None,
+        "profile": profile_name, "git_commit": git_commit(),
+        "hardware_manifest": hardware["path"] if hardware else None,
         "model_sha256": artifacts["model"]["sha256"], "backend_commit": artifacts["llama_cpp"]["commit"],
         "config": {
+            "hardware": hardware,
             "profile": profile,
             "benchmark": {
                 "name": "golden-agent", "schema": int(task["schema"]), "task_id": task_id,

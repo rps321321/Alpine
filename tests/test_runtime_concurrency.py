@@ -177,6 +177,87 @@ class RuntimeConcurrencyTests(unittest.TestCase):
             recovered.acquire()
             recovered.release()
 
+    def test_session_transition_recovers_after_lock_owner_death(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "logs").mkdir()
+            state = root / "session-state.json"
+            ready = root / "ready"
+            owner_script = (
+                f". '{SESSION_MODULE}'; "
+                f"$lock = Enter-InterprocessLock '{state}.session.lock' 2000; "
+                f"[IO.File]::WriteAllText('{ready}', 'ready'); "
+                "try { Start-Sleep -Seconds 30 } finally { Exit-InterprocessLock $lock }"
+            )
+            owner = subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-Command", owner_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists(), f"session-lock owner exited with {owner.poll()}")
+            finally:
+                owner.kill()
+                owner.communicate(timeout=10)
+
+            recovery_script = (
+                f". '{SESSION_MODULE}'; "
+                f"function Get-SessionConfig {{ [pscustomobject]@{{root='{root}'; state_file='{state}'}} }}; "
+                "function Start-InferenceSessionCore { param($InstallRoot,$Profile,$Vision); 'started' }; "
+                "Start-InferenceSession -Profile fixture -LockTimeoutMilliseconds 2000"
+            )
+            recovered = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", recovery_script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertIn("started", recovered.stdout)
+
+    def test_status_waits_on_the_same_session_transition_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "session-state.json"
+            ready = root / "ready"
+            owner_script = (
+                f". '{SESSION_MODULE}'; "
+                f"$lock = Enter-InterprocessLock '{state}.session.lock' 2000; "
+                f"[IO.File]::WriteAllText('{ready}', 'ready'); "
+                "try { Start-Sleep -Seconds 30 } finally { Exit-InterprocessLock $lock }"
+            )
+            owner = subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-Command", owner_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists(), f"session-lock owner exited with {owner.poll()}")
+                probe = (
+                    f". '{SESSION_MODULE}'; "
+                    f"function Get-SessionConfig {{ [pscustomobject]@{{state_file='{state}'}} }}; "
+                    "Get-InferenceSessionStatus -LockTimeoutMilliseconds 100"
+                )
+                blocked = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-Command", probe],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(blocked.returncode, 0)
+                self.assertIn("Timed out waiting for interprocess lock", blocked.stderr)
+            finally:
+                owner.kill()
+                owner.communicate(timeout=10)
+
 
 if __name__ == "__main__":
     unittest.main()

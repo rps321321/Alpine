@@ -116,6 +116,16 @@ function Get-ResolvedSession {
 function Get-PropertyValue {
     param($Object, [string]$Name, $Default = $null)
     if ($null -eq $Object) { return $Default }
+    if ($Object -is [Collections.IDictionary]) {
+        foreach ($key in $Object.Keys) {
+            if ([string]$key -ieq $Name) {
+                $value = $Object[$key]
+                if ($null -eq $value) { return $Default }
+                return $value
+            }
+        }
+        return $Default
+    }
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property -or $null -eq $property.Value) { return $Default }
     return $property.Value

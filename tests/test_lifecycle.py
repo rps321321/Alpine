@@ -299,6 +299,34 @@ class BenchmarkLifecycleTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_writer_exiting_during_reconciliation_is_never_partially_finalized(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result_root = Path(directory)
+            lifecycle = BenchmarkLifecycle(result_root, record("writer-exit-race"), FakeSessionAdapter())
+            lifecycle.__enter__()
+            lifecycle.record_sample(sample(1))
+            barrier = threading.Barrier(2)
+
+            def inspect() -> str:
+                barrier.wait(timeout=10)
+                try:
+                    return reconcile_run(result_root, "writer-exit-race")["status"]
+                except ActiveRunError:
+                    return "active-owner"
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                inspection = pool.submit(inspect)
+                barrier.wait(timeout=10)
+                lifecycle.abandon_for_test()
+                observed = inspection.result(timeout=20)
+            self.assertIn(observed, {"active-owner", "passed"})
+            final = reconcile_run(result_root, "writer-exit-race")
+            self.assertEqual(final["status"], "passed")
+            store = ResultStore(result_root / "results.sqlite3")
+            try:
+                self.assertEqual(store.sample_count("writer-exit-race"), 1)
+            finally:
+                store.close()
+
     def test_inference_contention_is_visible_and_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result_root = Path(directory)

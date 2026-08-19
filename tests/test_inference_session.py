@@ -56,27 +56,32 @@ class InferenceSessionTests(unittest.TestCase):
         function Exit-InferenceCapacityLease { param($Lease) }
         function Enter-InterprocessLock { [pscustomobject]@{ handle=$true } }
         function Exit-InterprocessLock { param($Lock) }
-        function New-FixtureStatus([bool]$Active, [string]$Profile, [bool]$Vision, [string]$Identity, [bool]$Foreign=$false) {
+        function New-FixtureStatus([bool]$Active, [string]$Profile, [bool]$Vision, [string]$Identity, [bool]$Foreign=$false, [string]$Fallback='') {
+          $arguments = if ($Fallback) { @('--spec-type','draft-mtp') } else { @('--spec-type','draft-mtp,ngram-mod') }
+          $environment = [pscustomobject]@{ LLAMA_NGRAM_MOD_RESET_ON_BEGIN = if ($Fallback) { $null } else { '1' } }
           [pscustomobject]@{
             Active=$Active; Foreign=$Foreign; Healthy=$Active; Profile=$Profile; Vision=$Vision
-            Runtime='fixture'; ExpectedPath='fixture.exe'; Fallback=$null
-            State=[pscustomobject]@{ transaction_id=$Identity; profile_sha256="hash-$Profile"; arguments=@(); environment=[pscustomobject]@{} }
+            Runtime='fixture'; ExpectedPath='fixture.exe'; Fallback=$Fallback
+            State=[pscustomobject]@{ transaction_id=$Identity; profile_sha256="hash-$Profile"; arguments=$arguments; environment=$environment }
           }
         }
-        function Get-InferenceSessionStatus { return $global:fixtureStatus }
+        function Get-InferenceSessionStatusCore { return $global:fixtureStatus }
         function Get-InferenceSessionSnapshot {
           return [pscustomobject]@{
             Active=$global:fixtureStatus.Active; Healthy=$global:fixtureStatus.Healthy
             Profile=$global:fixtureStatus.Profile; Vision=$global:fixtureStatus.Vision
-            Runtime=$global:fixtureStatus.Runtime; State=$global:fixtureStatus.State
+            Runtime=$global:fixtureStatus.Runtime; Fallback=$global:fixtureStatus.Fallback
+            Arguments=$global:fixtureStatus.State.arguments; Environment=$global:fixtureStatus.State.environment
+            State=$global:fixtureStatus.State
           }
         }
         function Start-InferenceSessionCore {
-          param([string]$InstallRoot, [string]$Profile, [switch]$Vision)
+          param([string]$InstallRoot, [string]$Profile, [switch]$Vision, [switch]$ForceFallback)
           $global:starts++
           if ($global:failProfile -eq $Profile) { throw "fixture start failed: $Profile" }
           $global:generation++
-          $global:fixtureStatus = New-FixtureStatus $true $Profile ([bool]$Vision) "tx-$global:generation"
+          $fallback = if ($ForceFallback) { 'mtp-only' } else { '' }
+          $global:fixtureStatus = New-FixtureStatus $true $Profile ([bool]$Vision) "tx-$global:generation" $false $fallback
         }
         function Stop-InferenceSessionCore {
           param([string]$InstallRoot)
@@ -97,15 +102,15 @@ class InferenceSessionTests(unittest.TestCase):
         $reuseResult = [pscustomobject]@{ changed=$reuse.changed; starts=$global:starts; stops=$global:stops; identity=$global:fixtureStatus.State.transaction_id }
 
         $global:starts=0; $global:stops=0
-        $global:fixtureStatus = New-FixtureStatus $true 'turbo-16k' $true 'prior'
+        $global:fixtureStatus = New-FixtureStatus $true 'turbo-16k' $true 'prior' $false 'mtp-only'
         $replace = Enter-InferenceSession -Profile 'stable-16k'
         Exit-InferenceSession -Acquisition $replace
-        $replaceResult = [pscustomobject]@{ changed=$replace.changed; starts=$global:starts; stops=$global:stops; profile=$global:fixtureStatus.Profile; vision=$global:fixtureStatus.Vision }
+        $replaceResult = [pscustomobject]@{ changed=$replace.changed; starts=$global:starts; stops=$global:stops; profile=$global:fixtureStatus.Profile; vision=$global:fixtureStatus.Vision; fallback=$global:fixtureStatus.Fallback }
 
         $global:starts=0; $global:stops=0; $global:failProfile='stable-16k'
-        $global:fixtureStatus = New-FixtureStatus $true 'turbo-16k' $true 'prior'
+        $global:fixtureStatus = New-FixtureStatus $true 'turbo-16k' $true 'prior' $false 'mtp-only'
         $failure = try { Enter-InferenceSession -Profile 'stable-16k'; 'no-error' } catch { $_.Exception.Message }
-        $failureResult = [pscustomobject]@{ message=$failure; starts=$global:starts; stops=$global:stops; profile=$global:fixtureStatus.Profile; vision=$global:fixtureStatus.Vision; healthy=$global:fixtureStatus.Healthy }
+        $failureResult = [pscustomobject]@{ message=$failure; starts=$global:starts; stops=$global:stops; profile=$global:fixtureStatus.Profile; vision=$global:fixtureStatus.Vision; healthy=$global:fixtureStatus.Healthy; fallback=$global:fixtureStatus.Fallback }
 
         [pscustomobject]@{ idle=$idleResult; reuse=$reuseResult; replace=$replaceResult; failure=$failureResult } | ConvertTo-Json -Depth 6 -Compress
         """
@@ -119,17 +124,26 @@ class InferenceSessionTests(unittest.TestCase):
         )
         self.assertEqual(
             observed["replace"],
-            {"changed": True, "starts": 2, "stops": 2, "profile": "turbo-16k", "vision": True},
+            {
+                "changed": True,
+                "starts": 2,
+                "stops": 2,
+                "profile": "turbo-16k",
+                "vision": True,
+                "fallback": "mtp-only",
+            },
         )
         self.assertIn("fixture start failed", observed["failure"]["message"])
         self.assertEqual(observed["failure"]["profile"], "turbo-16k")
         self.assertTrue(observed["failure"]["vision"])
         self.assertTrue(observed["failure"]["healthy"])
+        self.assertEqual(observed["failure"]["fallback"], "mtp-only")
 
     def test_cleanup_restoration_requires_configured_health_check(self) -> None:
         expression = r"""
         function Test-CleanupEnabled { return $true }
-        function Get-ProcessOnPort { return $null }
+        function Get-ProcessOnPort { [pscustomobject]@{ Id=9191; Path='C:\fixture\cleanup.exe' } }
+        function Get-CommandLine { return '"C:\fixture\cleanup.exe" --port 9191' }
         function powershell.exe { param([switch]$NoProfile, [string]$ExecutionPolicy, [string]$File) }
         function Wait-HttpOk { return $false }
         $session = [pscustomobject]@{ cleanup=[pscustomobject]@{ enabled=$true; port=9191; exe='C:\fixture\cleanup.exe'; start_script='C:\fixture\start.ps1'; health='http://127.0.0.1:9191/health' } }
@@ -167,7 +181,7 @@ class InferenceSessionTests(unittest.TestCase):
               Mmproj=''; BaseUrl='http://127.0.0.1:8100'
             }}
             function Get-ResolvedSession {{ return $resolved }}
-            function Get-InferenceSessionStatus {{
+            function Get-InferenceSessionStatusCore {{
               [pscustomobject]@{{ Active=$false; Foreign=$false; Healthy=$false; Profile='fixture'; Vision=$false }}
             }}
             function Test-CleanupEnabled {{ return $false }}
@@ -199,6 +213,54 @@ class InferenceSessionTests(unittest.TestCase):
             self.assertEqual(observed["fallback"], "mtp-only")
             self.assertEqual(observed["specType"], "draft-mtp")
             self.assertIsNone(observed["reset"])
+
+    def test_failure_after_cleanup_pause_restores_and_health_checks_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server = root / "server.exe"
+            model = root / "model.gguf"
+            template = root / "chat.jinja"
+            for path in (server, model, template):
+                path.write_text("fixture", encoding="utf-8")
+            expression = rf"""
+            $session = [pscustomobject]@{{
+              root='{root}'; model='{model}'; host='127.0.0.1'; port=8123; chat_template='{template}'
+              api_key_file='{root / 'api-key.txt'}'; base_url_file='{root / 'base-url.txt'}'
+              state_file='{root / 'state.json'}'
+              cleanup=[pscustomobject]@{{enabled=$true; port=9191; exe='C:\fixture\cleanup.exe'; start_script='C:\fixture\start.ps1'; health='http://127.0.0.1:9191/health'}}
+            }}
+            $resolved = [pscustomobject]@{{
+              Session=$session; Profile=[pscustomobject]@{{ngram_reset_on_begin=$false}}
+              ProfileName='fixture'; RuntimeName='custom'; ServerPath='{server}'
+              Model='{model}'; ChatTemplate='{template}'; Mmproj=''; BaseUrl='http://127.0.0.1:8123'
+            }}
+            function Get-ResolvedSession {{ return $resolved }}
+            function Get-InferenceSessionStatusCore {{ [pscustomobject]@{{Active=$false;Foreign=$false}} }}
+            function Test-CleanupEnabled {{ return $true }}
+            function Get-ProcessOnPort {{
+              param($Port)
+              if ($Port -eq 9191 -and $global:cleanupRunning) {{ [pscustomobject]@{{Id=9191;Path='C:\fixture\cleanup.exe'}} }}
+            }}
+            function Get-CommandLine {{ return '"C:\fixture\cleanup.exe" --port 9191' }}
+            function Stop-Process {{ param($Id,[switch]$Force,$ErrorAction); if ($Id -eq 9191) {{ $global:cleanupRunning=$false }} }}
+            function Wait-PortFree {{ return $true }}
+            function powershell.exe {{ param([switch]$NoProfile,[string]$ExecutionPolicy,[string]$File); $global:cleanupRunning=$true }}
+            function Wait-HttpOk {{ $global:healthChecks++; return $true }}
+            function Ensure-LocalApiKey {{ param($Session) }}
+            function Write-AtomicText {{ param($Path,$Content,$Encoding) }}
+            function Get-FileSha256 {{ throw 'fixture hash failure' }}
+            function Save-SessionState {{ param($State,$Session); $global:lastState=$State }}
+            $global:cleanupRunning=$true; $global:healthChecks=0; $global:lastState=$null
+            $message = try {{ Start-InferenceSessionCore -Profile fixture; 'no-error' }} catch {{ $_.Exception.Message }}
+            [pscustomobject]@{{message=$message;cleanupRunning=$global:cleanupRunning;healthChecks=$global:healthChecks;paused=$global:lastState.cleanup_paused}} | ConvertTo-Json -Compress
+            """
+            result = invoke(expression)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            observed = json.loads(result.stdout.splitlines()[-1])
+            self.assertIn("fixture hash failure", observed["message"])
+            self.assertTrue(observed["cleanupRunning"])
+            self.assertGreaterEqual(observed["healthChecks"], 1)
+            self.assertTrue(observed["paused"])
 
 
 if __name__ == "__main__":

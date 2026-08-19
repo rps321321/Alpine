@@ -40,6 +40,7 @@ class PerformanceMatrixConfigTests(unittest.TestCase):
                 self.assertIn("[switch]$ResolveOnly", source, name)
                 for forbidden in (
                     "%USERPROFILE%",
+                    "8100",
                     "127.0.0.1:8100",
                     "LocalPort 8100",
                     "runtime-legacy",

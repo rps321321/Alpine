@@ -15,6 +15,60 @@ function Enter-SetupLock([string]$InstallRoot, [int]$TimeoutMilliseconds = 30000
     catch { throw "Another setup transaction owns $root. $($_.Exception.Message)" }
 }
 
+function Publish-VerifiedDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$PartialPath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][long]$ExpectedSize,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+    if (-not (Test-Path -LiteralPath $PartialPath -PathType Leaf)) {
+        throw "Incomplete download is missing: $PartialPath"
+    }
+    $item = Get-Item -LiteralPath $PartialPath
+    if ($item.Length -ne $ExpectedSize) {
+        throw "Incomplete download has size $($item.Length), expected $ExpectedSize. Keep it for resumable download."
+    }
+    $observed = Get-FileSha256 $PartialPath
+    if ($observed -ne $ExpectedSha256.ToLowerInvariant()) {
+        throw "Incomplete download checksum mismatch. Keep or remove $PartialPath before retrying."
+    }
+    $parent = Split-Path $DestinationPath -Parent
+    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+    Move-Item -LiteralPath $PartialPath -Destination $DestinationPath
+}
+
+function New-SessionConfigDocument {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$ProfileName,
+        [Parameter(Mandatory = $true)][string]$ProfileRuntime,
+        [Parameter(Mandatory = $true)][string]$OfficialServer,
+        [AllowEmptyString()][string]$CustomServer,
+        [Parameter(Mandatory = $true)][string]$ModelPath,
+        [Parameter(Mandatory = $true)][string]$MmprojPath,
+        [Parameter(Mandatory = $true)][string]$ChatTemplatePath,
+        [Parameter(Mandatory = $true)]$Cleanup
+    )
+    $activeServer = if ($ProfileRuntime -eq 'custom') { $CustomServer } else { $OfficialServer }
+    return [ordered]@{
+        schema = 3
+        root = $InstallRoot
+        host = '127.0.0.1'
+        port = 8100
+        active_profile = $ProfileName
+        runtimes = [ordered]@{ official = $OfficialServer; custom = $CustomServer }
+        llama_server = $activeServer
+        model = $ModelPath
+        mmproj = $MmprojPath
+        chat_template = $ChatTemplatePath
+        api_key_file = Join-Path $InstallRoot 'config\api-key.txt'
+        base_url_file = Join-Path $InstallRoot 'config\base-url.txt'
+        state_file = Join-Path $InstallRoot 'logs\session-state.json'
+        cleanup = $Cleanup
+    }
+}
+
 function Repair-InterruptedSetupPublication([string]$InstallRoot) {
     $root = [IO.Path]::GetFullPath($InstallRoot)
     $marker = Get-SetupPublicationMarker $root
