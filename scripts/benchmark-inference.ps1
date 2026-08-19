@@ -1,14 +1,22 @@
 param(
-    [string]$BaseUrl = 'http://127.0.0.1:8100',
+    [string]$BaseUrl,
     [ValidateRange(1, 8192)]
     [int]$Tokens = 256,
     [ValidateRange(1, 20)]
     [int]$Runs = 1,
     [string]$Label = 'current',
-    [string]$ApiKeyFile
+    [string]$ApiKeyFile,
+    [string]$InstallRoot = (Join-Path $env:USERPROFILE 'local-models'),
+    [string]$Profile,
+    [switch]$ResolveOnly
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'benchmark-common.ps1')
+$benchmark = Get-BenchmarkContext $InstallRoot $Profile
+if ($ResolveOnly) { Write-BenchmarkResolution $benchmark; return }
+if (-not $BaseUrl) { $BaseUrl = $benchmark.BaseUrl }
+if (-not $ApiKeyFile) { $ApiKeyFile = $benchmark.ApiKeyFile }
 
 $prompt = @'
 Complete the following technical explanation with coherent prose and examples:

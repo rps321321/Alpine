@@ -14,6 +14,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
+. (Join-Path $repoRoot 'runtime\scripts\lib.ps1')
+. (Join-Path $repoRoot 'runtime\scripts\setup-transaction.ps1')
 $manifestPath = Join-Path $repoRoot 'config\artifacts.json'
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
@@ -32,6 +34,34 @@ function Get-Sha256([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Copy-AtomicFile([string]$Source, [string]$Destination) {
+    $parent = Split-Path $Destination -Parent
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $temporary = "$Destination.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::Copy($Source, $temporary, $false)
+        if (Test-Path -LiteralPath $Destination) {
+            $backup = "$Destination.$([Guid]::NewGuid().ToString('N')).bak"
+            try { [IO.File]::Replace($temporary, $Destination, $backup) }
+            finally { if (Test-Path -LiteralPath $backup) { [IO.File]::Delete($backup) } }
+        } else { [IO.File]::Move($temporary, $Destination) }
+    } finally { if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) } }
+}
+
+function Publish-Directory([string]$Stage, [string]$Destination) {
+    $backup = "$Destination.backup-$([Guid]::NewGuid().ToString('N'))"
+    $hadPrior = Test-Path -LiteralPath $Destination
+    if ($hadPrior) { Move-Item -LiteralPath $Destination -Destination $backup }
+    try {
+        Move-Item -LiteralPath $Stage -Destination $Destination
+        if ($hadPrior) { Remove-Item -LiteralPath $backup -Recurse -Force }
+    } catch {
+        if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
+        if ($hadPrior -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $Destination }
+        throw
+    }
+}
+
 function Assert-Artifact([string]$Path, $Artifact) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Artifact missing: $Path" }
     $item = Get-Item -LiteralPath $Path
@@ -46,7 +76,7 @@ function Assert-Artifact([string]$Path, $Artifact) {
 
 function Move-AsideInvalid([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
-    $suffix = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+    $suffix = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss-fff') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,8)
     $backup = "$Path.invalid-$suffix"
     Move-Item -LiteralPath $Path -Destination $backup
     Write-Warning "Preserved invalid artifact as $backup"
@@ -163,31 +193,55 @@ function Install-OfficialRuntime {
         Install-Artifact $artifact | Out-Null
     }
     $runtimeDir = Join-Path $InstallRoot 'runtime-official'
-    New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
-    Expand-Archive -LiteralPath (Join-Path $cache $manifest.llama_cpp.official_runtime.filename) -DestinationPath $runtimeDir -Force
-    Expand-Archive -LiteralPath (Join-Path $cache $manifest.llama_cpp.official_cuda.filename) -DestinationPath $runtimeDir -Force
+    $existingServer = Join-Path $runtimeDir 'llama-server.exe'
+    if (Test-Path -LiteralPath $existingServer -PathType Leaf) {
+        $existingVersion = & $existingServer --version 2>&1 | Out-String
+        if ($existingVersion -match '3cb7ffb') { return $existingServer }
+    }
+    $stage = Join-Path $InstallRoot ".runtime-official-stage-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Force -Path $stage | Out-Null
+        Expand-Archive -LiteralPath (Join-Path $cache $manifest.llama_cpp.official_runtime.filename) -DestinationPath $stage -Force
+        Expand-Archive -LiteralPath (Join-Path $cache $manifest.llama_cpp.official_cuda.filename) -DestinationPath $stage -Force
+        $server = Get-ChildItem $stage -Filter llama-server.exe -Recurse | Select-Object -First 1
+        if (-not $server) { throw 'Official runtime archive did not contain llama-server.exe.' }
+        if ($server.DirectoryName -ne $stage) {
+            Get-ChildItem $server.DirectoryName -File | Copy-Item -Destination $stage -Force
+        }
+        $version = & (Join-Path $stage 'llama-server.exe') --version 2>&1 | Out-String
+        if ($version -notmatch '3cb7ffb') { throw "Official runtime version mismatch:`n$version" }
+        Publish-Directory $stage $runtimeDir
+    } finally {
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    }
     $server = Get-ChildItem $runtimeDir -Filter llama-server.exe -Recurse | Select-Object -First 1
     if (-not $server) { throw 'Official runtime archive did not contain llama-server.exe.' }
-    if ($server.DirectoryName -ne $runtimeDir) {
-        Get-ChildItem $server.DirectoryName -File | Copy-Item -Destination $runtimeDir -Force
-    }
     return (Join-Path $runtimeDir 'llama-server.exe')
 }
 
 function Install-CustomRuntime {
     $runtimeDir = Join-Path $InstallRoot 'runtime-custom'
+    if (Test-Path -LiteralPath (Join-Path $runtimeDir 'build-manifest.json')) {
+        Assert-CustomRuntime $runtimeDir
+        return (Join-Path $runtimeDir 'llama-server.exe')
+    }
     if ($ReuseArtifactsFrom) {
         $reusable = Join-Path $ReuseArtifactsFrom 'runtime-custom'
         if (Test-Path -LiteralPath (Join-Path $reusable 'build-manifest.json')) {
             Assert-CustomRuntime $reusable
-            New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
-            Get-ChildItem -LiteralPath $reusable -File | ForEach-Object {
-                $target = Join-Path $runtimeDir $_.Name
-                if (Test-Path -LiteralPath $target) { return }
-                try { New-Item -ItemType HardLink -Path $target -Target $_.FullName -ErrorAction Stop | Out-Null }
-                catch { Copy-Item -LiteralPath $_.FullName -Destination $target }
+            $stage = Join-Path $InstallRoot ".runtime-custom-stage-$([Guid]::NewGuid().ToString('N'))"
+            try {
+                New-Item -ItemType Directory -Force -Path $stage | Out-Null
+                Get-ChildItem -LiteralPath $reusable -File | ForEach-Object {
+                    $target = Join-Path $stage $_.Name
+                    try { New-Item -ItemType HardLink -Path $target -Target $_.FullName -ErrorAction Stop | Out-Null }
+                    catch { Copy-Item -LiteralPath $_.FullName -Destination $target }
+                }
+                Assert-CustomRuntime $stage
+                Publish-Directory $stage $runtimeDir
+            } finally {
+                if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
             }
-            Assert-CustomRuntime $runtimeDir
             return (Join-Path $runtimeDir 'llama-server.exe')
         }
     }
@@ -222,29 +276,69 @@ function Install-CustomRuntime {
     if ($LASTEXITCODE -ne 0) { throw 'Custom runtime build failed.' }
 
     $built = Join-Path $build 'bin\Release'
-    & (Join-Path $repoRoot 'scripts\package-custom-runtime.ps1') -BuiltRuntime $built -Output $runtimeDir
-    Assert-CustomRuntime $runtimeDir
+    $stage = Join-Path $InstallRoot ".runtime-custom-stage-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        & (Join-Path $repoRoot 'scripts\package-custom-runtime.ps1') -BuiltRuntime $built -Output $stage
+        Assert-CustomRuntime $stage
+        Publish-Directory $stage $runtimeDir
+    } finally {
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    }
     return (Join-Path $runtimeDir 'llama-server.exe')
 }
 
-function Copy-ControlPlane {
-    foreach ($dir in @('scripts', 'launcher', 'profiles', 'logs')) {
-        New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot $dir) | Out-Null
+function Copy-ControlPlane([string]$DestinationRoot) {
+    foreach ($dir in @('scripts', 'launcher', 'profiles', 'config')) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $DestinationRoot $dir) | Out-Null
     }
-    Get-ChildItem (Join-Path $repoRoot 'runtime\scripts') -File | Copy-Item -Destination (Join-Path $InstallRoot 'scripts') -Force
-    Get-ChildItem (Join-Path $repoRoot 'runtime\launcher') -File | Copy-Item -Destination (Join-Path $InstallRoot 'launcher') -Force
-    Get-ChildItem (Join-Path $repoRoot 'config\profiles') -File | Copy-Item -Destination (Join-Path $InstallRoot 'profiles') -Force
-    Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $InstallRoot 'config\artifacts.json') -Force
+    foreach ($source in Get-ChildItem (Join-Path $repoRoot 'runtime\scripts') -File) {
+        Copy-AtomicFile $source.FullName (Join-Path $DestinationRoot "scripts\$($source.Name)")
+    }
+    foreach ($source in Get-ChildItem (Join-Path $repoRoot 'runtime\launcher') -File) {
+        Copy-AtomicFile $source.FullName (Join-Path $DestinationRoot "launcher\$($source.Name)")
+    }
+    foreach ($source in Get-ChildItem (Join-Path $repoRoot 'config\profiles') -File) {
+        Copy-AtomicFile $source.FullName (Join-Path $DestinationRoot "profiles\$($source.Name)")
+    }
+    Copy-AtomicFile $manifestPath (Join-Path $DestinationRoot 'config\artifacts.json')
 }
 
-function Write-SessionConfig([string]$OfficialServer, [string]$CustomServer) {
-    $configDir = Join-Path $InstallRoot 'config'
+function Write-ControlPlaneIdentity([string]$DestinationRoot) {
+    $entries = @()
+    foreach ($mapping in @(
+        [pscustomobject]@{ Source = (Join-Path $repoRoot 'runtime\scripts'); Destination = 'scripts' },
+        [pscustomobject]@{ Source = (Join-Path $repoRoot 'runtime\launcher'); Destination = 'launcher' },
+        [pscustomobject]@{ Source = (Join-Path $repoRoot 'config\profiles'); Destination = 'profiles' }
+    )) {
+        foreach ($source in Get-ChildItem -LiteralPath $mapping.Source -File | Sort-Object Name) {
+            $relative = "$($mapping.Destination)/$($source.Name)"
+            $installed = Join-Path $DestinationRoot ($relative -replace '/', '\')
+            $sourceHash = Get-Sha256 $source.FullName
+            if ((Get-Sha256 $installed) -ne $sourceHash) { throw "Copied control-plane file differs: $relative" }
+            $entries += [ordered]@{ path = $relative; sha256 = $sourceHash }
+        }
+    }
+    $artifactHash = Get-Sha256 $manifestPath
+    if ((Get-Sha256 (Join-Path $DestinationRoot 'config\artifacts.json')) -ne $artifactHash) { throw 'Copied artifact manifest differs.' }
+    $entries += [ordered]@{ path = 'config/artifacts.json'; sha256 = $artifactHash }
+    $generatedLauncher = Join-Path $DestinationRoot 'Open Local Qwen.exe'
+    if (Test-Path -LiteralPath $generatedLauncher -PathType Leaf) {
+        $entries += [ordered]@{ path = 'Open Local Qwen.exe'; sha256 = Get-Sha256 $generatedLauncher; generated = $true }
+    }
+    $commit = (& git -C $repoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+    $identity = [ordered]@{ schema = 1; source_commit = if ($commit) { $commit.Trim() } else { $null }; files = @($entries | Sort-Object path) }
+    Write-AtomicText (Join-Path $DestinationRoot 'config\control-plane.json') (($identity | ConvertTo-Json -Depth 6) + [Environment]::NewLine)
+}
+
+function Write-SessionConfig([string]$OfficialServer, [string]$CustomServer, [string]$DestinationRoot = $InstallRoot) {
+    $configDir = Join-Path $DestinationRoot 'config'
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
     $path = Join-Path $configDir 'session.json'
     $cleanup = [ordered]@{ enabled = $false }
-    if (Test-Path -LiteralPath $path) {
+    $existingPath = Join-Path $InstallRoot 'config\session.json'
+    if (Test-Path -LiteralPath $existingPath) {
         try {
-            $old = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+            $old = Get-Content -Raw -LiteralPath $existingPath | ConvertFrom-Json
             if ($old.cleanup) {
                 $cleanup = [ordered]@{
                     enabled = $true
@@ -254,8 +348,6 @@ function Write-SessionConfig([string]$OfficialServer, [string]$CustomServer) {
                     health = Get-PropertyValueForSetup $old.cleanup 'health' ''
                 }
             }
-            $backup = "$path.backup-$((Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss'))"
-            Copy-Item -LiteralPath $path -Destination $backup
         } catch { Write-Warning 'Existing session config could not be preserved; writing the canonical v3 config.' }
     }
     $selectedProfile = Get-Content -Raw -LiteralPath $profileSource | ConvertFrom-Json
@@ -283,7 +375,7 @@ function Write-SessionConfig([string]$OfficialServer, [string]$CustomServer) {
         cleanup = $cleanup
     }
     $json = $config | ConvertTo-Json -Depth 8
-    [IO.File]::WriteAllText($path, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    Write-AtomicText $path ($json + [Environment]::NewLine)
 }
 
 function Assert-Install {
@@ -308,24 +400,47 @@ function Assert-Install {
     Write-Host "Profile: $($session.active_profile) | Runtime: $($profileConfig.runtime)"
 }
 
-if ($VerifyOnly) {
+$setupLock = Enter-SetupLock $InstallRoot 30000
+try {
+    Repair-InterruptedSetupPublication $InstallRoot | Out-Null
+    if ($VerifyOnly) {
+        Assert-Install
+        return
+    }
+
+    Install-Tooling
+    foreach ($dir in @('config', 'models', 'logs', '.artifacts')) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot $dir) | Out-Null
+    }
+    Install-Artifact $manifest.model | Out-Null
+    if (-not $SkipVision) { Install-Artifact $manifest.mmproj | Out-Null }
+    Install-Artifact $manifest.chat_template | Out-Null
+    $officialServer = Install-OfficialRuntime
+    $customServer = if ($Runtime -eq 'Custom') { Install-CustomRuntime } else { $null }
+    $stage = Join-Path $InstallRoot ".control-plane-stage-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        Copy-ControlPlane $stage
+        Write-SessionConfig $officialServer $customServer $stage
+        $stageBuilder = Join-Path $stage 'scripts\build-launcher.ps1'
+        & $stageBuilder -Output (Join-Path $stage 'Open Local Qwen.exe') -NoShortcut
+        Write-ControlPlaneIdentity $stage
+        $items = @(
+            [pscustomobject]@{ stage='scripts'; destination='scripts' },
+            [pscustomobject]@{ stage='launcher'; destination='launcher' },
+            [pscustomobject]@{ stage='profiles'; destination='profiles' },
+            [pscustomobject]@{ stage='config\artifacts.json'; destination='config\artifacts.json' },
+            [pscustomobject]@{ stage='config\control-plane.json'; destination='config\control-plane.json' },
+            [pscustomobject]@{ stage='config\session.json'; destination='config\session.json' },
+            [pscustomobject]@{ stage='Open Local Qwen.exe'; destination='Open Local Qwen.exe' }
+        )
+        Publish-SetupBundle -InstallRoot $InstallRoot -StageRoot $stage -Items $items
+    } finally {
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    }
+
+    if (-not $NoShortcut) {
+        & (Join-Path $InstallRoot 'scripts\build-launcher.ps1') -Output (Join-Path $InstallRoot 'Open Local Qwen.exe') -ShortcutOnly
+    }
     Assert-Install
-    return
-}
-
-Install-Tooling
-foreach ($dir in @('config', 'models', 'logs', '.artifacts')) {
-    New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot $dir) | Out-Null
-}
-Install-Artifact $manifest.model | Out-Null
-if (-not $SkipVision) { Install-Artifact $manifest.mmproj | Out-Null }
-Install-Artifact $manifest.chat_template | Out-Null
-$officialServer = Install-OfficialRuntime
-$customServer = if ($Runtime -eq 'Custom') { Install-CustomRuntime } else { $null }
-Copy-ControlPlane
-Write-SessionConfig $officialServer $customServer
-
-$builder = Join-Path $InstallRoot 'scripts\build-launcher.ps1'
-if ($NoShortcut) { & $builder -NoShortcut } else { & $builder }
-Assert-Install
-Write-Host 'Setup complete. Launch "Open Local Qwen.exe" or a generated Desktop shortcut.'
+    Write-Host 'Setup complete. Launch "Open Local Qwen.exe" or a generated Desktop shortcut.'
+} finally { Exit-InterprocessLock $setupLock }

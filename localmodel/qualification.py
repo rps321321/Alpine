@@ -5,7 +5,8 @@ import math
 from pathlib import Path
 from typing import Any
 
-from .config import REPO_ROOT, read_json
+from .config import REPO_ROOT, read_json, sha256
+from .store import ResultStore
 
 
 def _inherited_policy(policy: dict[str, Any], target: str) -> dict[str, Any]:
@@ -81,3 +82,109 @@ def qualify_run_row(run: Any, target: str = "candidate") -> dict[str, Any]:
     result = qualify_summary(json.loads(run["summary_json"]), target)
     result.update({"run_id": run["id"], "profile": run["profile"], "run_status": run["status"]})
     return result
+
+
+def _run_identity(run: Any) -> dict[str, Any]:
+    config = json.loads(run["config_json"])
+    launch = config.get("launch", {})
+    return {
+        "profile": run["profile"],
+        "model_sha256": run["model_sha256"],
+        "backend_commit": run["backend_commit"],
+        "profile_sha256": launch.get("profile_sha256"),
+    }
+
+
+def _identity_matches(expected: dict[str, Any], observed: dict[str, Any]) -> bool:
+    return all(observed.get(key) == value for key, value in expected.items())
+
+
+def _benchmark_evidence(
+    store: ResultStore,
+    expected_identity: dict[str, Any],
+    name: str,
+    kind: str,
+    benchmark_name: str,
+) -> dict[str, Any]:
+    candidates = [
+        row for row in store.runs([str(expected_identity["profile"])])
+        if row["kind"] == kind and row["status"] == "passed"
+    ]
+    relevant: list[Any] = []
+    for row in candidates:
+        config = json.loads(row["config_json"])
+        if config.get("benchmark", {}).get("name") == benchmark_name:
+            relevant.append(row)
+    for row in relevant:
+        if _identity_matches(expected_identity, _run_identity(row)):
+            benchmark = json.loads(row["config_json"]).get("benchmark", {})
+            return {
+                "name": name,
+                "status": "satisfied",
+                "run_id": row["id"],
+                "benchmark_identity": {
+                    key: benchmark.get(key) for key in ("name", "schema", "sha256", "suite_sha256") if benchmark.get(key) is not None
+                },
+            }
+    if relevant:
+        return {
+            "name": name,
+            "status": "identity-mismatched",
+            "run_ids": [row["id"] for row in relevant],
+            "expected_identity": expected_identity,
+        }
+    return {"name": name, "status": "missing"}
+
+
+def _artifact_evidence(
+    artifacts: dict[str, Any],
+    expected_identity: dict[str, Any],
+    name: str,
+) -> dict[str, Any]:
+    artifact = artifacts.get(name)
+    if artifact is None:
+        return {"name": name, "status": "missing"}
+    path = Path(artifact["path"])
+    if not path.is_file() or not artifact["sha256"] or sha256(path) != artifact["sha256"]:
+        return {"name": name, "status": "stale", "path": str(path)}
+    try:
+        payload = read_json(path)
+    except (OSError, ValueError):
+        return {"name": name, "status": "stale", "path": str(path)}
+    if payload.get("kind") != name or payload.get("decision") != "pass":
+        return {"name": name, "status": "stale", "path": str(path)}
+    if not isinstance(payload.get("identity"), dict) or not _identity_matches(expected_identity, payload["identity"]):
+        return {"name": name, "status": "identity-mismatched", "path": str(path)}
+    if name == "operator-reviewed-capability-report" and not payload.get("reviewed_by"):
+        return {"name": name, "status": "missing", "reason": "explicit human reviewer is required"}
+    return {"name": name, "status": "satisfied", "path": str(path), "sha256": artifact["sha256"]}
+
+
+def qualify_run(store: ResultStore, run_id: str, target: str = "candidate") -> dict[str, Any]:
+    run = store.run(run_id)
+    base = qualify_run_row(run, target)
+    required = list(base["missing_external_evidence"])
+    if not required:
+        base["evidence"] = []
+        return base
+    expected_identity = _run_identity(run)
+    artifacts = {row["kind"]: row for row in store.artifacts(run_id)}
+    benchmark_requirements = {
+        "near-limit-context-stress": ("context", "context-needle"),
+        "golden-agent-task-pass": ("agent", "golden-agent"),
+    }
+    evidence: list[dict[str, Any]] = []
+    for name in required:
+        if name in benchmark_requirements:
+            kind, benchmark_name = benchmark_requirements[name]
+            evidence.append(_benchmark_evidence(store, expected_identity, name, kind, benchmark_name))
+        else:
+            evidence.append(_artifact_evidence(artifacts, expected_identity, name))
+    incomplete = [item["name"] for item in evidence if item["status"] != "satisfied"]
+    base.update({
+        "promotion_ready": bool(base["automated_pass"] and not incomplete),
+        "missing_external_evidence": incomplete,
+        "evidence": evidence,
+        "identity": expected_identity,
+    })
+    return base

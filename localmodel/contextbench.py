@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import gzip
 import json
-import shutil
 import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import REPO_ROOT, artifact_manifest, git_commit, install_profile, install_session, read_json, sha256
-from .microbench import http_ok, listener_process_path, run_powershell, stream_completion, summarize, utc_now
-from .store import ResultStore
+from .config import REPO_ROOT, artifact_manifest, git_commit, read_json, resolve_session, sha256
+from .inference import stream_completion
+from .lifecycle import BenchmarkLifecycle, PowerShellSessionAdapter, summarize_samples, utc_now
 from .telemetry import GpuTelemetry, process_memory
 
 
@@ -78,13 +77,12 @@ def run_contextbenchmark(
     if runs < 1 or warmups < 0:
         raise ValueError("runs must be positive and warmups non-negative")
     install_root = install_root.resolve()
-    session = install_session(install_root)
-    profile = install_profile(install_root, profile_name)
+    resolved = resolve_session(install_root, profile_name, require_runtime=True)
+    session = resolved.session
+    profile = resolved.profile
     artifacts = artifact_manifest()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
-    raw_dir = REPO_ROOT / "results" / "runs" / run_id
-    raw_dir.mkdir(parents=True, exist_ok=False)
-    store = ResultStore(REPO_ROOT / "results" / "results.sqlite3")
+    result_root = REPO_ROOT / "results"
     record = {
         "id": run_id,
         "started_at": utc_now(),
@@ -109,98 +107,61 @@ def run_contextbenchmark(
         },
         "notes": notes,
     }
-    store.create_run(record)
-    started_server = False
     samples: list[dict[str, Any]] = []
-    try:
-        health = f"http://{session['host']}:{session['port']}/health"
-        runtime_name = profile.get("runtime")
-        configured_value = session.get("runtimes", {}).get(runtime_name) or session["llama_server"]
-        configured_server = str(Path(configured_value).resolve()).casefold()
-        listener = listener_process_path(int(session["port"]))
-        if http_ok(health):
-            if not listener or str(Path(listener).resolve()).casefold() != configured_server:
-                raise RuntimeError(f"port {session['port']} belongs to another runtime: {listener}")
-        else:
-            started = run_powershell(install_root / "scripts" / "start-session.ps1", "-Profile", profile_name)
-            (raw_dir / "start.stdout.log").write_text(started.stdout, encoding="utf-8")
-            (raw_dir / "start.stderr.log").write_text(started.stderr, encoding="utf-8")
-            if started.returncode:
-                raise RuntimeError(f"server start failed: {started.stderr or started.stdout}")
-            started_server = True
-
+    adapter = PowerShellSessionAdapter(install_root)
+    with BenchmarkLifecycle(
+        result_root,
+        record,
+        adapter,
+        keep_server=keep_server,
+        inference_lease_path=install_root / "logs" / "inference.lease",
+        session_log_root=install_root / "logs",
+    ) as lifecycle:
         state = read_json(Path(session["state_file"]))
-        if state.get("profile") != profile_name:
-            raise RuntimeError(f"running profile is {state.get('profile')}, requested {profile_name}")
-        record["config"]["launch"] = {
-            "runtime": state.get("runtime"), "server": state.get("server"),
-            "profile_sha256": state.get("profile_sha256"), "arguments": state.get("arguments"),
-            "environment": state.get("environment"), "fallback": state.get("fallback"),
-        }
-        store.update_config(run_id, record["config"])
-        (raw_dir / "run.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        api_key = Path(session["api_key_file"]).read_text(encoding="utf-8-sig").strip()
-        base_url = f"http://{session['host']}:{session['port']}"
+        api_key = resolved.api_key_file.read_text(encoding="utf-8-sig").strip()
+        base_url = resolved.base_url
         target = int(int(profile["context"]) * ratio)
         prompt, actual_tokens = prompt_near_tokens(base_url, api_key, target)
-        with gzip.open(raw_dir / "prompt.txt.gz", "wt", encoding="utf-8") as output:
+        with gzip.open(lifecycle.raw_dir / "prompt.txt.gz", "wt", encoding="utf-8") as output:
             output.write(prompt)
         expected = "|".join(NEEDLES)
         workload = {"prompt": prompt, "n_predict": 64, "ignore_eos": False}
-        jsonl_path = raw_dir / "samples.jsonl"
-        with jsonl_path.open("w", encoding="utf-8") as jsonl:
-            for offset in range(warmups + runs):
-                warmup = offset < warmups
-                iteration = offset + 1 if warmup else offset - warmups + 1
-                telemetry = GpuTelemetry()
-                telemetry.start()
-                try:
-                    sample = stream_completion(base_url, api_key, workload)
-                finally:
-                    sample_telemetry = telemetry.stop()
-                memory = process_memory(int(state["pid"]))
-                sample.update({
-                    "workload": f"context-needle-{int(ratio * 100)}",
-                    "iteration": iteration,
-                    "warmup": warmup,
-                    "quality_pass": sample["content"].strip() == expected,
-                    "target_prompt_tokens": target,
-                    "actual_prompt_tokens": actual_tokens,
-                    "expected_sha256": __import__("hashlib").sha256(expected.encode()).hexdigest(),
-                    "telemetry": sample_telemetry,
-                    "process_working_set_mib": memory["working_set_mib"],
-                    "process_private_mib": memory["private_mib"],
-                    "process_page_faults": memory["page_faults"],
-                })
-                samples.append(sample)
-                store.add_sample(run_id, sample)
-                jsonl.write(json.dumps(sample, sort_keys=True) + "\n")
-                prefill_text = "n/a" if sample["prefill_tps"] is None else f"{sample['prefill_tps']:.2f}"
-                ttft_text = "n/a" if sample["ttft_ms"] is None else f"{sample['ttft_ms']:.1f}"
-                print(
-                    f"context {actual_tokens}/{profile['context']} run {iteration}: "
-                    f"prefill={prefill_text} tok/s ttft={ttft_text} ms pass={sample['quality_pass']}",
-                    flush=True,
-                )
-        summary = summarize(samples)
+        for offset in range(warmups + runs):
+            warmup = offset < warmups
+            iteration = offset + 1 if warmup else offset - warmups + 1
+            telemetry = GpuTelemetry()
+            telemetry.start()
+            try:
+                sample = stream_completion(base_url, api_key, workload)
+            finally:
+                sample_telemetry = telemetry.stop()
+            memory = process_memory(int(state["pid"]))
+            sample.update({
+                "workload": f"context-needle-{int(ratio * 100)}",
+                "iteration": iteration,
+                "warmup": warmup,
+                "quality_pass": sample["content"].strip() == expected,
+                "target_prompt_tokens": target,
+                "actual_prompt_tokens": actual_tokens,
+                "expected_sha256": __import__("hashlib").sha256(expected.encode()).hexdigest(),
+                "telemetry": sample_telemetry,
+                "process_working_set_mib": memory["working_set_mib"],
+                "process_private_mib": memory["private_mib"],
+                "process_page_faults": memory["page_faults"],
+            })
+            samples.append(sample)
+            lifecycle.record_sample(sample)
+            prefill_text = "n/a" if sample["prefill_tps"] is None else f"{sample['prefill_tps']:.2f}"
+            ttft_text = "n/a" if sample["ttft_ms"] is None else f"{sample['ttft_ms']:.1f}"
+            print(
+                f"context {actual_tokens}/{profile['context']} run {iteration}: "
+                f"prefill={prefill_text} tok/s ttft={ttft_text} ms pass={sample['quality_pass']}",
+                flush=True,
+            )
+        lifecycle.flush_samples()
+        summary = summarize_samples(samples)
         summary["target_prompt_tokens"] = target
         summary["actual_prompt_tokens"] = actual_tokens
-        (raw_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-        for name in ("session-out.log", "session-err.log"):
-            source = install_root / "logs" / name
-            if source.exists():
-                shutil.copy2(source, raw_dir / name)
         status = "passed" if summary["all_quality_pass"] else "failed-quality"
-        store.finish_run(run_id, utc_now(), status, summary)
-        return run_id, summary
-    except BaseException as exc:
-        failure = {"error": type(exc).__name__, "message": str(exc)}
-        (raw_dir / "failure.json").write_text(json.dumps(failure, indent=2) + "\n", encoding="utf-8")
-        store.finish_run(run_id, utc_now(), "error", failure)
-        raise
-    finally:
-        if started_server and not keep_server:
-            stopped = run_powershell(install_root / "scripts" / "stop-session.ps1")
-            (raw_dir / "stop.stdout.log").write_text(stopped.stdout, encoding="utf-8")
-            (raw_dir / "stop.stderr.log").write_text(stopped.stderr, encoding="utf-8")
-        store.close()
+        lifecycle.complete(summary, status)
+    return run_id, summary

@@ -14,7 +14,7 @@ The default install root is `C:\Users\<you>\local-models`, and the default selec
 .\setup.ps1 -Profile stable-16k
 ```
 
-Setup verifies or resumably downloads the pinned model, projector, official Qwen template, official `llama.cpp` release, and CUDA DLL archive. The custom profiles use the exact pinned source commit plus the repository patch. Existing session configuration is backed up; invalid downloads are moved aside rather than destroyed.
+Setup verifies or resumably downloads the pinned model, projector, official Qwen template, official `llama.cpp` release, and CUDA DLL archive. The custom profiles use the exact pinned source commit plus the repository patch. One installation-scoped lock serializes setup. Runtimes and the complete control plane are staged before publication; a recovery journal restores the prior usable installation if publication is interrupted. Invalid downloads are preserved with unique names rather than destroyed.
 
 On a new Windows installation, permit setup to install the pinned prerequisites:
 
@@ -24,7 +24,7 @@ On a new Windows installation, permit setup to install the pinned prerequisites:
 
 This may install Git, CMake 4.2.3, CUDA 13.2, Visual Studio 2022 Build Tools, Node.js if needed, and OpenCode 1.18.18. Review this system-wide operation before running it.
 
-Large artifact downloads are verified by byte size and SHA-256 from `config/artifacts.json`. The installer is safe to rerun and resumes `.part` downloads.
+Large artifact downloads are verified by byte size and SHA-256 from `config/artifacts.json`. The installer is safe to rerun and resumes `.part` downloads. A bounded "another setup transaction owns" error means a setup is still active; rerunning after an owner crash repairs any journaled partial publication first.
 
 ## Launch
 
@@ -73,7 +73,7 @@ fast-32k     candidate     32K request-local n-gram profile
 long-64k     experimental  research only; failed first near-limit quality gate
 ```
 
-Apply changes the selected default and preserves a timestamped session-config backup:
+Apply validates the installed Profile/runtime, changes the selected default atomically under a Session Config lock, and preserves a uniquely named backup:
 
 ```powershell
 .\localmodel.ps1 apply stable-16k
@@ -95,6 +95,8 @@ Profile status is a lifecycle claim, not a menu label. See `config/promotion-pol
 
 SQLite lives at `results/results.sqlite3`; each run keeps raw JSONL, outputs, logs, configurations and compressed long prompts under `results/runs/<run-id>`. Generated evidence is local by default. Summary reports are regeneratable.
 
+Measured runs hold an inference-capacity lease tied to their exact Inference Session identity. A second benchmark or unrelated interactive launcher receives a visible busy refusal instead of silently queueing and contaminating timings. The agent benchmark's own launcher carries the governing lease token.
+
 If a harness is interrupted after producing evidence:
 
 ```powershell
@@ -102,6 +104,15 @@ If a harness is interrupted after producing evidence:
 ```
 
 This classifies preserved evidence; it does not delete or invent samples.
+
+Validated/production qualification can correlate context and agent runs with the exact Profile, model, runtime, Profile-file hash, and benchmark identity. Record non-benchmark evidence as a hashed JSON artifact:
+
+```powershell
+.\localmodel.ps1 record-evidence <run-id> --kind same-process-50-request-greedy-stability --path C:\path\to\evidence.json
+.\localmodel.ps1 record-evidence <run-id> --kind operator-reviewed-capability-report --path C:\path\to\review.json --reviewed-by "operator name"
+```
+
+Each artifact must contain its `kind`, `decision: "pass"`, and the matching run identity. Capability evidence also needs the same explicit `reviewed_by` value; an automated benchmark cannot silently supply the human gate.
 
 ## OpenCode context and permissions
 

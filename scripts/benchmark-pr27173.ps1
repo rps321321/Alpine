@@ -6,26 +6,36 @@ param(
     [ValidateSet('Novel', 'Repeat')]
     [string]$Workload = 'Novel',
 
-    [ValidateRange(8192, 262144)]
-    [int]$Context = 16384,
+    [int]$Context = 0,
 
     [ValidateRange(0, 63)]
     [int]$TensorCpuThroughBlock = 43,
 
-    [string[]]$Labels
+    [string[]]$Labels,
+    [string]$InstallRoot = (Join-Path $env:USERPROFILE 'local-models'),
+    [string]$Profile,
+    [string]$PrServer,
+    [switch]$ResolveOnly
 )
 
 $ErrorActionPreference = 'Stop'
-$root = '%USERPROFILE%\local-models'
-$officialServer = Join-Path $root 'runtime\llama-server.exe'
-$prServer = Join-Path $root 'src\llama.cpp-pr27173\build-cuda132\bin\Release\llama-server.exe'
-$customServer = Join-Path $root 'src\llama.cpp-b10453-ngram-reset\build-cuda132\bin\Release\llama-server.exe'
-$model = Join-Path $root 'models\Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf'
-$template = Join-Path $root 'config\qwen3.8-official-chat-template.jinja'
-$logs = Join-Path $root 'logs'
-$stopScript = Join-Path $root 'scripts\stop-session.ps1'
-$startScript = Join-Path $root 'scripts\start-session.ps1'
-$baseUrl = 'http://127.0.0.1:8100'
+. (Join-Path $PSScriptRoot 'benchmark-common.ps1')
+$benchmark = Get-BenchmarkContext $InstallRoot $Profile
+if ($ResolveOnly) { Write-BenchmarkResolution $benchmark; return }
+$root = $benchmark.InstallRoot
+$Profile = $benchmark.ProfileName
+$profileConfig = $benchmark.Profile
+if ($Context -eq 0) { $Context = [int]$profileConfig.context }
+if ($Context -lt 8192 -or $Context -gt 262144) { throw 'Context must be between 8192 and 262144.' }
+$officialServer = [string]$benchmark.Session.runtimes.official
+$customServer = [string]$benchmark.Session.runtimes.custom
+if (-not $PrServer) { $PrServer = Join-Path $root 'src\llama.cpp-pr27173\build-cuda132\bin\Release\llama-server.exe' }
+$model = $benchmark.Model
+$template = $benchmark.ChatTemplate
+$logs = $benchmark.Logs
+$stopScript = $benchmark.StopScript
+$startScript = $benchmark.StartScript
+$baseUrl = $benchmark.BaseUrl
 $blockPattern = ((0..$TensorCpuThroughBlock) -join '|')
 $tensorOverride = "blk\.($blockPattern)\.ffn_.*=CPU"
 
@@ -63,12 +73,12 @@ $variants = @(
     [pscustomobject]@{ label = 'custom-mtp3-control'; server = $customServer; depth = 3; ngram = $false; chain = $false; reset_ngram = $false; sub = 0; pool = 0 },
     [pscustomobject]@{ label = 'custom-mtp3-ngram-shared'; server = $customServer; depth = 3; ngram = $true; chain = $false; reset_ngram = $false; sub = 0; pool = 0 },
     [pscustomobject]@{ label = 'custom-mtp3-ngram-reset'; server = $customServer; depth = 3; ngram = $true; chain = $false; reset_ngram = $true; sub = 0; pool = 0 },
-    [pscustomobject]@{ label = 'pr-none'; server = $prServer; depth = 0; ngram = $false; chain = $false; sub = 0; pool = 0 },
-    [pscustomobject]@{ label = 'pr-mtp3-control'; server = $prServer; depth = 3; ngram = $false; chain = $false; sub = 0; pool = 0 },
-    [pscustomobject]@{ label = 'pr-chain-d3-sub32768'; server = $prServer; depth = 3; ngram = $false; chain = $true; sub = 32768; pool = 8 },
-    [pscustomobject]@{ label = 'pr-chain-d3-sub98304'; server = $prServer; depth = 3; ngram = $false; chain = $true; sub = 98304; pool = 8 },
-    [pscustomobject]@{ label = 'pr-chain-d5-sub98304'; server = $prServer; depth = 5; ngram = $false; chain = $true; sub = 98304; pool = 8 },
-    [pscustomobject]@{ label = 'pr-chain-d8-sub98304'; server = $prServer; depth = 8; ngram = $false; chain = $true; sub = 98304; pool = 8 }
+    [pscustomobject]@{ label = 'pr-none'; server = $PrServer; depth = 0; ngram = $false; chain = $false; sub = 0; pool = 0 },
+    [pscustomobject]@{ label = 'pr-mtp3-control'; server = $PrServer; depth = 3; ngram = $false; chain = $false; sub = 0; pool = 0 },
+    [pscustomobject]@{ label = 'pr-chain-d3-sub32768'; server = $PrServer; depth = 3; ngram = $false; chain = $true; sub = 32768; pool = 8 },
+    [pscustomobject]@{ label = 'pr-chain-d3-sub98304'; server = $PrServer; depth = 3; ngram = $false; chain = $true; sub = 98304; pool = 8 },
+    [pscustomobject]@{ label = 'pr-chain-d5-sub98304'; server = $PrServer; depth = 5; ngram = $false; chain = $true; sub = 98304; pool = 8 },
+    [pscustomobject]@{ label = 'pr-chain-d8-sub98304'; server = $PrServer; depth = 8; ngram = $false; chain = $true; sub = 98304; pool = 8 }
 )
 if ($Labels) {
     $variants = @($variants | Where-Object { $_.label -in $Labels })
@@ -91,7 +101,7 @@ function Wait-Health([Diagnostics.Process]$Process) {
 function Wait-PortFree {
     $deadline = (Get-Date).AddSeconds(30)
     do {
-        if (-not (Get-NetTCPConnection -LocalPort 8100 -State Listen -ErrorAction SilentlyContinue)) { return }
+        if (-not (Get-NetTCPConnection -LocalPort $benchmark.Port -State Listen -ErrorAction SilentlyContinue)) { return }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
     throw 'Port 8100 did not become free.'
@@ -150,10 +160,11 @@ try {
         }
 
         $args = @(
-            '-m', $model, '--host', '127.0.0.1', '--port', '8100', '-c', "$Context", '-np', '1',
-            '--threads', '16', '--threads-batch', '16', '-b', '2048', '-ub', '768',
+            '-m', $model, '--host', $benchmark.Host, '--port', [string]$benchmark.Port, '-c', "$Context", '-np', [string]$profileConfig.parallel,
+            '--threads', [string]$profileConfig.threads, '--threads-batch', [string]$profileConfig.threads,
+            '-b', [string]$profileConfig.batch_size, '-ub', [string]$profileConfig.ubatch_size,
             '--no-webui', '--jinja', '--chat-template-file', $template,
-            '-fa', 'on', '-ctk', 'q8_0', '-ctv', 'q8_0', '--reasoning', 'off',
+            '-fa', 'on', '-ctk', [string]$profileConfig.kv_cache, '-ctv', [string]$profileConfig.kv_cache, '--reasoning', 'off',
             '-ngl', 'all', '--fit', 'off', '-ot', $tensorOverride, '--load-mode', 'none', '-lv', '4'
         )
         if ($variant.depth -gt 0 -or $variant.ngram) {
@@ -229,7 +240,7 @@ finally {
         $active.WaitForExit(10000) | Out-Null
         Wait-PortFree
     }
-    & $startScript
+    & $startScript -Profile $Profile
 }
 
 $results | ConvertTo-Json -Depth 4

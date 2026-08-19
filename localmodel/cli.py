@@ -2,20 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-from .config import REPO_ROOT, artifact_manifest, install_session, powershell, profiles, read_json, sha256
-from .agentbench import _parse_events, run_agentbenchmark
+from .config import ConfigError, REPO_ROOT, artifact_manifest, powershell, profiles, read_json, resolve_session, select_active_profile, sha256
+from .controlplane import verify_control_plane
+from .agentbench import run_agentbenchmark
 from .contextbench import run_contextbenchmark
-from .microbench import run_microbenchmark, summarize
+from .lifecycle import reconcile_run
+from .microbench import run_microbenchmark
 from .report import comparison_markdown, latest_profile_rows, write_comparison
-from .qualification import qualify_run_row
+from .qualification import qualify_run
 from .store import ResultStore
 
 
@@ -46,8 +45,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"repo: {REPO_ROOT}")
     print(f"install: {root}")
     try:
-        session = install_session(root)
-    except (OSError, json.JSONDecodeError) as exc:
+        resolved = resolve_session(root, require_runtime=True)
+        session = resolved.session
+    except ConfigError as exc:
         print(f"FAIL session config: {exc}")
         return 1
     manifest = artifact_manifest()
@@ -68,9 +68,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             problems.append(f"{label} hash mismatch: {path}")
             continue
         print(f"OK {label}: {path} ({'hash' if args.deep else 'size'} verified)")
-    active_profile = read_json(root / "profiles" / f"{session['active_profile']}.json")
-    server_value = session.get("runtimes", {}).get(active_profile.get("runtime")) or session["llama_server"]
-    server = Path(server_value)
+    server = resolved.server
     if not server.is_file():
         problems.append(f"llama-server missing: {server}")
     else:
@@ -79,6 +77,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"OK backend: {identity}")
         if "3cb7ffb" not in identity:
             problems.append("backend is not pinned to llama.cpp commit 3cb7ffb")
+    try:
+        control_plane = verify_control_plane(REPO_ROOT, root)
+        for path in control_plane["missing"]:
+            problems.append(f"control-plane file missing: {path}; rerun setup")
+        for path in control_plane["modified"]:
+            problems.append(f"control-plane file modified: {path}; inspect before rerunning setup")
+        for path in control_plane["stale"]:
+            problems.append(f"control-plane file stale: {path}; rerun setup")
+        if control_plane["exact_match"]:
+            print(f"OK control plane: {control_plane['identity_path']}")
+    except ConfigError as exc:
+        problems.append(f"control-plane identity unavailable: {exc}; rerun setup")
     opencode = shutil.which("opencode")
     if not opencode:
         problems.append("opencode not found on PATH")
@@ -167,11 +177,33 @@ def cmd_runs(args: argparse.Namespace) -> int:
 def cmd_qualify(args: argparse.Namespace) -> int:
     store = ResultStore(REPO_ROOT / "results" / "results.sqlite3")
     try:
-        result = qualify_run_row(store.run(args.run_id), args.target)
+        result = qualify_run(store, args.run_id, args.target)
     finally:
         store.close()
     print(json.dumps(result, indent=2))
     return 0 if result["promotion_ready"] else 2
+
+
+def cmd_record_evidence(args: argparse.Namespace) -> int:
+    path = args.path.resolve()
+    if not path.is_file():
+        raise SystemExit(f"evidence file missing: {path}")
+    payload = read_json(path)
+    if payload.get("kind") != args.kind or payload.get("decision") != "pass":
+        raise SystemExit("evidence JSON must name the selected kind and contain decision=pass")
+    if args.kind == "operator-reviewed-capability-report":
+        reviewer = payload.get("reviewed_by")
+        if not args.reviewed_by or reviewer != args.reviewed_by:
+            raise SystemExit("capability evidence requires an explicit matching --reviewed-by operator")
+    store = ResultStore(REPO_ROOT / "results" / "results.sqlite3")
+    try:
+        if store.run(args.run_id) is None:
+            raise SystemExit(f"run not found: {args.run_id}")
+        store.add_artifact(args.run_id, args.kind, str(path), sha256(path))
+    finally:
+        store.close()
+    print(json.dumps({"run_id": args.run_id, "kind": args.kind, "path": str(path), "sha256": sha256(path)}, indent=2))
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -182,53 +214,16 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_reconcile(args: argparse.Namespace) -> int:
-    store = ResultStore(REPO_ROOT / "results" / "results.sqlite3")
-    try:
-        row = store.run(args.run_id)
-        if not row:
-            raise SystemExit(f"run not found: {args.run_id}")
-        raw_dir = REPO_ROOT / "results" / "runs" / args.run_id
-        samples_path = raw_dir / "samples.jsonl"
-        prior = {"status": row["status"]}
-        failure_path = raw_dir / "failure.json"
-        if failure_path.is_file():
-            prior["failure"] = read_json(failure_path)
-        if row["kind"] == "agent" and (raw_dir / "summary.json").is_file():
-            summary = read_json(raw_dir / "summary.json")
-            summary.update(_parse_events((raw_dir / "opencode.stdout.jsonl").read_text(encoding="utf-8")))
-            (raw_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-            status = "passed" if summary.get("success") else "failed-quality"
-            store.finish_run(args.run_id, datetime.now(timezone.utc).isoformat(), status, summary)
-            print(json.dumps({"run_id": args.run_id, "status": status, "summary": summary}, indent=2))
-            return 0
-        samples = []
-        if samples_path.is_file():
-            samples = [json.loads(line) for line in samples_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if samples:
-            summary = summarize(samples)
-            summary["reconciled_from"] = prior
-            status = "passed" if summary["all_quality_pass"] else "failed-quality"
-            (raw_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-        else:
-            summary = {"reconciled_from": prior, "error": "interrupted before any sample completed"}
-            status = "interrupted"
-        store.finish_run(args.run_id, datetime.now(timezone.utc).isoformat(), status, summary)
-    finally:
-        store.close()
-    print(json.dumps({"run_id": args.run_id, "status": status, "summary": summary}, indent=2))
+    result = reconcile_run(REPO_ROOT / "results", args.run_id)
+    print(json.dumps(result, indent=2))
     return 0
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
-    available = profiles()
-    if args.profile not in available:
-        raise SystemExit(f"unknown profile: {args.profile}")
-    path = args.install_root / "config" / "session.json"
-    session = read_json(path)
-    backup = path.with_name(f"session.json.backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}")
-    shutil.copy2(path, backup)
-    session["active_profile"] = args.profile
-    path.write_text(json.dumps(session, indent=2) + "\n", encoding="utf-8")
+    try:
+        backup = select_active_profile(args.install_root, args.profile)
+    except ConfigError as exc:
+        raise SystemExit(str(exc)) from exc
     print(f"active profile: {args.profile} (backup: {backup})")
     return 0
 
@@ -317,6 +312,17 @@ def build_parser() -> argparse.ArgumentParser:
     qualify.add_argument("run_id")
     qualify.add_argument("--target", choices=["candidate", "validated", "production"], default="candidate")
     qualify.set_defaults(func=cmd_qualify)
+    evidence = sub.add_parser("record-evidence")
+    evidence.add_argument("run_id")
+    evidence.add_argument("--kind", required=True, choices=(
+        "same-process-50-request-greedy-stability",
+        "ten-clean-restart-greedy-stability",
+        "operator-reviewed-capability-report",
+        "rollback-profile-available",
+    ))
+    evidence.add_argument("--path", required=True, type=Path)
+    evidence.add_argument("--reviewed-by")
+    evidence.set_defaults(func=cmd_record_evidence)
     apply = sub.add_parser("apply")
     apply.add_argument("profile", choices=sorted(profiles()))
     apply.set_defaults(func=cmd_apply)

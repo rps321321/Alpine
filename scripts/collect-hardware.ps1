@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repoRoot = Split-Path $PSScriptRoot -Parent
+. (Join-Path $repoRoot 'runtime\scripts\lib.ps1')
 if (-not $Output) {
     $inventory = Join-Path $repoRoot 'inventory'
     New-Item -ItemType Directory -Force -Path $inventory | Out-Null
@@ -90,15 +91,15 @@ if (Test-Path -LiteralPath $cudaRoot) {
 $backend = $null
 $sessionPath = Join-Path $InstallRoot 'config\session.json'
 if (Test-Path -LiteralPath $sessionPath) {
-    $session = Get-Content -Raw -LiteralPath $sessionPath | ConvertFrom-Json
-    $serverPath = if ($session.PSObject.Properties['llama_server']) { $session.llama_server } elseif ($session.runtime) { $session.runtime.llama_server } else { $null }
-    if ($serverPath -and (Test-Path -LiteralPath $serverPath)) {
+    try {
+        $resolved = Get-ResolvedSession -InstallRoot $InstallRoot -RequireRuntime
+        $serverPath = [string]$resolved.ServerPath
         $backend = [ordered]@{
             path = $serverPath
             version = Get-CommandText $serverPath @('--version')
             sha256 = (Get-FileHash -LiteralPath $serverPath -Algorithm SHA256).Hash.ToLowerInvariant()
         }
-    }
+    } catch { throw "Installed backend could not be resolved from Session Config: $($_.Exception.Message)" }
 }
 
 $repoCommit = Get-CommandText 'git.exe' @('-C', $repoRoot, 'rev-parse', 'HEAD')

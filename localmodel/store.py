@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
 SCHEMA = """
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
     started_at TEXT NOT NULL,
@@ -59,15 +58,52 @@ class ResultStore:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self.connection = sqlite3.connect(path)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.executescript(SCHEMA)
+        self.connection: sqlite3.Connection | None = None
+        self._pending_samples: list[tuple[Any, ...]] = []
+        try:
+            connection = sqlite3.connect(path, timeout=30.0)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=30000")
+            connection.execute("PRAGMA foreign_keys=ON")
+            deadline = time.monotonic() + 30.0
+            while True:
+                try:
+                    journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+                    if journal_mode != "wal":
+                        connection.execute("PRAGMA journal_mode=WAL")
+                    connection.executescript(SCHEMA)
+                    break
+                except sqlite3.OperationalError as error:
+                    connection.rollback()
+                    if (
+                        not any(marker in str(error).lower() for marker in ("locked", "busy"))
+                        or time.monotonic() >= deadline
+                    ):
+                        raise
+                    time.sleep(0.05)
+            self.connection = connection
+        except BaseException:
+            if self.connection is not None:
+                self.connection.close()
+            elif "connection" in locals():
+                connection.close()
+            raise
+
+    def _connection(self) -> sqlite3.Connection:
+        if self.connection is None:
+            raise RuntimeError("ResultStore is closed")
+        return self.connection
 
     def close(self) -> None:
-        self.connection.close()
+        if self.connection is not None:
+            self.connection.rollback()
+            self._pending_samples.clear()
+            self.connection.close()
+            self.connection = None
 
     def create_run(self, record: dict[str, Any]) -> None:
-        self.connection.execute(
+        connection = self._connection()
+        connection.execute(
             """INSERT INTO runs
             (id, started_at, status, kind, profile, git_commit, hardware_manifest,
              model_sha256, backend_commit, config_json, notes)
@@ -79,48 +115,119 @@ class ResultStore:
                 json.dumps(record["config"], sort_keys=True), record.get("notes"),
             ),
         )
-        self.connection.commit()
+        connection.commit()
 
     def add_sample(self, run_id: str, sample: dict[str, Any]) -> None:
-        self.connection.execute(
-            """INSERT INTO samples VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                run_id, sample["workload"], sample["iteration"], int(sample.get("warmup", False)),
-                sample.get("prompt_tokens"), sample.get("generated_tokens"), sample.get("prefill_tps"),
-                sample.get("decode_tps"), sample.get("ttft_ms"), sample.get("latency_ms"),
-                sample.get("output_sha256"), None if sample.get("quality_pass") is None else int(sample["quality_pass"]),
-                sample.get("telemetry", {}).get("vram_peak_mib"),
-                sample.get("telemetry", {}).get("gpu_util_mean"),
-                sample.get("telemetry", {}).get("gpu_power_mean_w"),
-                sample.get("telemetry", {}).get("gpu_temp_max_c"),
-                sample.get("process_working_set_mib"), json.dumps(sample, sort_keys=True),
-            ),
+        self._pending_samples.append(self._sample_row(run_id, sample))
+
+    @staticmethod
+    def _sample_row(run_id: str, sample: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            run_id, sample["workload"], sample["iteration"], int(sample.get("warmup", False)),
+            sample.get("prompt_tokens"), sample.get("generated_tokens"), sample.get("prefill_tps"),
+            sample.get("decode_tps"), sample.get("ttft_ms"), sample.get("latency_ms"),
+            sample.get("output_sha256"), None if sample.get("quality_pass") is None else int(sample["quality_pass"]),
+            sample.get("telemetry", {}).get("vram_peak_mib"),
+            sample.get("telemetry", {}).get("gpu_util_mean"),
+            sample.get("telemetry", {}).get("gpu_power_mean_w"),
+            sample.get("telemetry", {}).get("gpu_temp_max_c"),
+            sample.get("process_working_set_mib"), json.dumps(sample, sort_keys=True),
         )
-        self.connection.commit()
+
+    def restore_samples(self, run_id: str, samples: list[dict[str, Any]]) -> None:
+        """Idempotently restore durable rows from append-only raw evidence."""
+        if not samples:
+            return
+        connection = self._connection()
+        try:
+            connection.executemany(
+                """INSERT OR IGNORE INTO samples VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [self._sample_row(run_id, sample) for sample in samples],
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def flush_samples(self) -> None:
+        if not self._pending_samples:
+            return
+        connection = self._connection()
+        pending = list(self._pending_samples)
+        try:
+            connection.executemany(
+                """INSERT INTO samples VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                pending,
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            del self._pending_samples[: len(pending)]
 
     def update_config(self, run_id: str, config: dict[str, Any]) -> None:
-        self.connection.execute(
+        connection = self._connection()
+        connection.execute(
             "UPDATE runs SET config_json=? WHERE id=?",
             (json.dumps(config, sort_keys=True), run_id),
         )
-        self.connection.commit()
+        connection.commit()
 
     def finish_run(self, run_id: str, finished_at: str, status: str, summary: dict[str, Any]) -> None:
-        self.connection.execute(
-            "UPDATE runs SET finished_at=?, status=?, summary_json=? WHERE id=?",
-            (finished_at, status, json.dumps(summary, sort_keys=True), run_id),
-        )
-        self.connection.commit()
+        connection = self._connection()
+        pending = list(self._pending_samples)
+        try:
+            if pending:
+                connection.executemany(
+                    """INSERT INTO samples VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    pending,
+                )
+            connection.execute(
+                "UPDATE runs SET finished_at=?, status=?, summary_json=? WHERE id=?",
+                (finished_at, status, json.dumps(summary, sort_keys=True), run_id),
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            del self._pending_samples[: len(pending)]
 
     def runs(self, profiles: Iterable[str] | None = None) -> list[sqlite3.Row]:
         if profiles:
             names = list(profiles)
             placeholders = ",".join("?" for _ in names)
-            return list(self.connection.execute(
+            return list(self._connection().execute(
                 f"SELECT * FROM runs WHERE profile IN ({placeholders}) ORDER BY started_at DESC", names
             ))
-        return list(self.connection.execute("SELECT * FROM runs ORDER BY started_at DESC"))
+        return list(self._connection().execute("SELECT * FROM runs ORDER BY started_at DESC"))
 
     def run(self, run_id: str) -> sqlite3.Row | None:
-        return self.connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        return self._connection().execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+
+    def sample_count(self, run_id: str) -> int:
+        row = self._connection().execute("SELECT COUNT(*) FROM samples WHERE run_id=?", (run_id,)).fetchone()
+        return int(row[0])
+
+    def samples(self, run_id: str) -> list[sqlite3.Row]:
+        return list(self._connection().execute(
+            "SELECT * FROM samples WHERE run_id=? ORDER BY workload, warmup DESC, iteration",
+            (run_id,),
+        ))
+
+    def add_artifact(self, run_id: str, kind: str, path: str, digest: str | None = None) -> None:
+        connection = self._connection()
+        connection.execute(
+            "INSERT OR REPLACE INTO artifacts(run_id, kind, path, sha256) VALUES (?, ?, ?, ?)",
+            (run_id, kind, path, digest),
+        )
+        connection.commit()
+
+    def artifacts(self, run_id: str) -> list[sqlite3.Row]:
+        return list(self._connection().execute(
+            "SELECT * FROM artifacts WHERE run_id=? ORDER BY kind, path", (run_id,)
+        ))

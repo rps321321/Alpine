@@ -1,18 +1,24 @@
 param(
     [ValidateRange(16, 2048)]
-    [int]$Tokens = 256
+    [int]$Tokens = 256,
+    [string]$InstallRoot = (Join-Path $env:USERPROFILE 'local-models'),
+    [string]$Profile,
+    [switch]$ResolveOnly
 )
 
 $ErrorActionPreference = 'Stop'
-
-$root = '%USERPROFILE%\local-models'
-$server = Join-Path $root 'runtime\llama-server.exe'
-$model = Join-Path $root 'models\Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf'
-$logs = Join-Path $root 'logs'
-$stopScript = Join-Path $root 'scripts\stop-session.ps1'
-$startScript = Join-Path $root 'scripts\start-session.ps1'
+. (Join-Path $PSScriptRoot 'benchmark-common.ps1')
+$benchmark = Get-BenchmarkContext $InstallRoot $Profile
+if ($ResolveOnly) { Write-BenchmarkResolution $benchmark; return }
+$Profile = $benchmark.ProfileName
+$profileConfig = $benchmark.Profile
+$server = $benchmark.Server
+$model = $benchmark.Model
+$logs = $benchmark.Logs
+$stopScript = $benchmark.StopScript
+$startScript = $benchmark.StartScript
 $benchmarkScript = Join-Path $PSScriptRoot 'benchmark-inference.ps1'
-$baseUrl = 'http://127.0.0.1:8100'
+$baseUrl = $benchmark.BaseUrl
 
 $variants = @(
     [pscustomobject]@{ Label = 'kv-target-q8-draft-f16'; Target = 'q8_0'; Draft = $null },
@@ -43,7 +49,7 @@ function Wait-Health {
 function Wait-PortFree {
     $deadline = (Get-Date).AddSeconds(30)
     do {
-        if (-not (Get-NetTCPConnection -LocalPort 8100 -State Listen -ErrorAction SilentlyContinue)) { return }
+        if (-not (Get-NetTCPConnection -LocalPort $benchmark.Port -State Listen -ErrorAction SilentlyContinue)) { return }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
     throw 'Port 8100 did not become free.'
@@ -57,22 +63,22 @@ try {
     foreach ($variant in $variants) {
         $args = @(
             '-m', $model,
-            '--host', '127.0.0.1',
-            '--port', '8100',
-            '-c', '16384',
-            '-np', '1',
+            '--host', $benchmark.Host,
+            '--port', [string]$benchmark.Port,
+            '-c', [string]$profileConfig.context,
+            '-np', [string]$profileConfig.parallel,
             '--no-webui',
             '--jinja',
             '-fa', 'on',
             '--fit', 'on',
-            '--fit-ctx', '16384',
-            '--fit-target', '512',
-            '--threads', '16',
-            '--threads-batch', '16',
+            '--fit-ctx', [string]$profileConfig.context,
+            '--fit-target', [string]$profileConfig.fit_target_mib,
+            '--threads', [string]$profileConfig.threads,
+            '--threads-batch', [string]$profileConfig.threads,
             '-ctk', $variant.Target,
             '-ctv', $variant.Target,
             '--spec-type', 'draft-mtp',
-            '--spec-draft-n-max', '3',
+            '--spec-draft-n-max', [string]$profileConfig.mtp_depth,
             '--reasoning', 'off'
         )
         if ($variant.Draft) {
@@ -117,7 +123,7 @@ finally {
         $active.WaitForExit(10000) | Out-Null
         Wait-PortFree
     }
-    & $startScript
+    & $startScript -Profile $Profile
 }
 
 $results | ConvertTo-Json -Depth 4

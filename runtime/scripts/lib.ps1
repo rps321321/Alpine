@@ -11,11 +11,46 @@ function Get-FileSha256([string]$Path) {
     }
 }
 
+function Get-RequiredString {
+    param($Object, [string]$Name, [string]$Source)
+    $value = Get-PropertyValue $Object $Name $null
+    if ($null -eq $value -or -not ([string]$value).Trim()) {
+        throw "$Source`: required value '$Name' must be a non-empty string."
+    }
+    return [string]$value
+}
+
 function Get-SessionConfig {
-    $root = Split-Path $PSScriptRoot -Parent
+    param([string]$InstallRoot)
+    $root = if ($InstallRoot) { [IO.Path]::GetFullPath($InstallRoot) } else { Split-Path $PSScriptRoot -Parent }
+    $publicationMarker = Join-Path $root '.setup-publishing.json'
+    if (Test-Path -LiteralPath $publicationMarker) {
+        throw "Setup publication is incomplete: $publicationMarker. Re-run setup to restore the prior installation before using it."
+    }
     $path = Join-Path $root 'config\session.json'
     if (-not (Test-Path -LiteralPath $path)) { throw "Session config missing: $path" }
-    Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    try { $session = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json }
+    catch { throw "Malformed Session Config $path`: $($_.Exception.Message)" }
+    if ([int](Get-PropertyValue $session 'schema' 0) -ne 3) {
+        throw "Unsupported Session Config schema '$((Get-PropertyValue $session 'schema' $null))' in $path; expected 3."
+    }
+    $configuredRoot = [IO.Path]::GetFullPath((Get-RequiredString $session 'root' $path))
+    if ($configuredRoot.TrimEnd('\') -ine ([IO.Path]::GetFullPath($root)).TrimEnd('\')) {
+        throw "Session Config root '$configuredRoot' does not match install root '$root'."
+    }
+    Get-RequiredString $session 'host' $path | Out-Null
+    $port = Get-PropertyValue $session 'port' $null
+    if ($null -eq $port -or [int]$port -lt 1 -or [int]$port -gt 65535) {
+        throw "Session Config port must be between 1 and 65535: $path"
+    }
+    foreach ($name in @('active_profile', 'model', 'mmproj', 'chat_template', 'api_key_file', 'base_url_file', 'state_file')) {
+        Get-RequiredString $session $name $path | Out-Null
+    }
+    $runtimes = Get-PropertyValue $session 'runtimes' $null
+    if ($null -eq $runtimes -or $runtimes -isnot [psobject]) {
+        throw "Session Config requires a runtimes object: $path"
+    }
+    return $session
 }
 
 function Get-ProfileConfig {
@@ -23,18 +58,52 @@ function Get-ProfileConfig {
     $selected = if ($Name) { $Name } else { [string]$Session.active_profile }
     $path = Join-Path $Session.root "profiles\$selected.json"
     if (-not (Test-Path -LiteralPath $path)) { throw "Profile missing: $path" }
-    Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    try { $profile = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json }
+    catch { throw "Malformed Profile $path`: $($_.Exception.Message)" }
+    if ((Get-RequiredString $profile 'name' $path) -ne $selected) {
+        throw "Profile name '$($profile.name)' does not match selected name '$selected'."
+    }
+    $status = Get-RequiredString $profile 'status' $path
+    if ($status -notin @('experimental', 'candidate', 'validated', 'production')) {
+        throw "Unsupported Profile status '$status' in $path."
+    }
+    foreach ($field in @('runtime', 'kv_cache')) { Get-RequiredString $profile $field $path | Out-Null }
+    foreach ($field in @('context', 'output', 'parallel', 'threads', 'batch_size', 'ubatch_size', 'mtp_depth')) {
+        $value = Get-PropertyValue $profile $field $null
+        if ($null -eq $value -or [int]$value -lt 1) { throw "Profile value '$field' must be a positive integer: $path" }
+    }
+    $block = Get-PropertyValue $profile 'tensor_cpu_through_block' $null
+    if ($null -eq $block -or [int]$block -lt 0) { throw "Profile value 'tensor_cpu_through_block' must be non-negative: $path" }
+    return $profile
 }
 
 function Get-RuntimePath {
     param($Session, $Profile)
     $runtimeName = [string](Get-PropertyValue $Profile 'runtime' '')
-    if ($runtimeName -and $Session.PSObject.Properties['runtimes']) {
-        $property = $Session.runtimes.PSObject.Properties[$runtimeName]
-        if (-not $property -or -not $property.Value) { throw "Runtime '$runtimeName' is not installed." }
-        return [string]$property.Value
+    $property = $Session.runtimes.PSObject.Properties[$runtimeName]
+    if (-not $property -or -not $property.Value) { throw "Runtime '$runtimeName' is not installed." }
+    return [string]$property.Value
+}
+
+function Get-ResolvedSession {
+    param([string]$InstallRoot, [string]$Name, [switch]$RequireRuntime)
+    $session = Get-SessionConfig $InstallRoot
+    $profile = Get-ProfileConfig $session $Name
+    $runtimeName = [string]$profile.runtime
+    $server = Get-RuntimePath $session $profile
+    if (-not $server) { throw "Runtime '$runtimeName' is unavailable for Profile '$($profile.name)'." }
+    $serverPath = [IO.Path]::GetFullPath($server)
+    if ($RequireRuntime -and -not (Test-Path -LiteralPath $serverPath -PathType Leaf)) {
+        throw "Runtime '$runtimeName' is unavailable at $serverPath."
     }
-    return [string]$Session.llama_server
+    return [pscustomobject][ordered]@{
+        Session = $session
+        ProfileName = [string]$profile.name
+        Profile = $profile
+        RuntimeName = $runtimeName
+        ServerPath = $serverPath
+        BaseUrl = "http://$($session.host):$($session.port)"
+    }
 }
 
 function Get-PropertyValue {
@@ -89,6 +158,47 @@ function Wait-PortFree([int]$Port, [int]$TimeoutSec = 30) {
     return $false
 }
 
+function Enter-InterprocessLock {
+    param([string]$Path, [int]$TimeoutMilliseconds = 15000)
+    $parent = Split-Path $Path -Parent
+    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        try {
+            return [IO.File]::Open($Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        } catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Timed out waiting for interprocess lock: $Path"
+            }
+            Start-Sleep -Milliseconds 50
+        }
+    } while ($true)
+}
+
+function Exit-InterprocessLock($Lock) {
+    if ($null -ne $Lock) { $Lock.Dispose() }
+}
+
+function Write-AtomicText {
+    param([string]$Path, [string]$Content, [Text.Encoding]$Encoding = ([Text.UTF8Encoding]::new($false)))
+    $parent = Split-Path $Path -Parent
+    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+    $identity = [Guid]::NewGuid().ToString('N')
+    $temporary = "$Path.$identity.tmp"
+    $backup = "$Path.$identity.bak"
+    try {
+        [IO.File]::WriteAllText($temporary, $Content, $Encoding)
+        if (Test-Path -LiteralPath $Path) {
+            [IO.File]::Replace($temporary, $Path, $backup)
+        } else {
+            [IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) }
+        if (Test-Path -LiteralPath $backup) { [IO.File]::Delete($backup) }
+    }
+}
+
 function Read-SessionState($Session) {
     if (-not (Test-Path -LiteralPath $Session.state_file)) { return $null }
     Get-Content -Raw -LiteralPath $Session.state_file | ConvertFrom-Json
@@ -98,16 +208,21 @@ function Save-SessionState($State, $Session) {
     $parent = Split-Path $Session.state_file -Parent
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
     $json = $State | ConvertTo-Json -Depth 8
-    [IO.File]::WriteAllText($Session.state_file, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $lock = Enter-InterprocessLock "$($Session.state_file).write.lock"
+    try { Write-AtomicText $Session.state_file ($json + [Environment]::NewLine) }
+    finally { Exit-InterprocessLock $lock }
 }
 
 function Ensure-LocalApiKey($Session) {
-    if (Test-Path -LiteralPath $Session.api_key_file) { return }
-    $bytes = New-Object byte[] 32
-    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-    $key = 'sk-local-' + (([BitConverter]::ToString($bytes)) -replace '-', '').ToLowerInvariant()
-    [IO.File]::WriteAllText($Session.api_key_file, $key, [Text.UTF8Encoding]::new($false))
+    $lock = Enter-InterprocessLock "$($Session.api_key_file).lock"
+    try {
+        if (Test-Path -LiteralPath $Session.api_key_file) { return }
+        $bytes = New-Object byte[] 32
+        $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+        $key = 'sk-local-' + (([BitConverter]::ToString($bytes)) -replace '-', '').ToLowerInvariant()
+        Write-AtomicText $Session.api_key_file $key
+    } finally { Exit-InterprocessLock $lock }
 }
 
 function Test-CleanupEnabled($Session) {

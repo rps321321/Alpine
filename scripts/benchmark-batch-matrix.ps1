@@ -1,18 +1,24 @@
 param(
     [ValidateRange(32, 2048)]
-    [int]$Tokens = 128
+    [int]$Tokens = 128,
+    [string]$InstallRoot = (Join-Path $env:USERPROFILE 'local-models'),
+    [string]$Profile,
+    [switch]$ResolveOnly
 )
 
 $ErrorActionPreference = 'Stop'
-
-$root = '%USERPROFILE%\local-models'
-$server = Join-Path $root 'runtime\llama-server.exe'
-$model = Join-Path $root 'models\Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf'
-$template = Join-Path $root 'config\qwen3.8-official-chat-template.jinja'
-$logs = Join-Path $root 'logs'
-$stopScript = Join-Path $root 'scripts\stop-session.ps1'
-$startScript = Join-Path $root 'scripts\start-session.ps1'
-$baseUrl = 'http://127.0.0.1:8100'
+. (Join-Path $PSScriptRoot 'benchmark-common.ps1')
+$benchmark = Get-BenchmarkContext $InstallRoot $Profile
+if ($ResolveOnly) { Write-BenchmarkResolution $benchmark; return }
+$Profile = $benchmark.ProfileName
+$profileConfig = $benchmark.Profile
+$server = $benchmark.Server
+$model = $benchmark.Model
+$template = $benchmark.ChatTemplate
+$logs = $benchmark.Logs
+$stopScript = $benchmark.StopScript
+$startScript = $benchmark.StartScript
+$baseUrl = $benchmark.BaseUrl
 
 $variants = @(
     [pscustomobject]@{ Label = 'b2048-ub512';  Batch = 2048; UBatch = 512 },
@@ -41,7 +47,7 @@ function Wait-Health {
 function Wait-PortFree {
     $deadline = (Get-Date).AddSeconds(30)
     do {
-        if (-not (Get-NetTCPConnection -LocalPort 8100 -State Listen -ErrorAction SilentlyContinue)) { return }
+        if (-not (Get-NetTCPConnection -LocalPort $benchmark.Port -State Listen -ErrorAction SilentlyContinue)) { return }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
     throw 'Port 8100 did not become free.'
@@ -53,12 +59,13 @@ try {
     & $stopScript
     foreach ($variant in $variants) {
         $args = @(
-            '-m', $model, '--host', '127.0.0.1', '--port', '8100',
-            '-c', '16384', '-np', '1', '--threads', '16', '--threads-batch', '16',
+            '-m', $model, '--host', $benchmark.Host, '--port', [string]$benchmark.Port,
+            '-c', [string]$profileConfig.context, '-np', [string]$profileConfig.parallel,
+            '--threads', [string]$profileConfig.threads, '--threads-batch', [string]$profileConfig.threads,
             '--no-webui', '--jinja', '--chat-template-file', $template,
-            '-fa', 'on', '--fit', 'on', '--fit-ctx', '16384', '--fit-target', '512',
-            '-ctk', 'q8_0', '-ctv', 'q8_0', '--reasoning', 'off',
-            '--spec-type', 'draft-mtp', '--spec-draft-n-max', '3',
+            '-fa', 'on', '--fit', 'on', '--fit-ctx', [string]$profileConfig.context, '--fit-target', [string]$profileConfig.fit_target_mib,
+            '-ctk', [string]$profileConfig.kv_cache, '-ctv', [string]$profileConfig.kv_cache, '--reasoning', 'off',
+            '--spec-type', 'draft-mtp', '--spec-draft-n-max', [string]$profileConfig.mtp_depth,
             '-b', [string]$variant.Batch, '-ub', [string]$variant.UBatch
         )
         $stdout = Join-Path $logs "bench-$($variant.Label).out.log"
@@ -109,7 +116,7 @@ finally {
         $active.WaitForExit(10000) | Out-Null
         Wait-PortFree
     }
-    & $startScript
+    & $startScript -Profile $Profile
 }
 
 $results | ConvertTo-Json -Depth 4

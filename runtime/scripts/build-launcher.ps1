@@ -1,13 +1,14 @@
 [CmdletBinding()]
 param(
     [string]$Output,
-    [switch]$NoShortcut
+    [switch]$NoShortcut,
+    [switch]$ShortcutOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = Split-Path $PSScriptRoot -Parent
 if (-not $Output) { $Output = Join-Path $root 'Open Local Qwen.exe' }
-if ($PSVersionTable.PSEdition -eq 'Core') {
+if ($PSVersionTable.PSEdition -eq 'Core' -and -not $ShortcutOnly) {
     $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Output', $Output)
     if ($NoShortcut) { $arguments += '-NoShortcut' }
@@ -15,16 +16,19 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
     if ($LASTEXITCODE -ne 0) { throw 'Windows launcher compilation failed.' }
     return
 }
-$source = Join-Path $root 'launcher\OpenLocalQwen.cs'
-$temporary = Join-Path ([IO.Path]::GetTempPath()) ("OpenLocalQwen-$PID.exe")
-try {
-    Add-Type -TypeDefinition (Get-Content -Raw -LiteralPath $source) -Language CSharp `
-        -ReferencedAssemblies @('System.dll', 'System.Windows.Forms.dll', 'System.Drawing.dll') `
-        -OutputAssembly $temporary -OutputType WindowsApplication
-    Move-Item -LiteralPath $temporary -Destination $Output -Force
-} finally {
-    if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+if (-not $ShortcutOnly) {
+    $source = Join-Path $root 'launcher\OpenLocalQwen.cs'
+    $temporary = Join-Path ([IO.Path]::GetTempPath()) ("OpenLocalQwen-$PID.exe")
+    try {
+        Add-Type -TypeDefinition (Get-Content -Raw -LiteralPath $source) -Language CSharp `
+            -ReferencedAssemblies @('System.dll', 'System.Windows.Forms.dll', 'System.Drawing.dll') `
+            -OutputAssembly $temporary -OutputType WindowsApplication
+        Move-Item -LiteralPath $temporary -Destination $Output -Force
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
 }
+if (-not (Test-Path -LiteralPath $Output -PathType Leaf)) { throw "Launcher is missing: $Output" }
 if (-not $NoShortcut) {
     $desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
     $shell = New-Object -ComObject WScript.Shell
@@ -49,4 +53,4 @@ if (-not $NoShortcut) {
         }
     } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
 }
-Write-Host "Built launcher: $Output"
+Write-Host $(if ($ShortcutOnly) { "Updated launcher shortcuts: $Output" } else { "Built launcher: $Output" })
