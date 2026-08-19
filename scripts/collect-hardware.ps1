@@ -97,7 +97,7 @@ if (Test-Path -LiteralPath $sessionPath) {
         $backend = [ordered]@{
             path = $serverPath
             version = Get-CommandText $serverPath @('--version')
-            sha256 = (Get-FileHash -LiteralPath $serverPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            sha256 = Get-FileSha256 -Path $serverPath
         }
     } catch { throw "Installed backend could not be resolved from Session Config: $($_.Exception.Message)" }
 }
