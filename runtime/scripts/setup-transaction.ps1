@@ -31,11 +31,33 @@ function Publish-VerifiedDownload {
     }
     $observed = Get-FileSha256 $PartialPath
     if ($observed -ne $ExpectedSha256.ToLowerInvariant()) {
-        throw "Incomplete download checksum mismatch. Keep or remove $PartialPath before retrying."
+        $suffix = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss-fff') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,8)
+        $invalidPath = "$PartialPath.invalid-$suffix"
+        Move-Item -LiteralPath $PartialPath -Destination $invalidPath
+        throw "Downloaded artifact checksum mismatch. Preserved invalid file at $invalidPath; retry will start a fresh partial download."
     }
     $parent = Split-Path $DestinationPath -Parent
     if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     Move-Item -LiteralPath $PartialPath -Destination $DestinationPath
+}
+
+function Publish-CompletedPartialDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$PartialPath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][long]$ExpectedSize,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+    if (-not (Test-Path -LiteralPath $PartialPath -PathType Leaf)) { return $false }
+    if ((Get-Item -LiteralPath $PartialPath).Length -ne $ExpectedSize) { return $false }
+    try {
+        Publish-VerifiedDownload $PartialPath $DestinationPath $ExpectedSize $ExpectedSha256
+        return $true
+    } catch {
+        if (Test-Path -LiteralPath $PartialPath) { throw }
+        Write-Warning $_.Exception.Message
+        return $false
+    }
 }
 
 function New-SessionConfigDocument {

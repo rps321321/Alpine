@@ -92,10 +92,13 @@ function Install-Artifact($Artifact) {
     }
 
     $partial = "$destination.part"
+    if (Publish-CompletedPartialDownload $partial $destination ([long]$Artifact.bytes) ([string]$Artifact.sha256)) {
+        return $destination
+    }
     Write-Host "Downloading $($Artifact.filename)"
     & curl.exe --fail --location --retry 6 --retry-all-errors --continue-at - --output $partial $Artifact.url
     if ($LASTEXITCODE -ne 0) { throw "Download failed: $($Artifact.url)" }
-    Publish-VerifiedDownload $partial $destination ([long]$Artifact.size) ([string]$Artifact.sha256)
+    Publish-VerifiedDownload $partial $destination ([long]$Artifact.bytes) ([string]$Artifact.sha256)
     return $destination
 }
 

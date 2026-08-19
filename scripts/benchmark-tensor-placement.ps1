@@ -52,15 +52,6 @@ function Wait-Health([Diagnostics.Process]$Process) {
     throw 'Benchmark server did not become healthy within five minutes.'
 }
 
-function Wait-PortFree {
-    $deadline = (Get-Date).AddSeconds(30)
-    do {
-        if (-not (Get-NetTCPConnection -LocalPort $benchmark.Port -State Listen -ErrorAction SilentlyContinue)) { return }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt $deadline)
-    throw "Port $($benchmark.Port) did not become free."
-}
-
 function Invoke-Completion([string]$Prompt, [int]$TokenCount) {
     $body = @{
         prompt = $Prompt
@@ -135,14 +126,14 @@ try {
         Stop-Process -Id $active.Id -Force
         $active.WaitForExit(10000) | Out-Null
         $active = $null
-        Wait-PortFree
+        Wait-BenchmarkPortFree $benchmark
     }
 }
 finally {
     if ($active -and -not $active.HasExited) {
         Stop-Process -Id $active.Id -Force -ErrorAction SilentlyContinue
         $active.WaitForExit(10000) | Out-Null
-        Wait-PortFree
+        Wait-BenchmarkPortFree $benchmark
     }
     & $startScript -Profile $Profile
 }

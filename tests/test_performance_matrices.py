@@ -22,8 +22,16 @@ MATRICES = (
     "benchmark-inference.ps1",
 )
 
+PORT_WAIT_MATRICES = MATRICES[:-1]
+
 
 class PerformanceMatrixConfigTests(unittest.TestCase):
+    def test_process_matrices_use_the_shared_port_wait(self) -> None:
+        for name in PORT_WAIT_MATRICES:
+            source = (REPO_ROOT / "scripts" / name).read_text(encoding="utf-8-sig")
+            self.assertNotIn("function Wait-PortFree", source, name)
+            self.assertIn("Wait-BenchmarkPortFree $benchmark", source, name)
+
     def test_every_matrix_resolves_a_non_default_install_and_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

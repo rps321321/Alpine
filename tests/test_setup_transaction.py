@@ -11,6 +11,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE = REPO_ROOT / "runtime" / "scripts" / "setup-transaction.ps1"
+SETUP_SCRIPT = REPO_ROOT / "scripts" / "setup-local-qwen.ps1"
 
 
 def invoke(expression: str) -> subprocess.CompletedProcess[str]:
@@ -23,6 +24,18 @@ def invoke(expression: str) -> subprocess.CompletedProcess[str]:
 
 
 class SetupTransactionTests(unittest.TestCase):
+    def test_setup_uses_manifest_bytes_for_download_publication(self) -> None:
+        source = SETUP_SCRIPT.read_text(encoding="utf-8-sig")
+        self.assertIn(
+            "Publish-VerifiedDownload $partial $destination ([long]$Artifact.bytes)",
+            source,
+        )
+        self.assertNotIn("([long]$Artifact.size)", source)
+        self.assertLess(
+            source.index("Publish-CompletedPartialDownload"),
+            source.index("& curl.exe"),
+        )
+
     def test_staged_session_config_contains_only_final_installation_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             install = Path(directory) / "install"
@@ -75,6 +88,51 @@ class SetupTransactionTests(unittest.TestCase):
             self.assertEqual(resumed.returncode, 0, resumed.stderr)
             self.assertEqual(destination.read_bytes(), complete)
             self.assertFalse(partial.exists())
+
+    def test_complete_download_with_bad_checksum_is_quarantined_before_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            partial = root / "artifact.bin.part"
+            destination = root / "artifact.bin"
+            complete = b"complete-artifact"
+            partial.write_bytes(b"x" * len(complete))
+            digest = hashlib.sha256(complete).hexdigest()
+
+            rejected = invoke(
+                f"Publish-VerifiedDownload '{partial}' '{destination}' {len(complete)} '{digest}'"
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertFalse(partial.exists())
+            quarantined = list(root.glob("artifact.bin.part.invalid-*"))
+            self.assertEqual(len(quarantined), 1)
+            self.assertEqual(quarantined[0].read_bytes(), b"x" * len(complete))
+            self.assertFalse(destination.exists())
+
+            partial.write_bytes(complete)
+            resumed = invoke(
+                f"Publish-VerifiedDownload '{partial}' '{destination}' {len(complete)} '{digest}'"
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(destination.read_bytes(), complete)
+
+    def test_existing_complete_corrupt_partial_is_quarantined_before_curl_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            partial = root / "artifact.bin.part"
+            destination = root / "artifact.bin"
+            complete = b"complete-artifact"
+            partial.write_bytes(b"x" * len(complete))
+            digest = hashlib.sha256(complete).hexdigest()
+
+            result = invoke(
+                f"Publish-CompletedPartialDownload '{partial}' '{destination}' "
+                f"{len(complete)} '{digest}' | ConvertTo-Json -Compress"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout.splitlines()[-1]), False)
+            self.assertFalse(partial.exists())
+            self.assertEqual(len(list(root.glob("artifact.bin.part.invalid-*"))), 1)
+            self.assertFalse(destination.exists())
 
     def test_bundle_publication_replaces_all_items_and_removes_marker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

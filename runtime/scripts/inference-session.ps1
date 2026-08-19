@@ -244,20 +244,23 @@ function Restore-CleanupProcess {
     $port = [int](Get-PropertyValue $Session.cleanup 'port' 0)
     if ($port -lt 1) { throw 'Cleanup restoration requested without a valid configured port.' }
     $expected = [string](Get-PropertyValue $Session.cleanup 'exe' '')
+    $health = [string](Get-PropertyValue $Session.cleanup 'health' '')
+    if (-not $health) { throw 'Cleanup restoration requires a configured health endpoint.' }
     $process = Get-ProcessOnPort $port
+    $started = $false
     if (-not $process) {
         $start = [string](Get-PropertyValue $Session.cleanup 'start_script' '')
         if (-not $start) { throw 'Cleanup restoration requested without a start script.' }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $start
+        $started = $true
+        if (-not (Wait-HttpOk $health 120)) { throw "Cleanup health check failed: $health" }
         $process = Get-ProcessOnPort $port
     }
     $commandLine = if ($process) { Get-CommandLine ([int]$process.Id) } else { $null }
     if (-not $process -or -not $process.Path -or ([IO.Path]::GetFullPath([string]$process.Path) -ine [IO.Path]::GetFullPath($expected)) -or -not (Test-CommandLinePort $commandLine $port)) {
         throw "Cleanup restoration did not produce the configured process on port $port."
     }
-    $health = [string](Get-PropertyValue $Session.cleanup 'health' '')
-    if (-not $health) { throw 'Cleanup restoration requires a configured health endpoint.' }
-    if (-not (Wait-HttpOk $health 120)) { throw "Cleanup health check failed: $health" }
+    if (-not $started -and -not (Wait-HttpOk $health 120)) { throw "Cleanup health check failed: $health" }
 }
 
 function Start-InferenceSessionCore {

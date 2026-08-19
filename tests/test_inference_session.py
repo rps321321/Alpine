@@ -154,6 +154,35 @@ class InferenceSessionTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Cleanup health check failed", result.stderr)
 
+    def test_cleanup_restoration_waits_for_asynchronous_start_before_identity_check(self) -> None:
+        expression = r"""
+        function Test-CleanupEnabled { return $true }
+        function Get-ProcessOnPort {
+          if ($global:cleanupReady) { [pscustomobject]@{ Id=9191; Path='C:\fixture\cleanup.exe' } }
+        }
+        function Get-CommandLine { return '"C:\fixture\cleanup.exe" --port 9191' }
+        function powershell.exe {
+          param([switch]$NoProfile, [string]$ExecutionPolicy, [string]$File)
+          $global:startInvoked = $true
+        }
+        function Wait-HttpOk {
+          $global:healthChecks++
+          $global:cleanupReady = $true
+          return $true
+        }
+        $global:cleanupReady=$false; $global:startInvoked=$false; $global:healthChecks=0
+        $session = [pscustomobject]@{ cleanup=[pscustomobject]@{ enabled=$true; port=9191; exe='C:\fixture\cleanup.exe'; start_script='C:\fixture\start.ps1'; health='http://127.0.0.1:9191/health' } }
+        $state = [pscustomobject]@{ cleanup_paused=$true }
+        Restore-CleanupProcess $session $state
+        [pscustomobject]@{started=$global:startInvoked;healthChecks=$global:healthChecks;ready=$global:cleanupReady} | ConvertTo-Json -Compress
+        """
+        result = invoke(expression)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observed = json.loads(result.stdout.splitlines()[-1])
+        self.assertTrue(observed["started"])
+        self.assertEqual(observed["healthChecks"], 1)
+        self.assertTrue(observed["ready"])
+
     def test_optimized_start_retries_once_with_pinned_mtp_only_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
