@@ -93,9 +93,17 @@ class SessionConfigTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             powershell = json.loads(result.stdout)
             self.assertEqual(powershell["ProfileName"], resolved.profile_name)
+            self.assertEqual(Path(powershell["InstallRoot"]), resolved.install_root)
             self.assertEqual(Path(powershell["ServerPath"]), resolved.server)
             self.assertEqual(powershell["BaseUrl"], resolved.base_url)
             self.assertEqual(powershell["Profile"]["context"], resolved.profile["context"])
+            self.assertEqual(powershell["RuntimeName"], resolved.runtime_name)
+            self.assertEqual(Path(powershell["Model"]), resolved.model)
+            self.assertEqual(Path(powershell["Mmproj"]), resolved.mmproj)
+            self.assertEqual(Path(powershell["ChatTemplate"]), resolved.chat_template)
+            self.assertEqual(Path(powershell["ApiKeyFile"]), resolved.api_key_file)
+            self.assertEqual(Path(powershell["BaseUrlFile"]), resolved.base_url_file)
+            self.assertEqual(Path(powershell["StateFile"]), resolved.state_file)
 
     def test_rejects_unsupported_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

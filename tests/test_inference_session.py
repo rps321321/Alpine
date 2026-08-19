@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.test_config import write_fixture
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE = REPO_ROOT / "runtime" / "scripts" / "inference-session.ps1"
@@ -21,6 +23,42 @@ def invoke(expression: str) -> subprocess.CompletedProcess[str]:
 
 
 class InferenceSessionTests(unittest.TestCase):
+    def test_idle_cold_start_uses_the_real_resolved_session_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture(root)
+            (root / "models").mkdir()
+            model = root / "models" / "model.gguf"
+            mmproj = root / "models" / "mmproj.gguf"
+            template = root / "config" / "chat.jinja"
+            for path in (model, mmproj, template):
+                path.write_text("fixture", encoding="utf-8")
+
+            expression = rf"""
+            function Get-InferenceSessionStatusCore {{
+              param([string]$InstallRoot)
+              [pscustomobject]@{{ Active=$false; Foreign=$false; Healthy=$false; Profile='stable-16k'; Vision=$false }}
+            }}
+            function Test-CleanupEnabled {{ param($Session); return $false }}
+            function Start-InferenceProcess {{
+              param($ServerPath,$Arguments,$OutLog,$ErrLog,$ResetNgram)
+              [pscustomobject]@{{ Id=4242; StartTime=(Get-Date); HasExited=$false }}
+            }}
+            function Test-StartedProcessHealthy {{ return $true }}
+            Start-InferenceSessionCore -InstallRoot '{root}' -Profile stable-16k | Out-Null
+            Get-Content -Raw -LiteralPath '{root / 'logs' / 'session-state.json'}' | ConvertFrom-Json | ConvertTo-Json -Depth 8 -Compress
+            """
+            result = invoke(expression)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state = json.loads(result.stdout.splitlines()[-1])
+            self.assertTrue(Path(state["server"]).samefile(root / "runtime" / "llama-server.exe"))
+            self.assertEqual(state["profile"], "stable-16k")
+            model_index = state["arguments"].index("-m") + 1
+            template_index = state["arguments"].index("--chat-template-file") + 1
+            self.assertTrue(Path(state["arguments"][model_index]).samefile(model))
+            self.assertTrue(Path(state["arguments"][template_index]).samefile(template))
+            self.assertTrue((root / "config" / "api-key.txt").is_file())
+
     def test_planner_distinguishes_idle_reuse_replace_and_foreign_listener(self) -> None:
         expression = """
         @(

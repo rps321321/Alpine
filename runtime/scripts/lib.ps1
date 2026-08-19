@@ -104,11 +104,18 @@ function Get-ResolvedSession {
         throw "Runtime '$runtimeName' is unavailable at $serverPath."
     }
     return [pscustomobject][ordered]@{
+        InstallRoot = [IO.Path]::GetFullPath([string]$session.root)
         Session = $session
         ProfileName = [string]$profile.name
         Profile = $profile
         RuntimeName = $runtimeName
         ServerPath = $serverPath
+        Model = [IO.Path]::GetFullPath([string]$session.model)
+        Mmproj = [IO.Path]::GetFullPath([string]$session.mmproj)
+        ChatTemplate = [IO.Path]::GetFullPath([string]$session.chat_template)
+        ApiKeyFile = [IO.Path]::GetFullPath([string]$session.api_key_file)
+        BaseUrlFile = [IO.Path]::GetFullPath([string]$session.base_url_file)
+        StateFile = [IO.Path]::GetFullPath([string]$session.state_file)
         BaseUrl = "http://$($session.host):$($session.port)"
     }
 }
