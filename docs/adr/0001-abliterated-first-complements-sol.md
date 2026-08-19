@@ -1,0 +1,3 @@
+# Abliterated-first local stack; Sol stays the Frontier Model
+
+This machine already has GPT-5.6 Sol as the default when raw capability dominates. A weaker aligned local Instruct twin would not earn its disk or VRAM. The Local Model exists for low-refusal, locally controlled work (authorized red teaming, owned-system exploit testing, C/C++ security analysis, reverse engineering, private code, investigations that hosted policy interrupts). The Abliterated Model is therefore the primary checkpoint. The upstream Instruct twin is a Control Checkpoint only, fetched later if we need to measure what ablation cost.

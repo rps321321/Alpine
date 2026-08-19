@@ -1,0 +1,3 @@
+# Pause Whispering cleanup transactionally; never own :8090
+
+The large Abliterated Model may evict the :8090 Qwen2.5-3B cleanup server from VRAM, but it must not take that port or rewrite Whispering. Start records whether the specific cleanup process on :8090 is up, stops only that process, verifies the port is free, then starts the large model on the Session Config port. If large-model start fails, restore cleanup. Stop tears down only the Inference Session and restores :8090 only if this Session paused it, then health-checks cleanup. Identity is port + command line, not `llama-server.exe`. A failed Session should leave the machine in its pre-Session state.
