@@ -28,7 +28,9 @@ Large artifact downloads are verified by byte size and SHA-256 from `config/arti
 
 ## Launch
 
-Double-click `Open Local Qwen.exe` in the install root, choose a project folder, and work in the OpenCode terminal. The executable is a small folder picker; the reviewed policy and runtime behavior remain in the installed PowerShell scripts.
+Double-click `Open Local Qwen.exe` in the install root, choose a project folder, and work in the OpenCode terminal. The executable selects the folder and supervises the visible PowerShell process; the reviewed policy and runtime behavior remain in the installed scripts. A failed session stays visible until acknowledged, and startup PowerShell errors are redacted into a per-launch record before being atomically published at `logs\launcher-last-error.log`. Native OpenCode diagnostics remain visible in that terminal; the stable record includes their non-zero exit code without recording the interactive transcript.
+
+To verify this failure path without loading the model, run `Open Local Qwen.exe --project <existing-folder> --diagnostic-failure`. It deliberately presents a diagnostic error, writes the stable redacted log, and exits non-zero.
 
 CLI alternatives from the repository:
 

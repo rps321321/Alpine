@@ -14,6 +14,7 @@ param(
     [switch]$Check,
     [string]$CaptureEndpoint,
     [string]$RunPrompt,
+    [switch]$Supervised,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$OpenCodeArgs
 )
@@ -106,4 +107,9 @@ try {
         throw "OpenCode cleanup failed: $details"
     }
 }
-exit $exitCode
+if ($exitCode -ne 0) {
+    $failureText = "OpenCode exited with code $exitCode. Its native diagnostic remains visible in this terminal."
+    if ($Supervised) { throw $failureText }
+    exit $exitCode
+}
+if (-not $Supervised) { exit 0 }

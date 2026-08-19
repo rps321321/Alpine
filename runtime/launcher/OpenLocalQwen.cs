@@ -13,17 +13,18 @@ namespace LocalModelsLauncher
         {
             string root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
             string script = Path.Combine(root, "scripts", "open-local-opencode.ps1");
+            string supervisor = Path.Combine(root, "scripts", "launcher-supervisor.ps1");
             try
             {
                 if (!File.Exists(script)) throw new FileNotFoundException("OpenCode launcher script is missing.", script);
+                if (!File.Exists(supervisor)) throw new FileNotFoundException("OpenCode launcher supervisor is missing.", supervisor);
                 if (Has(args, "--check")) return RunCheck(root, script, args);
                 string project = ValueAfter(args, "--project") ?? PickProject(root);
                 if (project == null) return 0;
                 project = Path.GetFullPath(project);
                 if (!Directory.Exists(project)) throw new DirectoryNotFoundException(project);
                 Remember(root, project);
-                Process.Start(Interactive(script, project, args));
-                return 0;
+                return RunInteractive(root, supervisor, project, args);
             }
             catch (Exception ex)
             {
@@ -32,19 +33,62 @@ namespace LocalModelsLauncher
             }
         }
 
-        private static ProcessStartInfo Interactive(string script, string project, string[] args)
+        private static int RunInteractive(string root, string supervisor, string project, string[] args)
+        {
+            string launchId = Guid.NewGuid().ToString("N");
+            using (Process process = Process.Start(Interactive(supervisor, project, args, launchId)))
+            {
+                process.WaitForExit();
+                int exitCode = process.ExitCode;
+                if (exitCode == 0) return 0;
+
+                string logs = Path.Combine(root, "logs");
+                string invocationLog = Path.Combine(logs, "launcher-errors", launchId + ".log");
+                string failureLog = Path.Combine(logs, "launcher-last-error.log");
+                string details;
+                try
+                {
+                    details = File.Exists(invocationLog)
+                        ? File.ReadAllText(invocationLog)
+                        : "The PowerShell supervisor exited with code " + exitCode +
+                          " without producing its per-launch failure record.";
+                }
+                catch (Exception readError)
+                {
+                    details = "The per-launch failure record could not be read: " + readError.Message;
+                }
+
+                if (!string.Equals(
+                    Environment.GetEnvironmentVariable("LOCALMODEL_LAUNCHER_NO_DIALOG"),
+                    "1",
+                    StringComparison.Ordinal))
+                {
+                    if (details.Length > 2000) details = details.Substring(0, 2000) + Environment.NewLine + "...";
+                    MessageBox.Show(
+                        "OpenCode failed to start or exited with an error." + Environment.NewLine + Environment.NewLine +
+                        details + Environment.NewLine + "Failure log: " + failureLog,
+                        "Open Local Qwen",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+                return exitCode;
+            }
+        }
+
+        private static ProcessStartInfo Interactive(string supervisor, string project, string[] args, string launchId)
         {
             string profile = ValueAfter(args, "--profile") ?? "stable-16k";
-            string options = " -Profile " + Quote(profile);
+            string options = " -Profile " + Quote(profile) + " -LaunchId " + Quote(launchId);
             if (Has(args, "--vision")) options += " -WithVision";
             if (Has(args, "--lean")) options += " -Lean";
             if (Has(args, "--full-prompt")) options += " -FullPrompt";
             if (Has(args, "--plugins")) options += " -WithPlugins";
             if (Has(args, "--skills")) options += " -WithSkills";
+            if (Has(args, "--diagnostic-failure")) options += " -DiagnosticFailure";
             return new ProcessStartInfo
             {
                 FileName = PowerShell(),
-                Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File " + Quote(script) + " -Project " + Quote(project) + options,
+                Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File " + Quote(supervisor) + " -Project " + Quote(project) + options,
                 WorkingDirectory = project,
                 UseShellExecute = true,
                 WindowStyle = ProcessWindowStyle.Normal
