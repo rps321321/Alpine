@@ -40,6 +40,12 @@ class FailingSessionAdapter(FakeSessionAdapter):
         raise RuntimeError("startup failed")
 
 
+class FailingReleaseAdapter(FakeSessionAdapter):
+    def release(self, acquisition: dict[str, object], keep_server: bool = False) -> None:
+        self.released += 1
+        raise RuntimeError("restore failed")
+
+
 def record(run_id: str, kind: str = "micro") -> dict[str, object]:
     return {
         "id": run_id,
@@ -144,6 +150,41 @@ class BenchmarkLifecycleTests(unittest.TestCase):
             self.assertEqual(quality_adapter.released, 1)
             self.assertEqual(interrupt_adapter.released, 1)
 
+    def test_database_finalization_failure_still_releases_session_and_both_leases(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result_root = Path(directory)
+            adapter = FakeSessionAdapter()
+            lifecycle = BenchmarkLifecycle(result_root, record("finish-fails"), adapter)
+            with self.assertRaisesRegex(RuntimeError, "database finish failed"):
+                with lifecycle:
+                    lifecycle.record_sample(sample(1))
+                    lifecycle.complete({"all_quality_pass": True}, "passed")
+                    assert lifecycle.store is not None
+                    lifecycle.store.finish_run = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                        RuntimeError("database finish failed")
+                    )
+            self.assertEqual(adapter.released, 1)
+            FileLease(lifecycle.run_lease.path, {"kind": "probe"}).acquire().release()
+            FileLease(lifecycle.inference_lease.path, {"kind": "probe"}).acquire().release()
+
+    def test_restoration_failure_marks_run_error_and_releases_leases(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result_root = Path(directory)
+            adapter = FailingReleaseAdapter()
+            lifecycle = BenchmarkLifecycle(result_root, record("restore-fails"), adapter)
+            with self.assertRaisesRegex(RuntimeError, "restore failed"):
+                with lifecycle:
+                    lifecycle.record_sample(sample(1))
+                    lifecycle.complete({"all_quality_pass": True}, "passed")
+            store = ResultStore(result_root / "results.sqlite3")
+            try:
+                row = store.run("restore-fails")
+                self.assertEqual(row["status"], "error")
+                self.assertIn("BenchmarkFinalizationError", row["summary_json"])
+            finally:
+                store.close()
+            FileLease(lifecycle.inference_lease.path, {"kind": "probe"}).acquire().release()
+
     def test_reconciliation_refuses_live_writer_then_repairs_abandoned_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result_root = Path(directory)
@@ -160,6 +201,27 @@ class BenchmarkLifecycleTests(unittest.TestCase):
             result = reconcile_run(result_root, "run-live")
             self.assertEqual(result["status"], "passed")
             self.assertEqual(result["summary"]["reconciled_from"]["status"], "running")
+            self.assertEqual(result["summary"]["reconciled_from"]["last_lifecycle_event"]["event"], "sample-recorded")
+
+    def test_reconciliation_ignores_only_a_torn_trailing_sample_without_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result_root = Path(directory)
+            lifecycle = BenchmarkLifecycle(result_root, record("torn-sample"), FakeSessionAdapter())
+            lifecycle.__enter__()
+            lifecycle.record_sample(sample(1))
+            with (lifecycle.raw_dir / "samples.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write('{"workload":"novel-256"')
+            lifecycle.abandon_for_test()
+
+            result = reconcile_run(result_root, "torn-sample")
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(result["summary"]["raw_evidence"]["complete_sample_records"], 1)
+            self.assertEqual(result["summary"]["raw_evidence"]["ignored_trailing_incomplete_records"], 1)
+            store = ResultStore(result_root / "results.sqlite3")
+            try:
+                self.assertEqual(store.sample_count("torn-sample"), 1)
+            finally:
+                store.close()
 
     def test_session_acquisition_failure_is_finalized(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -48,20 +48,6 @@ function Copy-AtomicFile([string]$Source, [string]$Destination) {
     } finally { if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) } }
 }
 
-function Publish-Directory([string]$Stage, [string]$Destination) {
-    $backup = "$Destination.backup-$([Guid]::NewGuid().ToString('N'))"
-    $hadPrior = Test-Path -LiteralPath $Destination
-    if ($hadPrior) { Move-Item -LiteralPath $Destination -Destination $backup }
-    try {
-        Move-Item -LiteralPath $Stage -Destination $Destination
-        if ($hadPrior) { Remove-Item -LiteralPath $backup -Recurse -Force }
-    } catch {
-        if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
-        if ($hadPrior -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $Destination }
-        throw
-    }
-}
-
 function Assert-Artifact([string]$Path, $Artifact) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Artifact missing: $Path" }
     $item = Get-Item -LiteralPath $Path
@@ -170,7 +156,7 @@ function Assert-CustomRuntime([string]$RuntimeDir) {
     if ($version -notmatch '3cb7ffb') { throw "Custom runtime version mismatch:`n$version" }
 }
 
-function Install-OfficialRuntime {
+function Install-OfficialRuntime([string]$TransactionStage) {
     $cache = Join-Path $InstallRoot '.artifacts'
     New-Item -ItemType Directory -Force -Path $cache | Out-Null
     foreach ($entry in @($manifest.llama_cpp.official_runtime, $manifest.llama_cpp.official_cuda)) {
@@ -198,28 +184,21 @@ function Install-OfficialRuntime {
         $existingVersion = & $existingServer --version 2>&1 | Out-String
         if ($existingVersion -match '3cb7ffb') { return $existingServer }
     }
-    $stage = Join-Path $InstallRoot ".runtime-official-stage-$([Guid]::NewGuid().ToString('N'))"
-    try {
-        New-Item -ItemType Directory -Force -Path $stage | Out-Null
-        Expand-Archive -LiteralPath (Join-Path $cache $manifest.llama_cpp.official_runtime.filename) -DestinationPath $stage -Force
-        Expand-Archive -LiteralPath (Join-Path $cache $manifest.llama_cpp.official_cuda.filename) -DestinationPath $stage -Force
-        $server = Get-ChildItem $stage -Filter llama-server.exe -Recurse | Select-Object -First 1
-        if (-not $server) { throw 'Official runtime archive did not contain llama-server.exe.' }
-        if ($server.DirectoryName -ne $stage) {
-            Get-ChildItem $server.DirectoryName -File | Copy-Item -Destination $stage -Force
-        }
-        $version = & (Join-Path $stage 'llama-server.exe') --version 2>&1 | Out-String
-        if ($version -notmatch '3cb7ffb') { throw "Official runtime version mismatch:`n$version" }
-        Publish-Directory $stage $runtimeDir
-    } finally {
-        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-    }
-    $server = Get-ChildItem $runtimeDir -Filter llama-server.exe -Recurse | Select-Object -First 1
+    $stage = Join-Path $TransactionStage 'runtime-official'
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null
+    Expand-Archive -LiteralPath (Join-Path $cache $manifest.llama_cpp.official_runtime.filename) -DestinationPath $stage -Force
+    Expand-Archive -LiteralPath (Join-Path $cache $manifest.llama_cpp.official_cuda.filename) -DestinationPath $stage -Force
+    $server = Get-ChildItem $stage -Filter llama-server.exe -Recurse | Select-Object -First 1
     if (-not $server) { throw 'Official runtime archive did not contain llama-server.exe.' }
+    if ($server.DirectoryName -ne $stage) {
+        Get-ChildItem $server.DirectoryName -File | Copy-Item -Destination $stage -Force
+    }
+    $version = & (Join-Path $stage 'llama-server.exe') --version 2>&1 | Out-String
+    if ($version -notmatch '3cb7ffb') { throw "Official runtime version mismatch:`n$version" }
     return (Join-Path $runtimeDir 'llama-server.exe')
 }
 
-function Install-CustomRuntime {
+function Install-CustomRuntime([string]$TransactionStage) {
     $runtimeDir = Join-Path $InstallRoot 'runtime-custom'
     if (Test-Path -LiteralPath (Join-Path $runtimeDir 'build-manifest.json')) {
         Assert-CustomRuntime $runtimeDir
@@ -229,19 +208,14 @@ function Install-CustomRuntime {
         $reusable = Join-Path $ReuseArtifactsFrom 'runtime-custom'
         if (Test-Path -LiteralPath (Join-Path $reusable 'build-manifest.json')) {
             Assert-CustomRuntime $reusable
-            $stage = Join-Path $InstallRoot ".runtime-custom-stage-$([Guid]::NewGuid().ToString('N'))"
-            try {
-                New-Item -ItemType Directory -Force -Path $stage | Out-Null
-                Get-ChildItem -LiteralPath $reusable -File | ForEach-Object {
-                    $target = Join-Path $stage $_.Name
-                    try { New-Item -ItemType HardLink -Path $target -Target $_.FullName -ErrorAction Stop | Out-Null }
-                    catch { Copy-Item -LiteralPath $_.FullName -Destination $target }
-                }
-                Assert-CustomRuntime $stage
-                Publish-Directory $stage $runtimeDir
-            } finally {
-                if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+            $stage = Join-Path $TransactionStage 'runtime-custom'
+            New-Item -ItemType Directory -Force -Path $stage | Out-Null
+            Get-ChildItem -LiteralPath $reusable -File | ForEach-Object {
+                $target = Join-Path $stage $_.Name
+                try { New-Item -ItemType HardLink -Path $target -Target $_.FullName -ErrorAction Stop | Out-Null }
+                catch { Copy-Item -LiteralPath $_.FullName -Destination $target }
             }
+            Assert-CustomRuntime $stage
             return (Join-Path $runtimeDir 'llama-server.exe')
         }
     }
@@ -276,14 +250,9 @@ function Install-CustomRuntime {
     if ($LASTEXITCODE -ne 0) { throw 'Custom runtime build failed.' }
 
     $built = Join-Path $build 'bin\Release'
-    $stage = Join-Path $InstallRoot ".runtime-custom-stage-$([Guid]::NewGuid().ToString('N'))"
-    try {
-        & (Join-Path $repoRoot 'scripts\package-custom-runtime.ps1') -BuiltRuntime $built -Output $stage
-        Assert-CustomRuntime $stage
-        Publish-Directory $stage $runtimeDir
-    } finally {
-        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-    }
+    $stage = Join-Path $TransactionStage 'runtime-custom'
+    & (Join-Path $repoRoot 'scripts\package-custom-runtime.ps1') -BuiltRuntime $built -Output $stage
+    Assert-CustomRuntime $stage
     return (Join-Path $runtimeDir 'llama-server.exe')
 }
 
@@ -415,16 +384,24 @@ try {
     Install-Artifact $manifest.model | Out-Null
     if (-not $SkipVision) { Install-Artifact $manifest.mmproj | Out-Null }
     Install-Artifact $manifest.chat_template | Out-Null
-    $officialServer = Install-OfficialRuntime
-    $customServer = if ($Runtime -eq 'Custom') { Install-CustomRuntime } else { $null }
     $stage = Join-Path $InstallRoot ".control-plane-stage-$([Guid]::NewGuid().ToString('N'))"
     try {
+        New-Item -ItemType Directory -Force -Path $stage | Out-Null
+        $officialServer = Install-OfficialRuntime $stage
+        $customServer = if ($Runtime -eq 'Custom') { Install-CustomRuntime $stage } else { $null }
         Copy-ControlPlane $stage
         Write-SessionConfig $officialServer $customServer $stage
         $stageBuilder = Join-Path $stage 'scripts\build-launcher.ps1'
         & $stageBuilder -Output (Join-Path $stage 'Open Local Qwen.exe') -NoShortcut
         Write-ControlPlaneIdentity $stage
-        $items = @(
+        $items = @()
+        if (Test-Path -LiteralPath (Join-Path $stage 'runtime-official')) {
+            $items += [pscustomobject]@{ stage='runtime-official'; destination='runtime-official' }
+        }
+        if (Test-Path -LiteralPath (Join-Path $stage 'runtime-custom')) {
+            $items += [pscustomobject]@{ stage='runtime-custom'; destination='runtime-custom' }
+        }
+        $items += @(
             [pscustomobject]@{ stage='scripts'; destination='scripts' },
             [pscustomobject]@{ stage='launcher'; destination='launcher' },
             [pscustomobject]@{ stage='profiles'; destination='profiles' },

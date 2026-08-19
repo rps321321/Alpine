@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 from pathlib import Path
 from typing import Any, Iterator
 
 from .config import ConfigError, git_commit, read_json, sha256
+from .io import write_json_atomic
 
 
 IDENTITY_SCHEMA = 1
@@ -34,21 +32,6 @@ def expected_control_plane(repo_root: Path) -> dict[str, str]:
     }
 
 
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(value, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
 def write_control_plane_identity(
     repo_root: Path,
     install_root: Path,
@@ -70,7 +53,7 @@ def write_control_plane_identity(
         "source_commit": source_commit if source_commit is not None else git_commit(),
         "files": [{"path": path, "sha256": digest} for path, digest in sorted(expected.items())],
     }
-    _atomic_json(install_root / IDENTITY_PATH, identity)
+    write_json_atomic(install_root / IDENTITY_PATH, identity)
     return identity
 
 

@@ -36,7 +36,9 @@ if (-not (Test-Path -LiteralPath $projectPath -PathType Container)) { throw "Pro
 $openCode = Get-Command opencode -ErrorAction Stop
 $modelId = 'local-models/Qwen3.8-27B-ABLITERATED'
 $acquisition = $null
+$capacityLease = $null
 $environmentState = $null
+$cleanupFailures = @()
 if ($OpenCodeArgs | Where-Object { $_ -match '^--auto(?:=|$)' }) {
     throw '--auto disables the consent boundary and is not accepted by this launcher.'
 }
@@ -69,8 +71,9 @@ try {
     if ($CaptureEndpoint) {
         Write-Host "Capturing one OpenCode request at $CaptureEndpoint"
     } else {
-        Assert-InferenceCapacityAvailable
-        $acquisition = Enter-InferenceSession -Profile $Profile -Vision:$WithVision
+        $capacityLease = Enter-InferenceCapacityLease -InstallRoot ([string]$session.root)
+        $acquisition = Enter-InferenceSession -InstallRoot ([string]$session.root) -Profile $Profile -Vision:$WithVision
+        Update-InferenceCapacityLease $capacityLease ([string]$acquisition.session_identity)
     }
 
     Write-Host "Opening OpenCode: $Profile | context=$($profileConfig.context) | project=$projectPath"
@@ -84,9 +87,23 @@ try {
     $exitCode = if ($?) { 0 } elseif ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 1 }
 } finally {
     if ($null -ne $acquisition) {
-        try { Exit-InferenceSession -Acquisition $acquisition -KeepServer:$KeepServer }
-        catch { Write-Warning "Inference Session restoration failed: $($_.Exception.Message)" }
+        try { Exit-InferenceSession -InstallRoot ([string]$session.root) -Acquisition $acquisition -KeepServer:$KeepServer }
+        catch {
+            $cleanupFailures += $_
+            Write-Warning "Inference Session restoration failed: $($_.Exception.Message)"
+        }
     }
-    if ($null -ne $environmentState) { Exit-HarnessEnvironment $environmentState }
+    if ($null -ne $capacityLease) {
+        try { Exit-InferenceCapacityLease $capacityLease }
+        catch { $cleanupFailures += $_ }
+    }
+    if ($null -ne $environmentState) {
+        try { Exit-HarnessEnvironment $environmentState }
+        catch { $cleanupFailures += $_ }
+    }
+    if ($cleanupFailures.Count) {
+        $details = ($cleanupFailures | ForEach-Object { $_.Exception.Message }) -join '; '
+        throw "OpenCode cleanup failed: $details"
+    }
 }
 exit $exitCode

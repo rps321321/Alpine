@@ -5,12 +5,12 @@ import os
 import shutil
 import subprocess
 import tempfile
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
 from .config import powershell, read_json
+from .io import write_json_atomic
 from .locking import FileLease, LeaseBusyError
 from .stats import describe
 from .store import ResultStore
@@ -36,18 +36,7 @@ def run_powershell(script: Path, *arguments: str, timeout: int = 900) -> subproc
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(value, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+    write_json_atomic(path, value)
 
 
 class SessionAdapter(Protocol):
@@ -168,6 +157,25 @@ def parse_agent_events(text: str) -> dict[str, Any]:
     }
 
 
+def read_crash_tolerant_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
+    """Read complete JSON objects and tolerate only a torn trailing append."""
+    lines = [(number, line) for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1) if line.strip()]
+    rows: list[dict[str, Any]] = []
+    ignored = 0
+    for position, (line_number, line) in enumerate(lines):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if position == len(lines) - 1:
+                ignored += 1
+                continue
+            raise ValueError(f"malformed JSONL record at {path}:{line_number}") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"expected JSON object at {path}:{line_number}")
+        rows.append(value)
+    return rows, ignored
+
+
 class BenchmarkLifecycle:
     def __init__(
         self,
@@ -223,7 +231,10 @@ class BenchmarkLifecycle:
             )
             self.record.setdefault("config", {})["launch"] = {
                 key: self.acquisition.get(key)
-                for key in ("runtime", "server", "profile_sha256", "session_identity", "arguments", "environment", "fallback")
+                for key in (
+                    "runtime", "server", "server_sha256", "runtime_build_sha256",
+                    "profile_sha256", "session_identity", "arguments", "environment", "fallback",
+                )
             }
             self.record["config"]["inference_lease"] = {
                 "lease_id": self.inference_lease.owner["lease_id"],
@@ -236,20 +247,31 @@ class BenchmarkLifecycle:
             self._entered = True
             return self
         except BaseException as exc:
-            if self.store is not None:
-                contention = isinstance(exc, LeaseBusyError)
-                self.record.setdefault("config", {})["inference_lease"] = {
-                    "lease_id": self.inference_lease.owner["lease_id"],
-                    "contention": contention,
-                }
-                self.store.update_config(str(self.record["id"]), self.record["config"])
-                failure = {"error": type(exc).__name__, "message": str(exc), "contention": contention}
-                write_json(self.raw_dir / "failure.json", failure)
-                write_json(self.raw_dir / "run.json", self.record)
-                status = "blocked-contention" if contention else "error"
-                self.store.finish_run(str(self.record["id"]), utc_now(), status, failure)
-                self._event("run-failed", status=status, error=type(exc).__name__)
-            self._release_resources(release_session=True)
+            secondary: list[BaseException] = []
+            try:
+                if self.store is not None:
+                    contention = isinstance(exc, LeaseBusyError)
+                    self.record.setdefault("config", {})["inference_lease"] = {
+                        "lease_id": self.inference_lease.owner["lease_id"],
+                        "contention": contention,
+                    }
+                    self.store.update_config(str(self.record["id"]), self.record["config"])
+                    failure = {"error": type(exc).__name__, "message": str(exc), "contention": contention}
+                    write_json(self.raw_dir / "failure.json", failure)
+                    write_json(self.raw_dir / "run.json", self.record)
+                    status = "blocked-contention" if contention else "error"
+                    self.store.finish_run(str(self.record["id"]), utc_now(), status, failure)
+                    self._event("run-failed", status=status, error=type(exc).__name__)
+            except BaseException as caught:
+                secondary.append(caught)
+            finally:
+                try:
+                    self._release_resources(release_session=True)
+                except BaseException as caught:
+                    secondary.append(caught)
+            if secondary:
+                details = "; ".join(f"{type(item).__name__}: {item}" for item in secondary)
+                raise RuntimeError(f"Benchmark setup failed: {exc}. Finalization also failed: {details}") from exc
             raise
 
     def record_sample(self, sample: dict[str, Any]) -> None:
@@ -284,51 +306,97 @@ class BenchmarkLifecycle:
         if self.store is None:
             self._release_resources(release_session=True)
             return False
+        errors: list[BaseException] = []
         if exc is not None:
             failure = {"error": type(exc).__name__, "message": str(exc)}
-            write_json(self.raw_dir / "failure.json", failure)
             self.summary = failure
             self.status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "error"
-            self._event("run-failed", status=self.status, error=type(exc).__name__)
         elif not self.completed or self.summary is None or self.status is None:
             failure = {"error": "IncompleteLifecycle", "message": "benchmark exited without complete()"}
-            write_json(self.raw_dir / "failure.json", failure)
             self.summary, self.status = failure, "error"
-            self._event("run-failed", status=self.status, error="IncompleteLifecycle")
-        else:
-            write_json(self.raw_dir / "summary.json", self.summary)
-            self._event("run-completed", status=self.status)
-        self._copy_session_logs()
-        self.store.finish_run(str(self.record["id"]), utc_now(), self.status, self.summary)
-        release_error: BaseException | None = None
+        try:
+            self._copy_session_logs()
+        except BaseException as caught:
+            errors.append(caught)
         try:
             if self.acquisition is not None:
                 self.session_adapter.release(self.acquisition, self.keep_server)
         except BaseException as caught:
-            release_error = caught
-            write_json(self.raw_dir / "cleanup-failure.json", {"error": type(caught).__name__, "message": str(caught)})
+            errors.append(caught)
         finally:
-            self._release_resources(release_session=False)
-        if release_error is not None and exc is None:
-            raise release_error
+            self.acquisition = None
+
+        if errors:
+            cleanup = {
+                "error": "BenchmarkFinalizationError",
+                "failures": [{"error": type(item).__name__, "message": str(item)} for item in errors],
+                "benchmark_status": self.status,
+                "benchmark_summary": self.summary,
+            }
+            self.summary = cleanup
+            self.status = "error"
+            try:
+                write_json(self.raw_dir / "cleanup-failure.json", cleanup)
+            except BaseException as caught:
+                errors.append(caught)
+
+        try:
+            if self.status in {"passed", "failed-quality"}:
+                write_json(self.raw_dir / "summary.json", self.summary or {})
+                self._event("run-completed", status=self.status)
+            else:
+                write_json(self.raw_dir / "failure.json", self.summary or {})
+                self._event("run-failed", status=self.status, error=(self.summary or {}).get("error"))
+        except BaseException as caught:
+            errors.append(caught)
+        try:
+            self.store.finish_run(str(self.record["id"]), utc_now(), self.status or "error", self.summary or {})
+        except BaseException as caught:
+            errors.append(caught)
+        finally:
+            try:
+                self._release_resources(release_session=False)
+            except BaseException as caught:
+                errors.append(caught)
+        if errors and exc is None:
+            details = "; ".join(f"{type(item).__name__}: {item}" for item in errors)
+            raise RuntimeError(f"Benchmark finalization failed: {details}") from errors[0]
         return False
 
     def _release_resources(self, *, release_session: bool) -> None:
+        errors: list[BaseException] = []
         if release_session and self.acquisition is not None:
             try:
                 self.session_adapter.release(self.acquisition, self.keep_server)
+            except BaseException as caught:
+                errors.append(caught)
             finally:
                 self.acquisition = None
-        if self.store is not None:
-            self.store.close()
-            self.store = None
-        self.inference_lease.release()
-        if self._lease_environment_had_value:
-            os.environ["LOCALMODEL_INFERENCE_LEASE_ID"] = self._lease_environment_prior or ""
-        else:
-            os.environ.pop("LOCALMODEL_INFERENCE_LEASE_ID", None)
-        self.run_lease.release()
+        try:
+            if self.store is not None:
+                self.store.close()
+                self.store = None
+        except BaseException as caught:
+            errors.append(caught)
+        try:
+            self.inference_lease.release()
+        except BaseException as caught:
+            errors.append(caught)
+        try:
+            if self._lease_environment_had_value:
+                os.environ["LOCALMODEL_INFERENCE_LEASE_ID"] = self._lease_environment_prior or ""
+            else:
+                os.environ.pop("LOCALMODEL_INFERENCE_LEASE_ID", None)
+        except BaseException as caught:
+            errors.append(caught)
+        try:
+            self.run_lease.release()
+        except BaseException as caught:
+            errors.append(caught)
         self._entered = False
+        if errors:
+            details = "; ".join(f"{type(item).__name__}: {item}" for item in errors)
+            raise RuntimeError(f"Benchmark resources did not release cleanly: {details}") from errors[0]
 
     def abandon_for_test(self) -> None:
         """Simulate process death after raw evidence publication without finalization."""
@@ -361,6 +429,13 @@ def reconcile_run(result_root: Path, run_id: str) -> dict[str, Any]:
                 "already_finalized": True,
             }
         prior: dict[str, Any] = {"status": row["status"]}
+        lifecycle_path = raw_dir / "lifecycle.jsonl"
+        if lifecycle_path.is_file():
+            lifecycle_events, ignored_lifecycle = read_crash_tolerant_jsonl(lifecycle_path)
+            if lifecycle_events:
+                prior["last_lifecycle_event"] = lifecycle_events[-1]
+            if ignored_lifecycle:
+                prior["ignored_trailing_lifecycle_records"] = ignored_lifecycle
         failure_path = raw_dir / "failure.json"
         if failure_path.is_file():
             prior["failure"] = read_json(failure_path)
@@ -376,13 +451,18 @@ def reconcile_run(result_root: Path, run_id: str) -> dict[str, Any]:
             status = "passed" if quality else "failed-quality"
         else:
             samples_path = raw_dir / "samples.jsonl"
-            samples = []
+            samples: list[dict[str, Any]] = []
+            ignored_samples = 0
             if samples_path.is_file():
-                samples = [json.loads(line) for line in samples_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+                samples, ignored_samples = read_crash_tolerant_jsonl(samples_path)
             if samples:
                 store.restore_samples(run_id, samples)
                 summary = summarize_samples(samples)
                 summary["reconciled_from"] = prior
+                summary["raw_evidence"] = {
+                    "complete_sample_records": len(samples),
+                    "ignored_trailing_incomplete_records": ignored_samples,
+                }
                 status = "passed" if summary["all_quality_pass"] else "failed-quality"
             else:
                 summary = {"reconciled_from": prior, "error": "interrupted before any sample completed"}

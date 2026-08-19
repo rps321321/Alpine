@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .locking import FileLease
+from .io import write_json_atomic
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SESSION_SCHEMA = 3
@@ -50,12 +51,18 @@ class ResolvedSession:
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError as exc:
-        raise ConfigError(f"JSON file missing: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"Malformed JSON in {path}: {exc.msg}") from exc
+    for attempt in range(200):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
+            break
+        except PermissionError:
+            if attempt == 199:
+                raise
+            time.sleep(0.01)
+        except FileNotFoundError as exc:
+            raise ConfigError(f"JSON file missing: {path}") from exc
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"Malformed JSON in {path}: {exc.msg}") from exc
     if not isinstance(value, dict):
         raise ConfigError(f"Expected a JSON object in {path}")
     return value
@@ -193,17 +200,7 @@ def select_active_profile(install_root: Path, name: str) -> Path:
         )
         shutil.copy2(path, backup)
         session["active_profile"] = name
-        temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-                json.dump(session, handle, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
+        write_json_atomic(path, session, sort_keys=False)
     return backup
 
 

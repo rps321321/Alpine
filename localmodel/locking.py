@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import json
 import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .io import write_json_atomic
 
 
 class LeaseBusyError(RuntimeError):
@@ -28,8 +29,9 @@ class FileLease:
 
     def acquire(self) -> "FileLease":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+b")
+        handle: Any = None
         try:
+            handle = self.path.open("a+b")
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
                 handle.write(b" ")
@@ -44,7 +46,8 @@ class FileLease:
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (OSError, BlockingIOError) as exc:
-            handle.close()
+            if handle is not None:
+                handle.close()
             detail = ""
             try:
                 detail = self.metadata_path.read_text(encoding="utf-8", errors="replace").strip()
@@ -85,19 +88,7 @@ class FileLease:
         self._publish_owner()
 
     def _publish_owner(self) -> None:
-        temporary = self.metadata_path.with_name(
-            f"{self.metadata_path.name}.{uuid.uuid4().hex}.tmp"
-        )
-        try:
-            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-                json.dump(self.owner, handle, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.metadata_path)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
+        write_json_atomic(self.metadata_path, self.owner)
 
     def __enter__(self) -> "FileLease":
         return self.acquire()

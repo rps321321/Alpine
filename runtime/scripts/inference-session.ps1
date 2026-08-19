@@ -78,7 +78,7 @@ function Get-InferenceSessionSnapshot {
     }
 }
 
-function Assert-InferenceCapacityAvailable {
+function Enter-InferenceCapacityLease {
     param([string]$InstallRoot, [int]$TimeoutMilliseconds = 100)
     $session = Get-SessionConfig $InstallRoot
     $leasePath = Join-Path $session.root 'logs\inference.lease'
@@ -87,15 +87,78 @@ function Assert-InferenceCapacityAvailable {
     if ($callerLease -and (Test-Path -LiteralPath $ownerPath)) {
         try {
             $owner = Get-Content -Raw -LiteralPath $ownerPath | ConvertFrom-Json
-            if ([string](Get-PropertyValue $owner 'lease_id' '') -eq $callerLease) { return }
+            $ownerPid = [int](Get-PropertyValue $owner 'pid' 0)
+            $ownerAlive = $ownerPid -gt 0 -and $null -ne (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)
+            if ($ownerAlive -and [string](Get-PropertyValue $owner 'lease_id' '') -eq $callerLease) {
+                return [pscustomobject]@{ Borrowed=$true; LeaseId=$callerLease; Lock=$null; OwnerPath=$ownerPath }
+            }
         } catch { }
     }
     try {
-        $probe = Enter-InterprocessLock $leasePath $TimeoutMilliseconds
+        $lock = Enter-InterprocessLock $leasePath $TimeoutMilliseconds
     } catch {
         throw 'Inference capacity is leased by a measured benchmark; wait for it to finish before opening the Harness.'
     }
-    Exit-InterprocessLock $probe
+    $leaseId = [Guid]::NewGuid().ToString('N')
+    $prior = Get-Item Env:LOCALMODEL_INFERENCE_LEASE_ID -ErrorAction SilentlyContinue
+    $owner = [ordered]@{
+        kind = 'interactive-harness'
+        lease_id = $leaseId
+        pid = $PID
+        acquired_at = (Get-Date).ToUniversalTime().ToString('o')
+        session_identity = $null
+    }
+    try {
+        Write-AtomicText $ownerPath (($owner | ConvertTo-Json -Depth 4) + [Environment]::NewLine)
+        $env:LOCALMODEL_INFERENCE_LEASE_ID = $leaseId
+        return [pscustomobject]@{
+            Borrowed = $false
+            LeaseId = $leaseId
+            Lock = $lock
+            OwnerPath = $ownerPath
+            PriorExists = ($null -ne $prior)
+            PriorValue = if ($prior) { [string]$prior.Value } else { $null }
+        }
+    } catch {
+        Exit-InterprocessLock $lock
+        throw
+    }
+}
+
+function Update-InferenceCapacityLease {
+    param($Lease, [string]$SessionIdentity)
+    if ($null -eq $Lease -or [bool]$Lease.Borrowed) { return }
+    $owner = [ordered]@{
+        kind = 'interactive-harness'
+        lease_id = [string]$Lease.LeaseId
+        pid = $PID
+        acquired_at = (Get-Date).ToUniversalTime().ToString('o')
+        session_identity = $SessionIdentity
+    }
+    Write-AtomicText ([string]$Lease.OwnerPath) (($owner | ConvertTo-Json -Depth 4) + [Environment]::NewLine)
+}
+
+function Exit-InferenceCapacityLease {
+    param($Lease)
+    if ($null -eq $Lease -or [bool]$Lease.Borrowed) { return }
+    try {
+        if (Test-Path -LiteralPath $Lease.OwnerPath) {
+            try {
+                $owner = Get-Content -Raw -LiteralPath $Lease.OwnerPath | ConvertFrom-Json
+                if ([string](Get-PropertyValue $owner 'lease_id' '') -eq [string]$Lease.LeaseId) {
+                    Remove-Item -LiteralPath $Lease.OwnerPath -Force
+                }
+            } catch { }
+        }
+        if ([bool]$Lease.PriorExists) { $env:LOCALMODEL_INFERENCE_LEASE_ID = [string]$Lease.PriorValue }
+        else { Remove-Item Env:LOCALMODEL_INFERENCE_LEASE_ID -ErrorAction SilentlyContinue }
+    } finally { Exit-InterprocessLock $Lease.Lock }
+}
+
+function Assert-InferenceCapacityAvailable {
+    param([string]$InstallRoot, [int]$TimeoutMilliseconds = 100)
+    $lease = Enter-InferenceCapacityLease -InstallRoot $InstallRoot -TimeoutMilliseconds $TimeoutMilliseconds
+    Exit-InferenceCapacityLease $lease
 }
 
 function New-InferenceArguments {
@@ -222,10 +285,16 @@ function Start-InferenceSessionCore {
             profile = $Profile
             runtime = $resolved.RuntimeName
             server = [string]$resolved.ServerPath
+            server_sha256 = Get-FileSha256 ([string]$resolved.ServerPath)
+            runtime_build_sha256 = $null
             vision = [bool]$Vision
             cleanup_paused = $cleanupPaused
             cleanup_pid = $cleanupPid
             fallback = $null
+        }
+        $runtimeBuildManifest = Join-Path (Split-Path ([string]$resolved.ServerPath) -Parent) 'build-manifest.json'
+        if (Test-Path -LiteralPath $runtimeBuildManifest -PathType Leaf) {
+            $state.runtime_build_sha256 = Get-FileSha256 $runtimeBuildManifest
         }
         $arguments = New-InferenceArguments $session $profileConfig ([string]$resolved.ServerPath) ([bool]$Vision)
         $state.arguments = @($arguments)
@@ -262,14 +331,20 @@ function Start-InferenceSessionCore {
             Write-Host "Healthy: $Profile pid=$($process.Id) context=$($profileConfig.context)"
             return [pscustomobject]@{ Started = $true; Status = (Get-InferenceSessionStatus -InstallRoot $InstallRoot) }
         } catch {
+            $startupFailure = $_
             if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
             Wait-PortFree ([int]$session.port) 30 | Out-Null
-            try { Restore-CleanupProcess $session $state } catch { Write-Warning $_.Exception.Message }
+            $cleanupFailure = $null
+            try { Restore-CleanupProcess $session $state } catch { $cleanupFailure = $_ }
             $state.phase = 'failed'
-            $state.failed = $_.Exception.Message
+            $state.failed = $startupFailure.Exception.Message
+            if ($cleanupFailure) { $state.cleanup_restore_failed = $cleanupFailure.Exception.Message }
             $state.failed_at = (Get-Date).ToUniversalTime().ToString('o')
             Save-SessionState $state $session
-            throw
+            if ($cleanupFailure) {
+                throw "Inference start failed: $($startupFailure.Exception.Message) Cleanup restoration also failed: $($cleanupFailure.Exception.Message)"
+            }
+            throw $startupFailure
         }
 }
 
@@ -300,108 +375,130 @@ function Stop-InferenceSessionCore {
 function Start-InferenceSession {
     [CmdletBinding()]
     param([string]$InstallRoot, [string]$Profile, [switch]$Vision, [int]$LockTimeoutMilliseconds = 15000)
-    $session = Get-SessionConfig $InstallRoot
-    $lock = Enter-InterprocessLock "$($session.state_file).session.lock" $LockTimeoutMilliseconds
-    try { return Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile $Profile -Vision:$Vision }
-    finally { Exit-InterprocessLock $lock }
+    $capacity = Enter-InferenceCapacityLease -InstallRoot $InstallRoot -TimeoutMilliseconds $LockTimeoutMilliseconds
+    try {
+        $session = Get-SessionConfig $InstallRoot
+        $lock = Enter-InterprocessLock "$($session.state_file).session.lock" $LockTimeoutMilliseconds
+        try { return Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile $Profile -Vision:$Vision }
+        finally { Exit-InterprocessLock $lock }
+    } finally { Exit-InferenceCapacityLease $capacity }
 }
 
 function Stop-InferenceSession {
     [CmdletBinding()]
     param([string]$InstallRoot, [int]$LockTimeoutMilliseconds = 15000)
-    $session = Get-SessionConfig $InstallRoot
-    $lock = Enter-InterprocessLock "$($session.state_file).session.lock" $LockTimeoutMilliseconds
-    try { return Stop-InferenceSessionCore -InstallRoot $InstallRoot }
-    finally { Exit-InterprocessLock $lock }
+    $capacity = Enter-InferenceCapacityLease -InstallRoot $InstallRoot -TimeoutMilliseconds $LockTimeoutMilliseconds
+    try {
+        $session = Get-SessionConfig $InstallRoot
+        $lock = Enter-InterprocessLock "$($session.state_file).session.lock" $LockTimeoutMilliseconds
+        try { return Stop-InferenceSessionCore -InstallRoot $InstallRoot }
+        finally { Exit-InterprocessLock $lock }
+    } finally { Exit-InferenceCapacityLease $capacity }
 }
 
 function Enter-InferenceSession {
     [CmdletBinding()]
     param([string]$InstallRoot, [string]$Profile, [switch]$Vision, [int]$LockTimeoutMilliseconds = 15000)
-    $session = Get-SessionConfig $InstallRoot
-    $lock = Enter-InterprocessLock "$($session.state_file).session.lock" $LockTimeoutMilliseconds
-    $prior = $null
-    $changed = $false
+    $capacity = Enter-InferenceCapacityLease -InstallRoot $InstallRoot -TimeoutMilliseconds $LockTimeoutMilliseconds
     try {
-        $prior = Get-InferenceSessionSnapshot -InstallRoot $InstallRoot
-        $current = Get-InferenceSessionStatus -InstallRoot $InstallRoot
-        $selected = if ($Profile) { $Profile } else { (Get-ResolvedSession -InstallRoot $InstallRoot).ProfileName }
-        $plan = Resolve-InferenceSessionPlan $current $selected ([bool]$Vision)
-        if ($plan -eq 'refuse') { throw 'Inference Session is owned by a foreign listener.' }
-        $changed = $plan -in @('start', 'replace')
-        if ($plan -eq 'replace') { Stop-InferenceSessionCore -InstallRoot $InstallRoot | Out-Null }
-        if ($changed) { Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile $selected -Vision:$Vision | Out-Null }
-        $after = Get-InferenceSessionStatus -InstallRoot $InstallRoot
-        if (-not $after.Active -or -not $after.Healthy -or $after.Profile -ne $selected -or [bool]$after.Vision -ne [bool]$Vision) {
-            throw 'Requested Inference Session did not pass post-transition health verification.'
-        }
-        return [pscustomobject][ordered]@{
-            changed = $changed
-            profile = [string]$after.Profile
-            runtime = [string]$after.Runtime
-            server = [string]$after.ExpectedPath
-            session_identity = [string](Get-PropertyValue $after.State 'transaction_id' '')
-            profile_sha256 = [string](Get-PropertyValue $after.State 'profile_sha256' '')
-            arguments = @(Get-PropertyValue $after.State 'arguments' @())
-            environment = Get-PropertyValue $after.State 'environment' ([pscustomobject]@{})
-            fallback = $after.Fallback
-            prior = [pscustomobject][ordered]@{
-                active = [bool]$prior.Active
-                healthy = [bool]$prior.Healthy
-                profile = [string]$prior.Profile
-                vision = [bool]$prior.Vision
-                runtime = [string]$prior.Runtime
-                session_identity = [string](Get-PropertyValue $prior.State 'transaction_id' '')
+        $session = Get-SessionConfig $InstallRoot
+        $lock = Enter-InterprocessLock "$($session.state_file).session.lock" $LockTimeoutMilliseconds
+        $prior = $null
+        $changed = $false
+        try {
+            $prior = Get-InferenceSessionSnapshot -InstallRoot $InstallRoot
+            $current = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+            $selected = if ($Profile) { $Profile } else { (Get-ResolvedSession -InstallRoot $InstallRoot).ProfileName }
+            $plan = Resolve-InferenceSessionPlan $current $selected ([bool]$Vision)
+            if ($plan -eq 'refuse') { throw 'Inference Session is owned by a foreign listener.' }
+            $changed = $plan -in @('start', 'replace')
+            if ($plan -eq 'replace') { Stop-InferenceSessionCore -InstallRoot $InstallRoot | Out-Null }
+            if ($changed) { Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile $selected -Vision:$Vision | Out-Null }
+            $after = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+            if (-not $after.Active -or -not $after.Healthy -or $after.Profile -ne $selected -or [bool]$after.Vision -ne [bool]$Vision) {
+                throw 'Requested Inference Session did not pass post-transition health verification.'
             }
-        }
-    } catch {
-        $original = $_
-        if ($changed -and $null -ne $prior) {
-            try {
-                $failed = Get-InferenceSessionStatus -InstallRoot $InstallRoot
-                if ($failed.Active) { Stop-InferenceSessionCore -InstallRoot $InstallRoot | Out-Null }
-                if ($prior.Active) {
-                    Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile $prior.Profile -Vision:$prior.Vision | Out-Null
-                    $restored = Get-InferenceSessionStatus -InstallRoot $InstallRoot
-                    if (-not $restored.Healthy -or $restored.Profile -ne $prior.Profile -or [bool]$restored.Vision -ne [bool]$prior.Vision) {
-                        throw 'Rollback health verification failed.'
-                    }
+            return [pscustomobject][ordered]@{
+                changed = $changed
+                profile = [string]$after.Profile
+                runtime = [string]$after.Runtime
+                server = [string]$after.ExpectedPath
+                server_sha256 = [string](Get-PropertyValue $after.State 'server_sha256' '')
+                runtime_build_sha256 = Get-PropertyValue $after.State 'runtime_build_sha256' $null
+                session_identity = [string](Get-PropertyValue $after.State 'transaction_id' '')
+                profile_sha256 = [string](Get-PropertyValue $after.State 'profile_sha256' '')
+                arguments = @(Get-PropertyValue $after.State 'arguments' @())
+                environment = Get-PropertyValue $after.State 'environment' ([pscustomobject]@{})
+                fallback = $after.Fallback
+                prior = [pscustomobject][ordered]@{
+                    active = [bool]$prior.Active
+                    healthy = [bool]$prior.Healthy
+                    profile = [string]$prior.Profile
+                    vision = [bool]$prior.Vision
+                    runtime = [string]$prior.Runtime
+                    session_identity = [string](Get-PropertyValue $prior.State 'transaction_id' '')
                 }
-            } catch {
-                throw "Inference Session transition failed: $($original.Exception.Message) Rollback failed: $($_.Exception.Message)"
             }
+        } catch {
+            $original = $_
+            if ($changed -and $null -ne $prior) {
+                try {
+                    $failed = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+                    if ($failed.Active) { Stop-InferenceSessionCore -InstallRoot $InstallRoot | Out-Null }
+                    if ($prior.Active) {
+                        Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile $prior.Profile -Vision:$prior.Vision | Out-Null
+                        $restored = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+                        if (-not $restored.Healthy -or $restored.Profile -ne $prior.Profile -or [bool]$restored.Vision -ne [bool]$prior.Vision) {
+                            throw 'Rollback health verification failed.'
+                        }
+                    }
+                } catch {
+                    throw "Inference Session transition failed: $($original.Exception.Message) Rollback failed: $($_.Exception.Message)"
+                }
+            }
+            throw $original
+        } finally {
+            Exit-InterprocessLock $lock
         }
-        throw $original
-    } finally { Exit-InterprocessLock $lock }
+    } finally {
+        Exit-InferenceCapacityLease $capacity
+    }
 }
 
 function Exit-InferenceSession {
     [CmdletBinding()]
     param([string]$InstallRoot, [Parameter(Mandatory = $true)]$Acquisition, [switch]$KeepServer, [int]$LockTimeoutMilliseconds = 15000)
     if ($KeepServer -or -not [bool](Get-PropertyValue $Acquisition 'changed' $false)) { return }
-    $session = Get-SessionConfig $InstallRoot
-    $lock = Enter-InterprocessLock "$($session.state_file).session.lock" $LockTimeoutMilliseconds
+    $capacity = Enter-InferenceCapacityLease -InstallRoot $InstallRoot -TimeoutMilliseconds $LockTimeoutMilliseconds
     try {
-        $current = Get-InferenceSessionStatus -InstallRoot $InstallRoot
-        if ($current.Foreign) { throw 'Cannot restore the prior Session because the port now has a foreign listener.' }
-        if ($current.Active) {
-            $currentIdentity = [string](Get-PropertyValue $current.State 'transaction_id' '')
-            $acquiredIdentity = [string](Get-PropertyValue $Acquisition 'session_identity' '')
-            if (-not $acquiredIdentity -or $currentIdentity -ne $acquiredIdentity) {
-                throw 'Cannot restore the prior Session because the active launch identity changed.'
+        $session = Get-SessionConfig $InstallRoot
+        $lock = Enter-InterprocessLock "$($session.state_file).session.lock" $LockTimeoutMilliseconds
+        try {
+            $current = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+            if ($current.Foreign) { throw 'Cannot restore the prior Session because the port now has a foreign listener.' }
+            if ($current.Active) {
+                $currentIdentity = [string](Get-PropertyValue $current.State 'transaction_id' '')
+                $acquiredIdentity = [string](Get-PropertyValue $Acquisition 'session_identity' '')
+                if (-not $acquiredIdentity -or $currentIdentity -ne $acquiredIdentity) {
+                    throw 'Cannot restore the prior Session because the active launch identity changed.'
+                }
+                Stop-InferenceSessionCore -InstallRoot $InstallRoot | Out-Null
             }
-            Stop-InferenceSessionCore -InstallRoot $InstallRoot | Out-Null
-        }
-        $prior = Get-PropertyValue $Acquisition 'prior' $null
-        if ($prior -and [bool](Get-PropertyValue $prior 'active' $false)) {
-            Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile ([string]$prior.profile) -Vision:([bool]$prior.vision) | Out-Null
-            $restored = Get-InferenceSessionStatus -InstallRoot $InstallRoot
-            if (-not $restored.Healthy -or $restored.Profile -ne $prior.profile -or [bool]$restored.Vision -ne [bool]$prior.vision) {
-                throw 'The pre-Harness Inference Session did not pass restoration health verification.'
+            $prior = Get-PropertyValue $Acquisition 'prior' $null
+            if ($prior -and [bool](Get-PropertyValue $prior 'active' $false)) {
+                Start-InferenceSessionCore -InstallRoot $InstallRoot -Profile ([string]$prior.profile) -Vision:([bool]$prior.vision) | Out-Null
+                $restored = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+                if (-not $restored.Healthy -or $restored.Profile -ne $prior.profile -or [bool]$restored.Vision -ne [bool]$prior.vision) {
+                    throw 'The pre-Harness Inference Session did not pass restoration health verification.'
+                }
+            } else {
+                $restored = Get-InferenceSessionStatus -InstallRoot $InstallRoot
+                if ($restored.Active -or $restored.Foreign) { throw 'The pre-Harness idle state was not restored.' }
             }
-        } else {
-            $restored = Get-InferenceSessionStatus -InstallRoot $InstallRoot
-            if ($restored.Active -or $restored.Foreign) { throw 'The pre-Harness idle state was not restored.' }
+        } finally {
+            Exit-InterprocessLock $lock
         }
-    } finally { Exit-InterprocessLock $lock }
+    } finally {
+        Exit-InferenceCapacityLease $capacity
+    }
 }

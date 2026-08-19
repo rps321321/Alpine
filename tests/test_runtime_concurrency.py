@@ -7,6 +7,8 @@ import time
 import unittest
 from pathlib import Path
 
+from localmodel.locking import FileLease, LeaseBusyError
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LIB = REPO_ROOT / "runtime" / "scripts" / "lib.ps1"
@@ -20,6 +22,7 @@ class RuntimeConcurrencyTests(unittest.TestCase):
             state = root / "session-state.json"
             trace = root / "trace.txt"
             barrier = root / "go"
+            (root / "logs").mkdir()
             processes: list[subprocess.Popen[str]] = []
             for index in range(6):
                 action = "Start" if index % 2 == 0 else "Stop"
@@ -31,7 +34,7 @@ class RuntimeConcurrencyTests(unittest.TestCase):
                 )
                 script = (
                     f". '{SESSION_MODULE}'; "
-                    f"function Get-SessionConfig {{ [pscustomobject]@{{state_file='{state}'}} }}; "
+                    f"function Get-SessionConfig {{ [pscustomobject]@{{root='{root}'; state_file='{state}'}} }}; "
                     f"function {core} {{ param([string]$InstallRoot,[string]$Profile,[switch]$Vision); "
                     f"Add-Content -LiteralPath '{trace}' -Value \"$($PID):{action}:begin\"; "
                     "Start-Sleep -Milliseconds 100; "
@@ -79,13 +82,33 @@ class RuntimeConcurrencyTests(unittest.TestCase):
                 )
                 for _ in range(8)
             ]
+            reader_script = (
+                f". '{LIB}'; "
+                f"while (-not (Test-Path -LiteralPath '{barrier}')) {{ Start-Sleep -Milliseconds 5 }}; "
+                f"$session = [pscustomobject]@{{ state_file = '{state}' }}; "
+                "1..240 | ForEach-Object { "
+                "$value = Read-SessionState $session; "
+                "if ($value -and ($value.iteration -lt 1 -or $value.iteration -gt 60 -or $value.payload.Length -ne 2048)) "
+                "{ throw 'reader observed invalid state' } }"
+            )
+            readers = [
+                subprocess.Popen(
+                    ["powershell.exe", "-NoProfile", "-Command", reader_script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for _ in range(4)
+            ]
             time.sleep(0.1)
             barrier.touch()
             results = []
             for process in processes:
                 stdout, stderr = process.communicate(timeout=60)
                 results.append((process.returncode, stdout, stderr))
+            reader_results = [reader.communicate(timeout=60) + (reader.returncode,) for reader in readers]
             self.assertTrue(all(code == 0 for code, _, _ in results), results)
+            self.assertTrue(all(code == 0 for _, _, code in reader_results), reader_results)
             parsed = json.loads(state.read_text(encoding="utf-8-sig"))
             self.assertIn(parsed["iteration"], range(1, 61))
             self.assertFalse(list(root.glob("session-state.json.*.tmp")))
@@ -118,6 +141,41 @@ class RuntimeConcurrencyTests(unittest.TestCase):
             self.assertTrue(all(code == 0 for code, _, _ in results), results)
             value = key.read_text(encoding="utf-8").strip()
             self.assertRegex(value, r"^sk-local-[0-9a-f]{64}$")
+
+    def test_interactive_capacity_lease_blocks_benchmark_and_recovers_after_owner_death(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = root / "logs"
+            logs.mkdir()
+            ready = root / "ready"
+            script = (
+                f". '{SESSION_MODULE}'; "
+                f"function Get-SessionConfig {{ [pscustomobject]@{{root='{root}'}} }}; "
+                "$lease = Enter-InferenceCapacityLease -TimeoutMilliseconds 2000; "
+                f"[IO.File]::WriteAllText('{ready}', 'ready'); "
+                "try { Start-Sleep -Seconds 30 } finally { Exit-InferenceCapacityLease $lease }"
+            )
+            owner = subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-Command", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists(), f"lease owner exited with {owner.poll()}")
+                benchmark = FileLease(logs / "inference.lease", {"kind": "benchmark"})
+                with self.assertRaises(LeaseBusyError):
+                    benchmark.acquire()
+            finally:
+                owner.kill()
+                owner.communicate(timeout=10)
+
+            recovered = FileLease(logs / "inference.lease", {"kind": "benchmark"})
+            recovered.acquire()
+            recovered.release()
 
 
 if __name__ == "__main__":

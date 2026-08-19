@@ -95,9 +95,11 @@ function Publish-SetupBundle {
             }
             Move-Item -LiteralPath $source -Destination $destination
         }
+        # Removing the marker is the commit point. Until then all backups remain
+        # intact so a crash can restore the complete prior publication.
+        Remove-Item -LiteralPath $marker -Force
         if (Test-Path -LiteralPath $backupRoot) { Remove-Item -LiteralPath $backupRoot -Recurse -Force }
         if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-        Remove-Item -LiteralPath $marker -Force
     } catch {
         $failure = $_
         try { Repair-InterruptedSetupPublication $root | Out-Null }

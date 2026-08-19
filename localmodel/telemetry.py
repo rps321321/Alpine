@@ -5,7 +5,6 @@ import statistics
 import subprocess
 import threading
 from ctypes import wintypes
-from typing import Any
 
 
 class GpuTelemetry:

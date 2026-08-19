@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -51,6 +52,8 @@ class InferenceSessionTests(unittest.TestCase):
     def test_transaction_handles_idle_reuse_replace_restore_and_start_failure(self) -> None:
         expression = r"""
         function Get-SessionConfig { [pscustomobject]@{ state_file='C:\fixture\state.json' } }
+        function Enter-InferenceCapacityLease { [pscustomobject]@{ Borrowed=$true } }
+        function Exit-InferenceCapacityLease { param($Lease) }
         function Enter-InterprocessLock { [pscustomobject]@{ handle=$true } }
         function Exit-InterprocessLock { param($Lock) }
         function New-FixtureStatus([bool]$Active, [string]$Profile, [bool]$Vision, [string]$Identity, [bool]$Foreign=$false) {
@@ -136,6 +139,66 @@ class InferenceSessionTests(unittest.TestCase):
         result = invoke(expression)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Cleanup health check failed", result.stderr)
+
+    def test_optimized_start_retries_once_with_pinned_mtp_only_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server = root / "server.exe"
+            model = root / "model.gguf"
+            template = root / "chat.jinja"
+            profile_path = root / "profiles" / "fixture.json"
+            profile_path.parent.mkdir()
+            for path in (server, model, template, profile_path):
+                path.write_text("fixture", encoding="utf-8")
+            expression = rf"""
+            $session = [pscustomobject]@{{
+              root='{root}'; model='{model}'; host='127.0.0.1'; port=8100; chat_template='{template}'
+              api_key_file='{root / 'api-key.txt'}'; base_url_file='{root / 'base-url.txt'}'
+              state_file='{root / 'state.json'}'; cleanup=[pscustomobject]@{{enabled=$false}}
+            }}
+            $profile = [pscustomobject]@{{
+              context=16384; parallel=1; threads=8; batch_size=1024; ubatch_size=256
+              kv_cache='q8_0'; tensor_cpu_through_block=24; mtp_depth=3
+              ngram_mod=$true; ngram_reset_on_begin=$true; fit_target_mib=11900
+            }}
+            $resolved = [pscustomobject]@{{
+              Session=$session; Profile=$profile; ProfileName='fixture'; RuntimeName='custom'
+              ServerPath='{server}'; Model='{model}'; ChatTemplate='{template}'
+              Mmproj=''; BaseUrl='http://127.0.0.1:8100'
+            }}
+            function Get-ResolvedSession {{ return $resolved }}
+            function Get-InferenceSessionStatus {{
+              [pscustomobject]@{{ Active=$false; Foreign=$false; Healthy=$false; Profile='fixture'; Vision=$false }}
+            }}
+            function Test-CleanupEnabled {{ return $false }}
+            function Ensure-LocalApiKey {{ param($Session) }}
+            function Write-AtomicText {{ param($Path,$Content,$Encoding) }}
+            function Save-SessionState {{ param($State,$Session); $global:lastState = $State | ConvertTo-Json -Depth 8 | ConvertFrom-Json }}
+            function Start-InferenceProcess {{
+              param($ServerPath,$Arguments,$OutLog,$ErrLog,$ResetNgram)
+              $global:starts++
+              [pscustomobject]@{{ Id=(100 + $global:starts); StartTime=(Get-Date); HasExited=$false }}
+            }}
+            function Test-StartedProcessHealthy {{ $global:healthChecks++; return $global:healthChecks -eq 2 }}
+            function Stop-Process {{ param($Id,[switch]$Force,$ErrorAction) }}
+            function Wait-PortFree {{ return $true }}
+            $global:starts=0; $global:healthChecks=0; $global:lastState=$null
+            Start-InferenceSessionCore -Profile fixture 3>$null | Out-Null
+            $specIndex = [Array]::IndexOf([object[]]$global:lastState.arguments, '--spec-type')
+            [pscustomobject]@{{
+              starts=$global:starts
+              fallback=$global:lastState.fallback
+              specType=$global:lastState.arguments[($specIndex + 1)]
+              reset=$global:lastState.environment.LLAMA_NGRAM_MOD_RESET_ON_BEGIN
+            }} | ConvertTo-Json -Compress
+            """
+            result = invoke(expression)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            observed = json.loads(result.stdout.splitlines()[-1])
+            self.assertEqual(observed["starts"], 2)
+            self.assertEqual(observed["fallback"], "mtp-only")
+            self.assertEqual(observed["specType"], "draft-mtp")
+            self.assertIsNone(observed["reset"])
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from pathlib import Path
 from typing import Any
 
-from .config import REPO_ROOT, read_json, sha256
+from .config import REPO_ROOT, read_json, sha256, tree_sha256
 from .store import ResultStore
 
 
@@ -92,11 +93,52 @@ def _run_identity(run: Any) -> dict[str, Any]:
         "model_sha256": run["model_sha256"],
         "backend_commit": run["backend_commit"],
         "profile_sha256": launch.get("profile_sha256"),
+        "runtime": launch.get("runtime"),
+        "server_sha256": launch.get("server_sha256"),
+        "runtime_identity": launch.get("runtime_build_sha256") or launch.get("server_sha256"),
     }
 
 
 def _identity_matches(expected: dict[str, Any], observed: dict[str, Any]) -> bool:
-    return all(observed.get(key) == value for key, value in expected.items())
+    return all(value not in (None, "") and observed.get(key) == value for key, value in expected.items())
+
+
+def _expected_benchmark_identity(kind: str, benchmark: dict[str, Any]) -> dict[str, Any]:
+    if kind == "micro":
+        from .microbench import suite_identity
+
+        return suite_identity()
+    if kind == "context":
+        from .contextbench import NEEDLES
+
+        return {
+            "name": "context-needle",
+            "schema": 1,
+            "generator_sha256": sha256(REPO_ROOT / "localmodel" / "contextbench.py"),
+            "needles_sha256": hashlib.sha256("|".join(NEEDLES).encode()).hexdigest(),
+        }
+    if kind == "agent":
+        task_id = benchmark.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("agent benchmark identity is missing task_id")
+        task_root = REPO_ROOT / "benchmarks" / "golden" / task_id
+        task = read_json(task_root / "task.json")
+        files = [path for path in task_root.rglob("*") if path.is_file()]
+        return {
+            "name": "golden-agent",
+            "schema": int(task["schema"]),
+            "task_id": task_id,
+            "suite_sha256": tree_sha256(task_root, files),
+        }
+    raise ValueError(f"unsupported benchmark kind: {kind}")
+
+
+def _benchmark_identity_matches(kind: str, benchmark: dict[str, Any]) -> bool:
+    try:
+        expected = _expected_benchmark_identity(kind, benchmark)
+    except (OSError, ValueError):
+        return False
+    return all(benchmark.get(key) == value for key, value in expected.items())
 
 
 def _benchmark_evidence(
@@ -115,9 +157,13 @@ def _benchmark_evidence(
         config = json.loads(row["config_json"])
         if config.get("benchmark", {}).get("name") == benchmark_name:
             relevant.append(row)
+    stale: list[Any] = []
     for row in relevant:
         if _identity_matches(expected_identity, _run_identity(row)):
             benchmark = json.loads(row["config_json"]).get("benchmark", {})
+            if not _benchmark_identity_matches(kind, benchmark):
+                stale.append(row)
+                continue
             return {
                 "name": name,
                 "status": "satisfied",
@@ -126,6 +172,13 @@ def _benchmark_evidence(
                     key: benchmark.get(key) for key in ("name", "schema", "sha256", "suite_sha256") if benchmark.get(key) is not None
                 },
             }
+    if stale:
+        return {
+            "name": name,
+            "status": "stale",
+            "run_ids": [row["id"] for row in stale],
+            "reason": "benchmark suite identity does not match the current versioned suite",
+        }
     if relevant:
         return {
             "name": name,
@@ -163,11 +216,24 @@ def _artifact_evidence(
 def qualify_run(store: ResultStore, run_id: str, target: str = "candidate") -> dict[str, Any]:
     run = store.run(run_id)
     base = qualify_run_row(run, target)
+    expected_identity = _run_identity(run)
+    identity_complete = all(value not in (None, "") for value in expected_identity.values())
+    anchor_config = json.loads(run["config_json"])
+    anchor_benchmark = anchor_config.get("benchmark", {})
+    benchmark_current = _benchmark_identity_matches(str(run["kind"]), anchor_benchmark)
+    base["checks"].extend(
+        [
+            {"name": "exact-run-identity", "passed": identity_complete, "observed": expected_identity, "required": "all fields"},
+            {"name": "current-benchmark-identity", "passed": benchmark_current, "observed": anchor_benchmark, "required": "current versioned suite"},
+        ]
+    )
+    base["automated_pass"] = bool(base["automated_pass"] and identity_complete and benchmark_current)
     required = list(base["missing_external_evidence"])
     if not required:
         base["evidence"] = []
+        base["promotion_ready"] = base["automated_pass"]
+        base["identity"] = expected_identity
         return base
-    expected_identity = _run_identity(run)
     artifacts = {row["kind"]: row for row in store.artifacts(run_id)}
     benchmark_requirements = {
         "near-limit-context-stress": ("context", "context-needle"),

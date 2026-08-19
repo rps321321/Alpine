@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from localmodel.config import sha256
-from localmodel.qualification import qualify_run
+from localmodel.qualification import _expected_benchmark_identity, qualify_run
 from localmodel.store import ResultStore
 
 
@@ -15,6 +15,9 @@ IDENTITY = {
     "model_sha256": "model-1",
     "backend_commit": "backend-1",
     "profile_sha256": "profile-1",
+    "runtime": "custom",
+    "server_sha256": "server-1",
+    "runtime_identity": "build-1",
 }
 
 
@@ -32,7 +35,8 @@ def summary() -> dict[str, object]:
 
 
 def create_run(store: ResultStore, run_id: str, kind: str, *, identity: dict[str, str] = IDENTITY) -> None:
-    benchmark_name = {"micro": "micro", "context": "context-needle", "agent": "golden-agent"}[kind]
+    seed = {"task_id": "python-off-by-one"} if kind == "agent" else {}
+    benchmark = _expected_benchmark_identity(kind, seed)
     store.create_run({
         "id": run_id,
         "started_at": f"2026-08-19T00:00:0{len(run_id)}+00:00",
@@ -42,8 +46,13 @@ def create_run(store: ResultStore, run_id: str, kind: str, *, identity: dict[str
         "model_sha256": identity["model_sha256"],
         "backend_commit": identity["backend_commit"],
         "config": {
-            "launch": {"profile_sha256": identity["profile_sha256"]},
-            "benchmark": {"name": benchmark_name, "schema": 1, "sha256": f"{kind}-suite"},
+            "launch": {
+                "profile_sha256": identity["profile_sha256"],
+                "runtime": identity["runtime"],
+                "server_sha256": identity["server_sha256"],
+                "runtime_build_sha256": identity["runtime_identity"],
+            },
+            "benchmark": benchmark,
         },
     })
     result_summary = summary() if kind == "micro" else ({"all_quality_pass": True} if kind == "context" else {"success": True})
@@ -119,6 +128,24 @@ class CompleteQualificationTests(unittest.TestCase):
                 result = qualify_run(store, "micro", "validated")
                 evidence = next(item for item in result["evidence"] if item["name"] == "near-limit-context-stress")
                 self.assertEqual(evidence["status"], "identity-mismatched")
+            finally:
+                store.close()
+
+    def test_stale_context_suite_identity_cannot_qualify(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ResultStore(root / "results.sqlite3")
+            try:
+                create_run(store, "micro", "micro")
+                create_run(store, "context", "context")
+                row = store.run("context")
+                config = json.loads(row["config_json"])
+                config["benchmark"]["generator_sha256"] = "stale-generator"
+                store.update_config("context", config)
+                result = qualify_run(store, "micro", "validated")
+                evidence = next(item for item in result["evidence"] if item["name"] == "near-limit-context-stress")
+                self.assertEqual(evidence["status"], "stale")
+                self.assertFalse(result["promotion_ready"])
             finally:
                 store.close()
 

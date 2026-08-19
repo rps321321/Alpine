@@ -141,6 +141,20 @@ class SessionConfigTests(unittest.TestCase):
                 resolve_session(root)
             self.assertIn("port must be between", self.invoke_powershell(root).stderr)
 
+        for malformed in (True, 16.5):
+            with self.subTest(profile_context=malformed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_fixture(root)
+                profile_path = root / "profiles" / "stable-16k.json"
+                profile = json.loads(profile_path.read_text(encoding="utf-8"))
+                profile["context"] = malformed
+                profile_path.write_text(json.dumps(profile), encoding="utf-8")
+                with self.assertRaisesRegex(ConfigError, "positive integer"):
+                    resolve_session(root)
+                result = self.invoke_powershell(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("positive integer", result.stderr)
+
     def test_incomplete_setup_publication_blocks_both_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

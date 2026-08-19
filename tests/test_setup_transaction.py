@@ -47,19 +47,27 @@ class SetupTransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install, stage = root / "install", root / "install" / ".stage"
+            (install / "runtime-official").mkdir(parents=True)
+            (install / "runtime-official" / "version.txt").write_text("old-runtime", encoding="utf-8")
             (install / "scripts").mkdir(parents=True)
             (install / "scripts" / "version.txt").write_text("old", encoding="utf-8")
             (install / "blocked").write_text("parent-is-a-file", encoding="utf-8")
+            (stage / "runtime-official").mkdir(parents=True)
+            (stage / "runtime-official" / "version.txt").write_text("new-runtime", encoding="utf-8")
             (stage / "scripts").mkdir(parents=True)
             (stage / "scripts" / "version.txt").write_text("new", encoding="utf-8")
             (stage / "second.txt").write_text("new-second", encoding="utf-8")
             expression = (
-                f"$items=@([pscustomobject]@{{stage='scripts';destination='scripts'}},"
+                f"$items=@([pscustomobject]@{{stage='runtime-official';destination='runtime-official'}},"
+                "[pscustomobject]@{stage='scripts';destination='scripts'},"
                 "[pscustomobject]@{stage='second.txt';destination='blocked\\second.txt'});"
                 f"Publish-SetupBundle -InstallRoot '{install}' -StageRoot '{stage}' -Items $items"
             )
             result = invoke(expression)
             self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(
+                (install / "runtime-official" / "version.txt").read_text(), "old-runtime"
+            )
             self.assertEqual((install / "scripts" / "version.txt").read_text(), "old")
             self.assertEqual((install / "blocked").read_text(), "parent-is-a-file")
             self.assertFalse((install / ".setup-publishing.json").exists())

@@ -20,6 +20,13 @@ function Get-RequiredString {
     return [string]$value
 }
 
+function Test-RequiredInteger {
+    param($Value, [int64]$Minimum = [int64]::MinValue, [int64]$Maximum = [int64]::MaxValue)
+    if ($null -eq $Value -or $Value -is [bool] -or $Value -is [string]) { return $false }
+    try { $number = [decimal]$Value } catch { return $false }
+    return ($number -eq [decimal]::Truncate($number) -and $number -ge $Minimum -and $number -le $Maximum)
+}
+
 function Get-SessionConfig {
     param([string]$InstallRoot)
     $root = if ($InstallRoot) { [IO.Path]::GetFullPath($InstallRoot) } else { Split-Path $PSScriptRoot -Parent }
@@ -40,7 +47,7 @@ function Get-SessionConfig {
     }
     Get-RequiredString $session 'host' $path | Out-Null
     $port = Get-PropertyValue $session 'port' $null
-    if ($null -eq $port -or [int]$port -lt 1 -or [int]$port -gt 65535) {
+    if (-not (Test-RequiredInteger $port 1 65535)) {
         throw "Session Config port must be between 1 and 65535: $path"
     }
     foreach ($name in @('active_profile', 'model', 'mmproj', 'chat_template', 'api_key_file', 'base_url_file', 'state_file')) {
@@ -70,10 +77,10 @@ function Get-ProfileConfig {
     foreach ($field in @('runtime', 'kv_cache')) { Get-RequiredString $profile $field $path | Out-Null }
     foreach ($field in @('context', 'output', 'parallel', 'threads', 'batch_size', 'ubatch_size', 'mtp_depth')) {
         $value = Get-PropertyValue $profile $field $null
-        if ($null -eq $value -or [int]$value -lt 1) { throw "Profile value '$field' must be a positive integer: $path" }
+        if (-not (Test-RequiredInteger $value 1)) { throw "Profile value '$field' must be a positive integer: $path" }
     }
     $block = Get-PropertyValue $profile 'tensor_cpu_through_block' $null
-    if ($null -eq $block -or [int]$block -lt 0) { throw "Profile value 'tensor_cpu_through_block' must be non-negative: $path" }
+    if (-not (Test-RequiredInteger $block 0)) { throw "Profile value 'tensor_cpu_through_block' must be a non-negative integer: $path" }
     return $profile
 }
 
@@ -185,24 +192,35 @@ function Write-AtomicText {
     if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     $identity = [Guid]::NewGuid().ToString('N')
     $temporary = "$Path.$identity.tmp"
-    $backup = "$Path.$identity.bak"
-    try {
-        [IO.File]::WriteAllText($temporary, $Content, $Encoding)
-        if (Test-Path -LiteralPath $Path) {
-            [IO.File]::Replace($temporary, $Path, $backup)
-        } else {
-            [IO.File]::Move($temporary, $Path)
-        }
-    } finally {
+      $backup = "$Path.$identity.bak"
+      try {
+          [IO.File]::WriteAllText($temporary, $Content, $Encoding)
+          for ($attempt = 1; $attempt -le 200; $attempt++) {
+              try {
+                  if (Test-Path -LiteralPath $Path) {
+                      [IO.File]::Replace($temporary, $Path, $backup)
+                  } else {
+                      [IO.File]::Move($temporary, $Path)
+                  }
+                  break
+              } catch [IO.IOException] {
+                  if ($attempt -eq 200) { throw }
+                  Start-Sleep -Milliseconds 10
+              }
+          }
+      } finally {
         if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) }
         if (Test-Path -LiteralPath $backup) { [IO.File]::Delete($backup) }
     }
 }
 
-function Read-SessionState($Session) {
-    if (-not (Test-Path -LiteralPath $Session.state_file)) { return $null }
-    Get-Content -Raw -LiteralPath $Session.state_file | ConvertFrom-Json
-}
+  function Read-SessionState($Session) {
+      $lock = Enter-InterprocessLock "$($Session.state_file).write.lock"
+      try {
+          if (-not (Test-Path -LiteralPath $Session.state_file)) { return $null }
+          return Get-Content -Raw -LiteralPath $Session.state_file | ConvertFrom-Json
+      } finally { Exit-InterprocessLock $lock }
+  }
 
 function Save-SessionState($State, $Session) {
     $parent = Split-Path $Session.state_file -Parent
