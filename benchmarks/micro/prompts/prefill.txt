@@ -1,0 +1,2 @@
+A compiler optimization is safe when observable behavior is preserved across all permitted inputs. 
+

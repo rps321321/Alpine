@@ -1,0 +1,37 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index cd2dfc7..d63d8d8 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -1818,6 +1818,11 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
+     // enable trace logging if LLAMA_TRACE is set
+     const bool verbose;
+ 
++    // Keep ngram-mod request-local when explicitly requested. This is intended
++    // for single-slot deterministic serving: each prompt still seeds the pool,
++    // but prior requests cannot change the next request's draft proposals.
++    const bool reset_on_begin;
++
+     struct seq_info {
+         // the last position in the prompt that was added to the ngram container
+         size_t i_last = 0;
+@@ -1837,7 +1842,8 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
+         : common_speculative_impl(COMMON_SPECULATIVE_TYPE_NGRAM_MOD, n_seq)
+         , params(params.ngram_mod)
+         , mod(params.ngram_mod.n_match, 4*1024*1024)
+-        , verbose(std::getenv("LLAMA_TRACE") != nullptr) {
++        , verbose(std::getenv("LLAMA_TRACE") != nullptr)
++        , reset_on_begin(std::getenv("LLAMA_NGRAM_MOD_RESET_ON_BEGIN") != nullptr) {
+         static_assert(sizeof(llama_token) == sizeof(common_ngram_mod::entry_t));
+ 
+         SPC_TRC("%s", "adding speculative implementation 'ngram-mod'\n");
+@@ -1857,6 +1863,10 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
+     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
+         auto & sinfo = sinfos[seq_id];
+ 
++        if (reset_on_begin) {
++            mod.reset();
++        }
++
+         sinfo.i_last = 0;
+         sinfo.n_draft_last = 0;
+ 

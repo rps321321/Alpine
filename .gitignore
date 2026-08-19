@@ -1,0 +1,12 @@
+.codex/
+.artifacts/
+dist/
+build/
+*.egg-info/
+results/
+*.log
+*.tmp
+*.part
+__pycache__/
+*.pyc
+.pytest_cache/

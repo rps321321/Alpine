@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "model": {
+    "repo": "Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+    "revision": "4f6732ce2123ced5d9df722a934f700619e066a8",
+    "filename": "Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
+    "relative_path": "models/Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
+    "url": "https://huggingface.co/Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF/resolve/4f6732ce2123ced5d9df722a934f700619e066a8/Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
+    "sha256": "5d53637a59cfcd3a4d8354e254ffd44943e5a693da2405a3e228c62962355509",
+    "bytes": 16810716384,
+    "license": "Apache-2.0"
+  },
+  "mmproj": {
+    "filename": "mmproj-Qwen3.8-27B-ABLITERATED-Q8_0.gguf",
+    "relative_path": "models/mmproj-Qwen3.8-27B-ABLITERATED-Q8_0.gguf",
+    "url": "https://huggingface.co/Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF/resolve/4f6732ce2123ced5d9df722a934f700619e066a8/mmproj-Qwen3.8-27B-ABLITERATED-Q8_0.gguf",
+    "sha256": "6b8b9c95513e0798f4d48f467bced39491da62f418249bfb7ef12a857d15e5be",
+    "bytes": 629247488
+  },
+  "chat_template": {
+    "repo": "Qwen/Qwen3.8-27B",
+    "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "filename": "qwen3.8-official-chat-template.jinja",
+    "relative_path": "config/qwen3.8-official-chat-template.jinja",
+    "url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/chat_template.jinja",
+    "sha256": "514d5304fcac63bda60e6faf860d5657010cf43cbc4c633c8bf678ee184e7a37",
+    "bytes": 8953,
+    "license": "Apache-2.0"
+  },
+  "llama_cpp": {
+    "repo": "https://github.com/ggml-org/llama.cpp.git",
+    "tag": "b10453",
+    "commit": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70",
+    "patch": "patches/llama.cpp-b10453-ngram-request-local.patch",
+    "official_runtime": {
+      "filename": "llama-b10453-bin-win-cuda-13.3-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10453/llama-b10453-bin-win-cuda-13.3-x64.zip",
+      "sha256": "92cb01d69bd52cf307914d7a7fc187d81434269db4fc9561eaa48f6ebdffef06",
+      "bytes": 146699147
+    },
+    "official_cuda": {
+      "filename": "cudart-llama-bin-win-cuda-13.3-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10453/cudart-llama-bin-win-cuda-13.3-x64.zip",
+      "sha256": "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e",
+      "bytes": 390970417
+    },
+    "custom_build": {
+      "cuda": "13.2",
+      "cmake": "4.2.3",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "120",
+      "options": [
+        "GGML_CUDA=ON",
+        "GGML_NATIVE=ON",
+        "GGML_CUDA_FA_ALL_QUANTS=ON",
+        "LLAMA_CURL=OFF",
+        "LLAMA_BUILD_TESTS=ON"
+      ]
+    }
+  }
+}

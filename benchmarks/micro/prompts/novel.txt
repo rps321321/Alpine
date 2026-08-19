@@ -1,0 +1,3 @@
+Complete the following technical explanation with coherent prose and concrete examples:
+A compiler optimization is safe when
+

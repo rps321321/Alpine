@@ -1,0 +1,2 @@
+Return only one valid compact JSON object with exactly these keys and value types: "safe" (boolean), "files" (array of two strings), and "reason" (string). Use safe=true, files=["src/main.py","tests/test_main.py"], and a reason of at most eight words. No markdown.
+

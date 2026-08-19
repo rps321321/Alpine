@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "lifecycle": ["experimental", "candidate", "validated", "production"],
+  "gates": {
+    "candidate": {
+      "required_workloads": ["prefill-4k", "novel-256", "repeat-code-256", "structured-json-128"],
+      "minimum_measured_samples_per_workload": 5,
+      "require_quality_pass": true,
+      "require_deterministic_outputs": true,
+      "maximum_decode_coefficient_of_variation": 0.10
+    },
+    "validated": {
+      "inherits": "candidate",
+      "requires_external_evidence": [
+        "same-process-50-request-greedy-stability",
+        "ten-clean-restart-greedy-stability",
+        "near-limit-context-stress",
+        "golden-agent-task-pass"
+      ]
+    },
+    "production": {
+      "inherits": "validated",
+      "requires_external_evidence": [
+        "operator-reviewed-capability-report",
+        "rollback-profile-available"
+      ]
+    }
+  }
+}

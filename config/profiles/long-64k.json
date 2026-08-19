@@ -1,0 +1,20 @@
+{
+  "name": "long-64k",
+  "status": "experimental",
+  "runtime": "custom",
+  "context": 65536,
+  "output": 8192,
+  "parallel": 1,
+  "threads": 16,
+  "batch_size": 2048,
+  "ubatch_size": 768,
+  "kv_cache": "q8_0",
+  "tensor_cpu_through_block": 47,
+  "mtp_depth": 3,
+  "ngram_mod": true,
+  "ngram_reset_on_begin": true,
+  "external_skills": true,
+  "skill_tool": true,
+  "vision_fit": true,
+  "fit_target_mib": 512
+}
