@@ -235,7 +235,13 @@ exit 0
                 )
                 for profile in ("stable-16k", "turbo-16k")
             ]
-            return_codes = [process.wait(timeout=10) for process in processes]
+            try:
+                return_codes = [process.wait(timeout=10) for process in processes]
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
 
             self.assertTrue(all(code != 0 for code in return_codes))
             invocation_logs = list((install / "logs" / "launcher-errors").glob("*.log"))
@@ -245,6 +251,52 @@ exit 0
             self.assertTrue(any("failure for turbo-16k" in text for text in observed), observed)
             stable = (install / "logs" / "launcher-last-error.log").read_text(encoding="utf-8")
             self.assertIn(stable, observed)
+
+    def test_unwritable_last_project_state_does_not_block_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            install = Path(directory) / "install"
+            project = Path(directory) / "project"
+            project.mkdir(parents=True)
+            launcher = self.build_fixture_launcher(install)
+            environment = os.environ.copy()
+            environment["LOCALMODEL_LAUNCHER_NO_DIALOG"] = "1"
+            (install / "config" / "launcher-last-project.txt").mkdir(parents=True)
+
+            process = subprocess.Popen(
+                [str(launcher), "--project", str(project), "--profile", "stable-16k"],
+                env=environment,
+            )
+            try:
+                return_code = process.wait(timeout=5)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+
+            self.assertEqual(return_code, 0)
+            arguments_path = install / "logs" / "launcher-args.json"
+            self.assertTrue(arguments_path.is_file())
+
+    def test_early_error_honors_no_dialog_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            install = Path(directory) / "install"
+            missing_project = Path(directory) / "missing-project"
+            launcher = self.build_fixture_launcher(install)
+            environment = os.environ.copy()
+            environment["LOCALMODEL_LAUNCHER_NO_DIALOG"] = "1"
+
+            process = subprocess.Popen(
+                [str(launcher), "--project", str(missing_project), "--profile", "stable-16k"],
+                env=environment,
+            )
+            try:
+                return_code = process.wait(timeout=5)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+
+            self.assertNotEqual(return_code, 0)
 
     def test_executable_preserves_an_actual_early_powershell_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

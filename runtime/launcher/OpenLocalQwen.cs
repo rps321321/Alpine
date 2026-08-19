@@ -28,7 +28,14 @@ namespace LocalModelsLauncher
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Open Local Qwen", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (DialogsEnabled())
+                {
+                    MessageBox.Show(ex.Message, "Open Local Qwen", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                else
+                {
+                    Console.Error.WriteLine(ex.Message);
+                }
                 return 1;
             }
         }
@@ -58,10 +65,7 @@ namespace LocalModelsLauncher
                     details = "The per-launch failure record could not be read: " + readError.Message;
                 }
 
-                if (!string.Equals(
-                    Environment.GetEnvironmentVariable("LOCALMODEL_LAUNCHER_NO_DIALOG"),
-                    "1",
-                    StringComparison.Ordinal))
+                if (DialogsEnabled())
                 {
                     if (details.Length > 2000) details = details.Substring(0, 2000) + Environment.NewLine + "...";
                     MessageBox.Show(
@@ -144,8 +148,46 @@ namespace LocalModelsLauncher
         private static void Remember(string root, string project)
         {
             string path = Path.Combine(root, "config", "launcher-last-project.txt");
-            Directory.CreateDirectory(Path.GetDirectoryName(path));
-            File.WriteAllText(path, project, new UTF8Encoding(false));
+            string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(temporary, project, new UTF8Encoding(false));
+                if (File.Exists(path))
+                {
+                    File.Replace(temporary, path, null);
+                }
+                else
+                {
+                    File.Move(temporary, path);
+                }
+            }
+            catch (IOException)
+            {
+                // This is a convenience hint, not launch-critical state. Concurrent
+                // launchers are allowed to race and whichever publication wins is valid.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // A read-only installation must still be able to launch an explicit project.
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(temporary)) File.Delete(temporary);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        private static bool DialogsEnabled()
+        {
+            return !string.Equals(
+                Environment.GetEnvironmentVariable("LOCALMODEL_LAUNCHER_NO_DIALOG"),
+                "1",
+                StringComparison.Ordinal);
         }
 
         private static bool Has(string[] args, string name)
