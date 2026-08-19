@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "alpine-windows-nvidia-v1",
+  "platforms": [
+    {
+      "os": "windows",
+      "architecture": "x86_64"
+    }
+  ],
+  "required_probes": [
+    "nvidia-smi",
+    "power-shell"
+  ],
+  "optional_probes": [
+    "cargo",
+    "cmake",
+    "git",
+    "python"
+  ]
+}
+

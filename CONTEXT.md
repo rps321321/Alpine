@@ -1,6 +1,6 @@
-# Local Models
+# Project Alpine
 
-The control plane for one locally served Abliterated Model on hardware-5070. It complements a hosted Frontier Model when local control or low refusal materially matters.
+The Rust control plane for automatically discovering, measuring, tuning, qualifying and operating local AI inference. `llama.cpp` and its C++/CUDA implementation remain below the Inference Server boundary. The current hardware-5070 deployment is identity-bound evidence, not a permanent product assumption.
 
 Three different things must not be collapsed:
 
@@ -14,11 +14,29 @@ The model is an untrusted worker.
 
 This repository is the versioned control plane. `%USERPROFILE%\local-models` is the generated machine-local installation containing large artifacts, runtime bundles, secrets and logs. Run `setup.ps1` to reconstruct it; do not treat the generated install as the source of truth.
 
+Alpine is replacing the existing Python, PowerShell and C# authority one complete workflow at a time. Stable-16K and the legacy implementation remain the rollback path until Rust compatibility and independent qualification pass. The canonical verification command is `.\scripts\verify.ps1`; during migration it verifies both Rust and legacy behavior.
+
 The production profile is `stable-16k`. `turbo-16k` and `fast-32k` are measured candidates using the request-local n-gram patch. `long-64k` is experimental and failed its first 55.7K-token retrieval gate. See `docs/AUDIT-2026-08-19.md` for evidence and run IDs.
 
 OpenCode's bounded first request is now about 5.5K tokens in a live greeting, not 24–29K. Core task, todo, file, search, shell and web tools remain. Skill catalogs are omitted from bounded profiles as a context-budget decision and may be explicitly enabled.
 
 ## Language
+
+**Project Alpine**:
+The Rust control plane above local Inference Servers. It owns Support Envelopes, Experiments, Qualification and transactional Sessions; it does not implement tensor inference.
+_Avoid_: Rust wrapper, llama.cpp replacement, benchmark script collection
+
+**Support Envelope**:
+A versioned, capability-based statement of environments Alpine can evaluate. It is not a list of assumptions about the current PC, and eligibility is not qualification.
+_Avoid_: supported hardware list (when evidence is incomplete), current machine config
+
+**Evidence Identity**:
+The hardware, software, model, runtime, workload, configuration and policy identities to which evidence applies. A material identity change makes prior evidence stale for the changed claim.
+_Avoid_: latest result, same machine probably, benchmark name alone
+
+**Qualification**:
+An evidence decision with one of five outcomes: `qualified`, `unsupported`, `inconclusive`, `regressed` or `not-proven`. Final evidence must be independent from tuning and selection evidence.
+_Avoid_: promotion Boolean, benchmark passed (when external gates remain), best config
 
 **Frontier Model**:
 The hosted default when raw capability dominates. Today that is GPT-5.6 Sol.

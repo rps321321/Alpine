@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "support": "not-proven",
+  "claim_identity": {
+    "hardware": "hardware-fixture",
+    "software": "software-fixture",
+    "model": "model-fixture",
+    "runtime": "runtime-fixture",
+    "workload": "workload-fixture",
+    "configuration": "configuration-fixture",
+    "policy": "policy-fixture"
+  },
+  "tuning_evidence_ids": [
+    "tuning-fixture"
+  ],
+  "final_evidence_ids": [
+    "final-fixture"
+  ],
+  "evidence": [
+    {
+      "id": "tuning-fixture",
+      "phase": "tuning",
+      "identity": {
+        "hardware": "hardware-fixture",
+        "software": "software-fixture",
+        "model": "model-fixture",
+        "runtime": "runtime-fixture",
+        "workload": "workload-fixture",
+        "configuration": "configuration-fixture",
+        "policy": "policy-fixture"
+      },
+      "passed": true
+    },
+    {
+      "id": "final-fixture",
+      "phase": "final",
+      "identity": {
+        "hardware": "hardware-fixture",
+        "software": "software-fixture",
+        "model": "model-fixture",
+        "runtime": "runtime-fixture",
+        "workload": "workload-fixture",
+        "configuration": "configuration-fixture",
+        "policy": "policy-fixture"
+      },
+      "passed": true
+    }
+  ],
+  "regression_detected": false
+}
