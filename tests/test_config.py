@@ -92,11 +92,12 @@ class SessionConfigTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             powershell = json.loads(result.stdout)
+            self.assertEqual(powershell["Session"], resolved.session)
             self.assertEqual(powershell["ProfileName"], resolved.profile_name)
             self.assertEqual(Path(powershell["InstallRoot"]), resolved.install_root)
             self.assertEqual(Path(powershell["ServerPath"]), resolved.server)
             self.assertEqual(powershell["BaseUrl"], resolved.base_url)
-            self.assertEqual(powershell["Profile"]["context"], resolved.profile["context"])
+            self.assertEqual(powershell["Profile"], resolved.profile)
             self.assertEqual(powershell["RuntimeName"], resolved.runtime_name)
             self.assertEqual(Path(powershell["Model"]), resolved.model)
             self.assertEqual(Path(powershell["Mmproj"]), resolved.mmproj)
@@ -104,6 +105,41 @@ class SessionConfigTests(unittest.TestCase):
             self.assertEqual(Path(powershell["ApiKeyFile"]), resolved.api_key_file)
             self.assertEqual(Path(powershell["BaseUrlFile"]), resolved.base_url_file)
             self.assertEqual(Path(powershell["StateFile"]), resolved.state_file)
+
+    def test_every_registered_profile_resolves_through_the_complete_shared_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture(root)
+            session_path = root / "config" / "session.json"
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            session["runtimes"]["custom"] = session["runtimes"]["official"]
+            session_path.write_text(json.dumps(session), encoding="utf-8")
+
+            registered = sorted((REPO_ROOT / "config" / "profiles").glob("*.json"))
+            for source in registered:
+                (root / "profiles" / source.name).write_text(
+                    source.read_text(encoding="utf-8-sig"),
+                    encoding="utf-8",
+                )
+
+            for source in registered:
+                with self.subTest(profile=source.stem):
+                    resolved = resolve_session(root, source.stem, require_runtime=True)
+                    command = (
+                        f". '{REPO_ROOT / 'runtime' / 'scripts' / 'lib.ps1'}'; "
+                        f"Get-ResolvedSession -InstallRoot '{root}' -Name '{source.stem}' "
+                        "-RequireRuntime | ConvertTo-Json -Depth 8 -Compress"
+                    )
+                    result = subprocess.run(
+                        ["powershell.exe", "-NoProfile", "-Command", command],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    powershell = json.loads(result.stdout)
+                    self.assertEqual(powershell["Profile"], resolved.profile)
+                    self.assertEqual(Path(powershell["Model"]), resolved.model)
 
     def test_rejects_unsupported_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
