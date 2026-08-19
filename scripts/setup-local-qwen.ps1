@@ -23,13 +23,6 @@ if ($ReuseArtifactsFrom) { $ReuseArtifactsFrom = [IO.Path]::GetFullPath($ReuseAr
 $profileSource = Join-Path $repoRoot "config\profiles\$Profile.json"
 if (-not (Test-Path -LiteralPath $profileSource -PathType Leaf)) { throw "Unknown profile: $Profile" }
 
-function Get-PropertyValueForSetup($Object, [string]$Name, $Default = $null) {
-    if ($null -eq $Object) { return $Default }
-    $property = $Object.PSObject.Properties[$Name]
-    if ($null -eq $property -or $null -eq $property.Value) { return $Default }
-    return $property.Value
-}
-
 function Get-Sha256([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -302,19 +295,13 @@ function Write-SessionConfig([string]$OfficialServer, [string]$CustomServer, [st
     $configDir = Join-Path $DestinationRoot 'config'
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
     $path = Join-Path $configDir 'session.json'
-    $cleanup = [ordered]@{ enabled = $false }
+    $cleanup = Get-PreservedCleanupConfig $null
     $existingPath = Join-Path $InstallRoot 'config\session.json'
     if (Test-Path -LiteralPath $existingPath) {
         try {
             $old = Get-Content -Raw -LiteralPath $existingPath | ConvertFrom-Json
             if ($old.cleanup) {
-                $cleanup = [ordered]@{
-                    enabled = $true
-                    port = Get-PropertyValueForSetup $old.cleanup 'port' 0
-                    exe = Get-PropertyValueForSetup $old.cleanup 'exe' ''
-                    start_script = Get-PropertyValueForSetup $old.cleanup 'start_script' ''
-                    health = Get-PropertyValueForSetup $old.cleanup 'health' ''
-                }
+                $cleanup = Get-PreservedCleanupConfig $old.cleanup
             }
         } catch { Write-Warning 'Existing session config could not be preserved; writing the canonical v3 config.' }
     }

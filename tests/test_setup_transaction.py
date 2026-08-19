@@ -41,6 +41,17 @@ class SetupTransactionTests(unittest.TestCase):
             self.assertEqual(Path(config["base_url_file"]), install / "config" / "base-url.txt")
             self.assertNotIn(str(stage), result.stdout)
 
+    def test_setup_preserves_a_disabled_cleanup_handoff(self) -> None:
+        result = invoke(
+            "$cleanup=Get-PreservedCleanupConfig ([pscustomobject]@{enabled=$false;port=9191;"
+            "exe='cleanup.exe';start_script='start.ps1';health='http://cleanup/health'});"
+            "$cleanup | ConvertTo-Json -Compress"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cleanup = json.loads(result.stdout)
+        self.assertFalse(cleanup["enabled"])
+        self.assertEqual(cleanup["port"], 9191)
+
     def test_interrupted_download_remains_resumable_and_is_not_published_early(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

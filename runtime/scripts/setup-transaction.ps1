@@ -69,6 +69,17 @@ function New-SessionConfigDocument {
     }
 }
 
+function Get-PreservedCleanupConfig($ExistingCleanup) {
+    if ($null -eq $ExistingCleanup) { return [ordered]@{ enabled = $false } }
+    return [ordered]@{
+        enabled = [bool](Get-PropertyValue $ExistingCleanup 'enabled' $false)
+        port = Get-PropertyValue $ExistingCleanup 'port' 0
+        exe = Get-PropertyValue $ExistingCleanup 'exe' ''
+        start_script = Get-PropertyValue $ExistingCleanup 'start_script' ''
+        health = Get-PropertyValue $ExistingCleanup 'health' ''
+    }
+}
+
 function Repair-InterruptedSetupPublication([string]$InstallRoot) {
     $root = [IO.Path]::GetFullPath($InstallRoot)
     $marker = Get-SetupPublicationMarker $root
