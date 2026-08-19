@@ -10,8 +10,17 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
-from localmodel.lifecycle import ActiveRunError, BenchmarkLifecycle, FileLease, LeaseBusyError, reconcile_run, write_json
+from localmodel.lifecycle import (
+    ActiveRunError,
+    BenchmarkLifecycle,
+    FileLease,
+    LeaseBusyError,
+    PowerShellSessionAdapter,
+    reconcile_run,
+    write_json,
+)
 from localmodel.store import ResultStore
 
 
@@ -75,6 +84,29 @@ def sample(iteration: int) -> dict[str, object]:
 
 
 class BenchmarkLifecycleTests(unittest.TestCase):
+    def test_powershell_adapter_uses_file_backed_output_instead_of_pipes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            module = root / "scripts" / "inference-session.ps1"
+            module.parent.mkdir(parents=True)
+            module.write_text("", encoding="utf-8")
+            adapter = PowerShellSessionAdapter(root)
+
+            def complete(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+                self.assertNotEqual(options.get("stdout"), subprocess.PIPE)
+                self.assertNotEqual(options.get("stderr"), subprocess.PIPE)
+                self.assertFalse(options.get("capture_output", False))
+                stdout = options["stdout"]
+                assert hasattr(stdout, "write")
+                stdout.write('{"ok":true}\n')
+                stdout.flush()
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch("localmodel.lifecycle.subprocess.run", side_effect=complete):
+                result = adapter._invoke_json("[pscustomobject]@{ ok = $true } | ConvertTo-Json -Compress")
+
+            self.assertEqual(result, {"ok": True})
+
     def test_workload_modules_use_only_shared_operational_seams(self) -> None:
         package = Path(__file__).resolve().parents[1] / "localmodel"
         for name in ("microbench.py", "contextbench.py", "agentbench.py"):

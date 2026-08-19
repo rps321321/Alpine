@@ -24,8 +24,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def run_powershell(script: Path, *arguments: str, timeout: int = 900) -> subprocess.CompletedProcess[str]:
-    command = [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), *arguments]
+def _run_with_file_backed_output(command: list[str], timeout: int = 900) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout, tempfile.TemporaryFile(
         mode="w+", encoding="utf-8"
     ) as stderr:
@@ -33,6 +32,11 @@ def run_powershell(script: Path, *arguments: str, timeout: int = 900) -> subproc
         stdout.seek(0)
         stderr.seek(0)
         return subprocess.CompletedProcess(command, result.returncode, stdout.read(), stderr.read())
+
+
+def run_powershell(script: Path, *arguments: str, timeout: int = 900) -> subprocess.CompletedProcess[str]:
+    command = [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), *arguments]
+    return _run_with_file_backed_output(command, timeout)
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
@@ -56,11 +60,8 @@ class PowerShellSessionAdapter:
 
     def _invoke_json(self, expression: str) -> dict[str, Any]:
         command = f". {self._quote(str(self.module))}; {expression}"
-        result = subprocess.run(
-            [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-            capture_output=True,
-            text=True,
-            check=False,
+        result = _run_with_file_backed_output(
+            [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]
         )
         if result.returncode:
             raise RuntimeError((result.stderr or result.stdout).strip())
