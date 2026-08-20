@@ -1,4 +1,4 @@
-use alpine_control_plane::Alpine;
+use alpine_control_plane::{Alpine, MicrobenchmarkOptions};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,6 +13,28 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Benchmark {
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_os_t = default_result_root())]
+        result_root: PathBuf,
+        #[arg(long)]
+        profile: String,
+        #[arg(long, default_value_t = 5)]
+        runs: u32,
+        #[arg(long, default_value_t = 1)]
+        warmups: u32,
+        #[arg(long = "workload")]
+        workloads: Vec<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        deep_verify_artifacts: bool,
+        #[arg(long)]
+        compact: bool,
+    },
     Runs {
         #[arg(long, default_value_os_t = default_database())]
         database: PathBuf,
@@ -66,6 +88,32 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
     match cli.command {
+        Commands::Benchmark {
+            repository_root,
+            install_root,
+            result_root,
+            profile,
+            runs,
+            warmups,
+            workloads,
+            notes,
+            deep_verify_artifacts,
+            compact,
+        } => {
+            let report = Alpine::run_microbenchmark(&MicrobenchmarkOptions {
+                repository_root,
+                install_root,
+                result_root,
+                profile,
+                runs,
+                warmups,
+                workloads,
+                notes,
+                deep_verify_artifacts,
+            })?;
+            write_json(&report, compact)?;
+            Ok(if report.status == "passed" { 0 } else { 1 })
+        }
         Commands::Runs {
             database,
             limit,
@@ -120,6 +168,14 @@ fn default_install_root() -> PathBuf {
 
 fn default_database() -> PathBuf {
     PathBuf::from("results/results.sqlite3")
+}
+
+fn default_repository_root() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn default_result_root() -> PathBuf {
+    PathBuf::from("results")
 }
 
 fn write_json(value: &impl serde::Serialize, compact: bool) -> Result<(), serde_json::Error> {
