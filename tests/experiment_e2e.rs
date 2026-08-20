@@ -56,6 +56,7 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
         phase: EvidencePhase::Tuning,
         deep_verify_artifacts: false,
         lease_timeout: Duration::from_secs(1),
+        request_timeout: Duration::from_secs(5),
     };
     let tuning = Alpine::run_microbenchmark(&options).expect("Rust tuning benchmark");
     let tuning_candidate =

@@ -365,6 +365,7 @@ fn measure_profile(
         phase,
         deep_verify_artifacts,
         lease_timeout,
+        request_timeout: Duration::from_secs(plan.limits.request_timeout_seconds),
     });
     let release = session::release(&ReleaseSessionOptions {
         install_root: options.install_root.clone(),

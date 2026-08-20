@@ -238,6 +238,8 @@ enum Commands {
         deep_verify_artifacts: bool,
         #[arg(long, default_value_t = 100)]
         lease_timeout_ms: u64,
+        #[arg(long, default_value_t = 900_000)]
+        request_timeout_ms: u64,
         #[arg(long)]
         compact: bool,
     },
@@ -754,6 +756,7 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
             phase,
             deep_verify_artifacts,
             lease_timeout_ms,
+            request_timeout_ms,
             compact,
         } => {
             let report = Alpine::run_microbenchmark(&MicrobenchmarkOptions {
@@ -768,6 +771,7 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
                 phase: phase.into(),
                 deep_verify_artifacts,
                 lease_timeout: Duration::from_millis(lease_timeout_ms),
+                request_timeout: Duration::from_millis(request_timeout_ms),
             })?;
             write_json(&report, compact)?;
             Ok(if report.status == "passed" { 0 } else { 1 })

@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(900);
 const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -33,6 +32,7 @@ pub struct MicrobenchmarkOptions {
     pub phase: EvidencePhase,
     pub deep_verify_artifacts: bool,
     pub lease_timeout: Duration,
+    pub request_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -235,6 +235,9 @@ fn prepare(options: &MicrobenchmarkOptions) -> Result<PreparedExperiment, String
     if options.warmups > 20 {
         return Err("warmups must be between 0 and 20".to_owned());
     }
+    if options.request_timeout.is_zero() {
+        return Err("request timeout must be positive".to_owned());
+    }
     let repository_root = canonical_directory(&options.repository_root, "repository root")?;
     let resolved = config::resolve(&options.install_root, Some(&options.profile), true)?;
     let state: SessionState = read_json(&resolved.state_file, "Inference Session state")?;
@@ -401,7 +404,7 @@ fn execute(
         return Err("local API key file is empty".to_owned());
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(REQUEST_TIMEOUT))
+        .timeout_global(Some(options.request_timeout))
         .build()
         .into();
     verify_health(&agent, &prepared.resolved.base_url, &api_key)?;
@@ -1095,6 +1098,28 @@ mod tests {
             r#"{"safe":true,"files":["a"],"reason":"ok"}"#,
             QualityCheck::Json
         ));
+    }
+
+    #[test]
+    fn zero_request_timeout_is_rejected_before_io() {
+        let options = MicrobenchmarkOptions {
+            repository_root: PathBuf::from("missing-repository"),
+            install_root: PathBuf::from("missing-install"),
+            result_root: PathBuf::from("missing-results"),
+            profile: "fixture".to_owned(),
+            runs: 1,
+            warmups: 0,
+            workloads: vec!["fixture".to_owned()],
+            notes: None,
+            phase: EvidencePhase::Tuning,
+            deep_verify_artifacts: false,
+            lease_timeout: Duration::from_secs(1),
+            request_timeout: Duration::ZERO,
+        };
+        assert_eq!(
+            prepare(&options).err().as_deref(),
+            Some("request timeout must be positive")
+        );
     }
 
     #[test]
