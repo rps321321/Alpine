@@ -102,10 +102,11 @@ The Rust path is authoritative for new microbenchmark qualification evidence. Ru
 ```powershell
 cargo run --release --bin alpine -- benchmark --profile fast-32k --phase tuning --runs 5 --warmups 1
 cargo run --release --bin alpine -- benchmark --profile fast-32k --phase final --runs 5 --warmups 1 --deep-verify-artifacts
+cargo run --release --bin alpine -- tune --baseline-run <baseline-tuning-run-id> --candidate-run <candidate-tuning-run-id>
 cargo run --release --bin alpine -- qualify <final-run-id> --tuning-run <tuning-run-id> --target candidate
 ```
 
-The legacy `localmodel.ps1 qualify` command remains migration evidence; it is not sufficient for a new Alpine qualification claim.
+The tuner is read-only: it recommends a measured configuration or retains the baseline and never edits the installed Profile. The legacy `localmodel.ps1 qualify` command remains migration evidence; it is not sufficient for a new Alpine qualification claim.
 
 Measured runs hold an inference-capacity lease tied to their exact Inference Session identity. A second benchmark or unrelated interactive launcher receives a visible busy refusal instead of silently queueing and contaminating timings. The agent benchmark's own launcher carries the governing lease token.
 

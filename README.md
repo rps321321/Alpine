@@ -53,6 +53,14 @@ cargo run --release --bin alpine -- benchmark --profile fast-32k --phase final -
 
 Alpine holds the cross-process inference-capacity lease and rejects a mismatched or legacy-authored running Session before sending a request. New runs require a verified PID/executable/port/process-start identity plus complete hardware, Alpine binary, model, runtime, workload, material configuration and promotion-policy identities. `--phase tuning` is the default; final qualification runs must explicitly use `--phase final`. The first run fully hashes the model; unchanged later runs reuse a metadata-bound local attestation. Use `--deep-verify-artifacts` for a fresh full digest, including final qualification runs. SQLite is the authority; the per-run JSON/JSONL files are durable inspection copies.
 
+Rank bounded tuning candidates without mutating the installation:
+
+```powershell
+cargo run --release --bin alpine -- tune --baseline-run <baseline-tuning-run-id> --candidate-run <candidate-tuning-run-id>
+```
+
+Tuning holds hardware, Alpine binary, model, workload suite and policy constant while treating runtime and material configuration as search dimensions. Every candidate must pass row-level quality, deterministic-output, sample-count and decode-variability gates. A candidate is recommended only if its equally weighted geometric-mean decode score clears the versioned improvement threshold without violating any per-workload regression floor; otherwise Alpine explicitly retains the baseline.
+
 Inspect the host against the versioned Support Envelope:
 
 ```powershell

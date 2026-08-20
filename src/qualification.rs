@@ -135,6 +135,7 @@ struct PromotionGate {
     require_deterministic_outputs: Option<bool>,
     maximum_decode_coefficient_of_variation: Option<f64>,
     maximum_median_performance_regression_fraction: Option<f64>,
+    minimum_tuning_selection_improvement_fraction: Option<f64>,
     #[serde(default)]
     requires_external_evidence: Vec<String>,
 }
@@ -906,7 +907,7 @@ fn configured_workloads(config: &Value) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn material_configuration_sha256(evidence: &RunEvidence) -> Result<String, String> {
+pub(crate) fn material_configuration_sha256(evidence: &RunEvidence) -> Result<String, String> {
     let model_sha256 = evidence
         .model_sha256
         .as_deref()
@@ -949,7 +950,7 @@ fn material_configuration_sha256(evidence: &RunEvidence) -> Result<String, Strin
     Ok(sha256_bytes(&bytes))
 }
 
-fn current_hardware_identity(
+pub(crate) fn current_hardware_identity(
     repository_root: &Path,
     evidence: &RunEvidence,
 ) -> Result<Option<String>, String> {
@@ -1080,6 +1081,10 @@ fn inherited_gate(
             merged.maximum_median_performance_regression_fraction =
                 gate.maximum_median_performance_regression_fraction;
         }
+        if gate.minimum_tuning_selection_improvement_fraction.is_some() {
+            merged.minimum_tuning_selection_improvement_fraction =
+                gate.minimum_tuning_selection_improvement_fraction;
+        }
         for evidence in gate.requires_external_evidence {
             if !merged.requires_external_evidence.contains(&evidence) {
                 merged.requires_external_evidence.push(evidence);
@@ -1115,6 +1120,12 @@ fn inherited_gate(
         .is_none_or(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
     {
         return Err("maximum performance regression must be between zero and one".to_owned());
+    }
+    if merged
+        .minimum_tuning_selection_improvement_fraction
+        .is_none_or(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+    {
+        return Err("minimum tuning improvement must be between zero and one".to_owned());
     }
     if merged
         .requires_external_evidence
@@ -1332,7 +1343,8 @@ mod tests {
                     "require_quality_pass": true,
                     "require_deterministic_outputs": true,
                     "maximum_decode_coefficient_of_variation": 0.1,
-                    "maximum_median_performance_regression_fraction": 0.1
+                    "maximum_median_performance_regression_fraction": 0.1,
+                    "minimum_tuning_selection_improvement_fraction": 0.03
                 },
                 "validated": {"inherits": "candidate"},
                 "production": {"inherits": "validated"}
@@ -1364,6 +1376,7 @@ mod tests {
                     "require_deterministic_outputs": true,
                     "maximum_decode_coefficient_of_variation": 0.1,
                     "maximum_median_performance_regression_fraction": 0.1,
+                    "minimum_tuning_selection_improvement_fraction": 0.03,
                     "maximum_typo": 0.1
                 }
             }

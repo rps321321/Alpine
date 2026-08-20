@@ -8,7 +8,8 @@
       "require_quality_pass": true,
       "require_deterministic_outputs": true,
       "maximum_decode_coefficient_of_variation": 0.10,
-      "maximum_median_performance_regression_fraction": 0.10
+      "maximum_median_performance_regression_fraction": 0.10,
+      "minimum_tuning_selection_improvement_fraction": 0.03
     },
     "validated": {
       "inherits": "candidate",

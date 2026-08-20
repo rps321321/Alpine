@@ -1,6 +1,6 @@
 use alpine_control_plane::{
     Alpine, Decision, EvidencePhase, MicrobenchmarkOptions, QualificationTarget,
-    RunQualificationOptions,
+    RunQualificationOptions, TuningDisposition, TuningOptions,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -17,7 +17,7 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
     let repository = directory.path().join("repository");
     let install = directory.path().join("install");
     let results = directory.path().join("results");
-    let (port, mut server, runtime, process_start_epoch_secs) = mock_server(directory.path(), 6);
+    let (port, mut server, runtime, process_start_epoch_secs) = mock_server(directory.path(), 9);
     write_repository(&repository);
     write_install(
         &install,
@@ -41,6 +41,8 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
         lease_timeout: Duration::from_secs(1),
     };
     let tuning = Alpine::run_microbenchmark(&options).expect("Rust tuning benchmark");
+    let tuning_candidate =
+        Alpine::run_microbenchmark(&options).expect("Rust candidate tuning benchmark");
     options.phase = EvidencePhase::Final;
     options.deep_verify_artifacts = true;
     let report = Alpine::run_microbenchmark(&options).expect("Rust final benchmark");
@@ -68,6 +70,16 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
     assert!(raw.join("run.json").is_file());
     assert!(raw.join("samples.jsonl").is_file());
     assert!(raw.join("summary.json").is_file());
+
+    let tuning_report = Alpine::tune(&TuningOptions {
+        repository_root: repository.clone(),
+        database: database.clone(),
+        baseline_run_id: tuning.run_id.clone(),
+        candidate_run_ids: vec![tuning_candidate.run_id],
+    })
+    .expect("bounded Rust tuning");
+    assert_eq!(tuning_report.disposition, TuningDisposition::RetainBaseline);
+    assert_eq!(tuning_report.selected_run_id, Some(tuning.run_id.clone()));
 
     let qualify_options = RunQualificationOptions {
         repository_root: repository,
@@ -135,7 +147,8 @@ fn write_repository(root: &Path) {
                     "require_quality_pass": true,
                     "require_deterministic_outputs": true,
                     "maximum_decode_coefficient_of_variation": 0.10,
-                    "maximum_median_performance_regression_fraction": 0.10
+                    "maximum_median_performance_regression_fraction": 0.10,
+                    "minimum_tuning_selection_improvement_fraction": 0.03
                 },
                 "validated": {
                     "inherits": "candidate",

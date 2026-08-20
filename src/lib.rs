@@ -9,6 +9,7 @@ mod process;
 mod qualification;
 mod session;
 mod support;
+mod tuning;
 
 pub use config::{Profile, ProfileStatus, ResolvedSession, SessionConfig};
 pub use decision::Decision;
@@ -24,6 +25,7 @@ pub use session::{
     StartSessionOptions, StartSessionReport, StopSessionOptions, StopSessionReport,
 };
 pub use support::{SupportEnvelope, SupportReport};
+pub use tuning::{TuningDisposition, TuningOptions, TuningReport};
 
 use std::path::Path;
 use std::time::Duration;
@@ -126,5 +128,9 @@ impl Alpine {
         options: &RunQualificationOptions,
     ) -> Result<RunQualificationReport, AlpineError> {
         qualification::qualify_run(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn tune(options: &TuningOptions) -> Result<TuningReport, AlpineError> {
+        tuning::tune(options).map_err(AlpineError::InvalidInput)
     }
 }

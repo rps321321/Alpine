@@ -1,6 +1,7 @@
 use alpine_control_plane::{
     AcquireSessionOptions, Alpine, EvidencePhase, MicrobenchmarkOptions, ReleaseSessionOptions,
     RunQualificationOptions, SessionAcquisition, StartSessionOptions, StopSessionOptions,
+    TuningDisposition, TuningOptions,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
@@ -85,6 +86,18 @@ enum Commands {
     },
     Evidence {
         run_id: String,
+        #[arg(long, default_value_os_t = default_database())]
+        database: PathBuf,
+        #[arg(long)]
+        compact: bool,
+    },
+    Tune {
+        #[arg(long)]
+        baseline_run: String,
+        #[arg(long = "candidate-run", required = true)]
+        candidate_runs: Vec<String>,
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
         #[arg(long, default_value_os_t = default_database())]
         database: PathBuf,
         #[arg(long)]
@@ -278,6 +291,27 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
         } => {
             write_json(&Alpine::run_evidence(&database, &run_id)?, compact)?;
             Ok(0)
+        }
+        Commands::Tune {
+            baseline_run,
+            candidate_runs,
+            repository_root,
+            database,
+            compact,
+        } => {
+            let report = Alpine::tune(&TuningOptions {
+                repository_root,
+                database,
+                baseline_run_id: baseline_run,
+                candidate_run_ids: candidate_runs,
+            })?;
+            let code = if report.disposition == TuningDisposition::NotProven {
+                2
+            } else {
+                0
+            };
+            write_json(&report, compact)?;
+            Ok(code)
         }
         Commands::Resolve {
             install_root,
