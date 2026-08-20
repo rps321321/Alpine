@@ -10,9 +10,7 @@ use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(900);
@@ -314,22 +312,15 @@ fn prepare(options: &MicrobenchmarkOptions) -> Result<PreparedExperiment, String
             .map_err(|error| format!("failed to encode material configuration: {error}"))?,
     );
 
-    let now = OffsetDateTime::now_utc();
+    let now = UtcTimestamp::now()?;
     let run_id = format!(
-        "{:04}{:02}{:02}T{:02}{:02}{:02}Z-{}",
-        now.year(),
-        u8::from(now.month()),
-        now.day(),
-        now.hour(),
-        now.minute(),
-        now.second(),
+        "{}-{}",
+        now.compact(),
         &Uuid::new_v4().simple().to_string()[..8]
     );
     let run = NewRun {
         id: run_id.clone(),
-        started_at: now
-            .format(&Rfc3339)
-            .map_err(|error| format!("failed to format run timestamp: {error}"))?,
+        started_at: now.rfc3339(),
         kind: "micro".to_owned(),
         profile: resolved.profile_name.clone(),
         git_commit: git_commit.clone(),
@@ -968,9 +959,78 @@ fn atomic_json_replace(path: &Path, value: &Value) -> Result<(), String> {
 }
 
 fn utc_now() -> Result<String, String> {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .map_err(|error| format!("failed to format timestamp: {error}"))
+    Ok(UtcTimestamp::now()?.rfc3339())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UtcTimestamp {
+    epoch_seconds: u64,
+    nanoseconds: u32,
+}
+
+impl UtcTimestamp {
+    fn now() -> Result<Self, String> {
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "system clock predates the Unix epoch".to_owned())?;
+        Ok(Self {
+            epoch_seconds: duration.as_secs(),
+            nanoseconds: duration.subsec_nanos(),
+        })
+    }
+
+    fn compact(self) -> String {
+        let (year, month, day, hour, minute, second) = self.parts();
+        format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
+    }
+
+    fn rfc3339(self) -> String {
+        let (year, month, day, hour, minute, second) = self.parts();
+        if self.nanoseconds == 0 {
+            format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+        } else {
+            let fraction = format!("{:09}", self.nanoseconds)
+                .trim_end_matches('0')
+                .to_owned();
+            format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{fraction}Z")
+        }
+    }
+
+    fn parts(self) -> (i64, u32, u32, u32, u32, u32) {
+        let seconds_per_day = 86_400_u64;
+        let days = (self.epoch_seconds / seconds_per_day) as i64;
+        let day_seconds = self.epoch_seconds % seconds_per_day;
+        let (year, month, day) = civil_from_days(days);
+        (
+            year,
+            month,
+            day,
+            (day_seconds / 3_600) as u32,
+            ((day_seconds % 3_600) / 60) as u32,
+            (day_seconds % 60) as u32,
+        )
+    }
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let shifted = days_since_epoch + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month as u32, day as u32)
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, kind: &str) -> Result<T, String> {
@@ -1099,5 +1159,23 @@ mod tests {
         assert_eq!(second.method, "cached-metadata");
         assert_eq!(first.sha256, second.sha256);
         assert_eq!(first.verified_at, second.verified_at);
+    }
+
+    #[test]
+    fn utc_formatter_handles_epoch_leap_day_and_fraction() {
+        assert_eq!(
+            UtcTimestamp {
+                epoch_seconds: 0,
+                nanoseconds: 0
+            }
+            .rfc3339(),
+            "1970-01-01T00:00:00Z"
+        );
+        let leap_day = UtcTimestamp {
+            epoch_seconds: 951_782_400,
+            nanoseconds: 123_400_000,
+        };
+        assert_eq!(leap_day.rfc3339(), "2000-02-29T00:00:00.1234Z");
+        assert_eq!(leap_day.compact(), "20000229T000000Z");
     }
 }
