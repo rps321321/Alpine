@@ -56,12 +56,20 @@ pub fn run_bounded(
     arguments: &[&OsStr],
     timeout: Duration,
 ) -> io::Result<ProcessOutput> {
+    let mut command = Command::new(executable);
+    command.args(arguments);
+    run_command_bounded(&mut command, timeout)
+}
+
+pub(crate) fn run_command_bounded(
+    command: &mut Command,
+    timeout: Duration,
+) -> io::Result<ProcessOutput> {
     let stdout = tempfile::tempfile()?;
     let stderr = tempfile::tempfile()?;
     let mut stdout_reader = stdout.try_clone()?;
     let mut stderr_reader = stderr.try_clone()?;
-    let mut child = Command::new(executable)
-        .args(arguments)
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))

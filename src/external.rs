@@ -151,6 +151,28 @@ pub(crate) struct NearLimitContextEvidence {
     pub restored_prior_session: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GoldenAgentEvidence {
+    pub schema: u32,
+    pub task_id: String,
+    pub suite_sha256: String,
+    pub opencode_path: PathBuf,
+    pub opencode_sha256: String,
+    pub harness_policy_sha256: String,
+    pub effective_config_sha256: String,
+    pub agent_exit_code: i32,
+    pub tests_exit_code: i32,
+    pub protected_before: BTreeMap<String, String>,
+    pub protected_after: BTreeMap<String, String>,
+    pub unexpected_files: Vec<String>,
+    pub agent_stdout_sha256: String,
+    pub agent_stderr_sha256: String,
+    pub tests_stdout_sha256: String,
+    pub tests_stderr_sha256: String,
+    pub restored_prior_session: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RecordExternalEvidenceOptions {
     pub(crate) repository_root: PathBuf,
@@ -549,9 +571,11 @@ fn validate_current(
         return Err("artifact was produced by a stale Alpine binary".to_owned());
     }
     if kind == ExternalEvidenceKind::GoldenAgentTaskPass {
-        let task_id = string(&payload.evidence, "/task_id")?;
-        let suite = string(&payload.evidence, "/suite_sha256")?;
-        let task_root = repository_root.join("benchmarks/golden").join(task_id);
+        let evidence: GoldenAgentEvidence = serde_json::from_value(payload.evidence.clone())
+            .map_err(|error| format!("invalid golden-agent evidence: {error}"))?;
+        let task_root = repository_root
+            .join("benchmarks/golden")
+            .join(&evidence.task_id);
         let files = std::fs::read_dir(&task_root)
             .map_err(|error| format!("golden task is unavailable: {error}"))?
             .filter_map(Result::ok)
@@ -562,8 +586,19 @@ fn validate_current(
                     .any(|part| part.as_os_str() == "__pycache__")
             })
             .collect::<Vec<_>>();
-        if tree_sha256(&task_root, &files)? != suite {
+        if tree_sha256(&task_root, &files)? != evidence.suite_sha256 {
             return Err("golden task suite identity is stale".to_owned());
+        }
+        let current_opencode = crate::process::resolve_executable("opencode")
+            .ok_or_else(|| "OpenCode executable is unavailable".to_owned())?;
+        let current_opencode = std::fs::canonicalize(&current_opencode)
+            .map_err(|error| format!("failed to resolve OpenCode executable: {error}"))?;
+        let recorded_opencode = std::fs::canonicalize(&evidence.opencode_path)
+            .map_err(|error| format!("recorded OpenCode executable is unavailable: {error}"))?;
+        if current_opencode != recorded_opencode
+            || sha256_file(&current_opencode)? != evidence.opencode_sha256
+        {
+            return Err("golden-agent OpenCode executable identity is stale".to_owned());
         }
     }
     Ok(())
@@ -584,12 +619,7 @@ fn validate_semantics(
             validate_near_limit_context(&payload.evidence)?;
         }
         ExternalEvidenceKind::GoldenAgentTaskPass => {
-            require_true(&payload.evidence, "/success")?;
-            require_true(&payload.evidence, "/protected_paths_unchanged")?;
-            require_u64_exact(&payload.evidence, "/agent_exit_code", 0)?;
-            require_u64_exact(&payload.evidence, "/tests_exit_code", 0)?;
-            string(&payload.evidence, "/task_id")?;
-            string(&payload.evidence, "/suite_sha256")?;
+            validate_golden_agent(&payload.evidence)?;
         }
         ExternalEvidenceKind::OperatorReviewedCapabilityReport => {
             if payload
@@ -800,6 +830,42 @@ fn validate_near_limit_context(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_golden_agent(value: &Value) -> Result<(), String> {
+    let evidence: GoldenAgentEvidence = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid golden-agent evidence: {error}"))?;
+    let hashes = [
+        &evidence.suite_sha256,
+        &evidence.opencode_sha256,
+        &evidence.harness_policy_sha256,
+        &evidence.effective_config_sha256,
+        &evidence.agent_stdout_sha256,
+        &evidence.agent_stderr_sha256,
+        &evidence.tests_stdout_sha256,
+        &evidence.tests_stderr_sha256,
+    ];
+    if evidence.schema != 1
+        || evidence.task_id.trim().is_empty()
+        || !evidence.opencode_path.is_absolute()
+        || hashes.into_iter().any(|hash| !is_sha256(hash))
+        || evidence.agent_exit_code != 0
+        || evidence.tests_exit_code != 0
+        || evidence.protected_before.is_empty()
+        || evidence.protected_before != evidence.protected_after
+        || !evidence.unexpected_files.is_empty()
+        || !evidence.restored_prior_session
+    {
+        return Err("golden-agent evidence did not pass its raw result contract".to_owned());
+    }
+    if evidence
+        .protected_before
+        .iter()
+        .any(|(path, hash)| path.trim().is_empty() || !is_sha256(hash))
+    {
+        return Err("golden-agent protected path evidence is malformed".to_owned());
+    }
+    Ok(())
+}
+
 fn valid_process(process: &ProcessEvidence) -> bool {
     process.pid != 0
         && process.process_start_epoch_secs != 0
@@ -891,24 +957,6 @@ fn require_true(value: &Value, pointer: &str) -> Result<(), String> {
     } else {
         Err(format!("evidence field {pointer} must be true"))
     }
-}
-
-fn require_u64_exact(value: &Value, pointer: &str, expected: u64) -> Result<(), String> {
-    let observed = integer(value, pointer)?;
-    if observed == expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "evidence field {pointer} is {observed}; expected {expected}"
-        ))
-    }
-}
-
-fn integer(value: &Value, pointer: &str) -> Result<u64, String> {
-    value
-        .pointer(pointer)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| format!("evidence field {pointer} must be a non-negative integer"))
 }
 
 fn string<'a>(value: &'a Value, pointer: &str) -> Result<&'a str, String> {
@@ -1074,6 +1122,29 @@ mod tests {
         }
     }
 
+    fn golden_agent() -> GoldenAgentEvidence {
+        let protected = BTreeMap::from([("tests/test_ranges.py".to_owned(), "a".repeat(64))]);
+        GoldenAgentEvidence {
+            schema: 1,
+            task_id: "python-off-by-one".to_owned(),
+            suite_sha256: "b".repeat(64),
+            opencode_path: PathBuf::from(r"C:\fixture\opencode.cmd"),
+            opencode_sha256: "c".repeat(64),
+            harness_policy_sha256: "3".repeat(64),
+            effective_config_sha256: "d".repeat(64),
+            agent_exit_code: 0,
+            tests_exit_code: 0,
+            protected_before: protected.clone(),
+            protected_after: protected,
+            unexpected_files: Vec::new(),
+            agent_stdout_sha256: "e".repeat(64),
+            agent_stderr_sha256: "f".repeat(64),
+            tests_stdout_sha256: "1".repeat(64),
+            tests_stderr_sha256: "2".repeat(64),
+            restored_prior_session: true,
+        }
+    }
+
     #[test]
     fn same_process_gate_recomputes_raw_token_and_sequence_evidence() {
         let valid = serde_json::to_value(same_process()).unwrap();
@@ -1121,5 +1192,23 @@ mod tests {
         wrong.runs[1].content = "wrong".to_owned();
         wrong.runs[1].content_sha256 = sha256_bytes(b"wrong");
         assert!(validate_near_limit_context(&serde_json::to_value(wrong).unwrap()).is_err());
+    }
+
+    #[test]
+    fn golden_gate_recomputes_exit_protection_and_workspace_contract() {
+        let valid = serde_json::to_value(golden_agent()).unwrap();
+        assert!(validate_golden_agent(&valid).is_ok());
+
+        let mut changed_test = golden_agent();
+        changed_test
+            .protected_after
+            .insert("tests/test_ranges.py".to_owned(), "9".repeat(64));
+        assert!(validate_golden_agent(&serde_json::to_value(changed_test).unwrap()).is_err());
+
+        let mut unexpected = golden_agent();
+        unexpected
+            .unexpected_files
+            .push("unrequested.txt".to_owned());
+        assert!(validate_golden_agent(&serde_json::to_value(unexpected).unwrap()).is_err());
     }
 }

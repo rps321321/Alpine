@@ -5,6 +5,7 @@ mod decision;
 mod evidence;
 mod experiment;
 mod external;
+mod golden;
 mod identity;
 mod locking;
 mod process;
@@ -23,6 +24,7 @@ pub use external::{
     ExternalEvidenceKind, ExternalEvidenceStatus, ExternalEvidenceStatusKind,
     OperatorReviewOptions, RecordedExternalEvidence,
 };
+pub use golden::{GoldenAgentOptions, GoldenAgentReport};
 pub use qualification::{
     EvidencePhase, QualificationCheck, QualificationReport, QualificationRequest,
     QualificationTarget, RunQualificationOptions, RunQualificationReport,
@@ -168,5 +170,11 @@ impl Alpine {
         options: &NearLimitContextOptions,
     ) -> Result<NearLimitContextReport, AlpineError> {
         context::run(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn run_golden_agent(
+        options: &GoldenAgentOptions,
+    ) -> Result<GoldenAgentReport, AlpineError> {
+        golden::run(options).map_err(AlpineError::InvalidInput)
     }
 }
