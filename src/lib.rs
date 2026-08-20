@@ -10,6 +10,7 @@ mod identity;
 mod locking;
 mod process;
 mod qualification;
+mod rollback;
 mod session;
 mod stability;
 mod support;
@@ -25,10 +26,12 @@ pub use external::{
     OperatorReviewOptions, RecordedExternalEvidence,
 };
 pub use golden::{GoldenAgentOptions, GoldenAgentReport};
+pub use identity::runtime_bundle_sha256;
 pub use qualification::{
     EvidencePhase, QualificationCheck, QualificationReport, QualificationRequest,
     QualificationTarget, RunQualificationOptions, RunQualificationReport,
 };
+pub use rollback::{RollbackProofOptions, RollbackProofReport};
 pub use session::{
     AcquireSessionOptions, InferenceArguments, ProcessIdentityStrength, ReleaseSessionOptions,
     ReleaseSessionReport, SessionAcquisition, SessionAction, SessionSnapshot, SessionStatus,
@@ -176,5 +179,11 @@ impl Alpine {
         options: &GoldenAgentOptions,
     ) -> Result<GoldenAgentReport, AlpineError> {
         golden::run(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn prove_rollback(
+        options: &RollbackProofOptions,
+    ) -> Result<RollbackProofReport, AlpineError> {
+        rollback::run(options).map_err(AlpineError::InvalidInput)
     }
 }

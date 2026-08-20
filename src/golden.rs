@@ -68,7 +68,7 @@ pub fn run(options: &GoldenAgentOptions) -> Result<GoldenAgentReport, String> {
     if !fixture.is_dir() {
         return Err(format!("golden fixture is missing: {}", fixture.display()));
     }
-    let suite_files = walk_files(&task_root)
+    let suite_files = walk_files(&task_root)?
         .into_iter()
         .filter(|path| !is_generated(path))
         .collect::<Vec<_>>();
@@ -241,7 +241,7 @@ fn execute(
         .map_err(|error| format!("failed to run golden tests: {error}"))?;
 
     let protected_after = hash_paths(worktree, &task.protected_paths)?;
-    let source_files = walk_files(worktree)
+    let source_files = walk_files(worktree)?
         .into_iter()
         .filter(|path| !is_generated(path))
         .map(|path| {
@@ -584,13 +584,22 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
         let entry =
             entry.map_err(|error| format!("failed to read golden fixture entry: {error}"))?;
         let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect golden fixture entry: {error}"))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "golden fixture must not contain symbolic links: {}",
+                path.display()
+            ));
+        }
         if is_generated(&path) {
             continue;
         }
         let target = destination.join(entry.file_name());
-        if path.is_dir() {
+        if file_type.is_dir() {
             copy_tree(&path, &target)?;
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             std::fs::copy(&path, &target).map_err(|error| {
                 format!(
                     "failed to copy golden fixture {} to {}: {error}",
@@ -603,17 +612,44 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn walk_files(root: &Path) -> Vec<PathBuf> {
-    if root.is_file() {
-        return vec![root.to_path_buf()];
+fn walk_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let metadata = std::fs::symlink_metadata(root).map_err(|error| {
+        format!(
+            "failed to inspect golden suite path {}: {error}",
+            root.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "golden suite must not contain symbolic links: {}",
+            root.display()
+        ));
     }
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .flat_map(|entry| walk_files(&entry.path()))
-        .collect()
+    if metadata.is_file() {
+        return Ok(vec![root.to_path_buf()]);
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "golden suite path is neither a file nor a directory: {}",
+            root.display()
+        ));
+    }
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(root).map_err(|error| {
+        format!(
+            "failed to enumerate golden suite path {}: {error}",
+            root.display()
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            format!(
+                "failed to enumerate golden suite path {}: {error}",
+                root.display()
+            )
+        })?;
+        files.extend(walk_files(&entry.path())?);
+    }
+    Ok(files)
 }
 
 fn is_generated(path: &Path) -> bool {

@@ -3,7 +3,7 @@ use crate::decision::Decision;
 use crate::evidence::{EvidenceStore, MeasuredSample, RunEvidence, StoredIdentity};
 use crate::experiment::current_microbenchmark_identity;
 use crate::external::{self, ExternalEvidenceStatus, ExternalEvidenceStatusKind};
-use crate::identity::{sha256_bytes, sha256_file};
+use crate::identity::{runtime_bundle_sha256, sha256_bytes, sha256_file};
 use crate::support::{self, SupportReport};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -569,12 +569,18 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
         .get("launch")
         .ok_or_else(|| "final run launch evidence is missing".to_owned())?;
     let current_server_sha256 = sha256_file(&resolved.server)?;
+    let current_runtime_sha256 = runtime_bundle_sha256(&resolved.server)?;
     let current_install = launch.get("profile_sha256").and_then(Value::as_str)
         == Some(resolved.profile_sha256.as_str())
         && launch.get("session_config_sha256").and_then(Value::as_str)
             == Some(resolved.session_config_sha256.as_str())
         && launch.get("server_sha256").and_then(Value::as_str)
             == Some(current_server_sha256.as_str())
+        && launch.get("runtime_build_sha256").and_then(Value::as_str)
+            == Some(current_runtime_sha256.as_str())
+        && claim_identity
+            .as_ref()
+            .is_some_and(|identity| identity.runtime == current_runtime_sha256)
         && canonical_json_path(launch.get("server"))?
             == std::fs::canonicalize(&resolved.server).ok()
         && canonical_json_path(

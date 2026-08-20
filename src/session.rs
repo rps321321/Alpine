@@ -1,6 +1,6 @@
 use crate::clock::UtcTimestamp;
 use crate::config::{self, Profile, ResolvedSession, SessionConfig};
-use crate::identity::sha256_file;
+use crate::identity::{runtime_bundle_sha256, sha256_file};
 use crate::locking::InterprocessLock;
 use crate::process::{resolve_executable, run_bounded};
 use serde::{Deserialize, Serialize};
@@ -502,10 +502,6 @@ fn start_locked_with<P: SessionPlatform>(
         options.vision,
         options.force_fallback,
     )?;
-    let build_manifest = resolved
-        .server
-        .parent()
-        .map(|parent| parent.join("build-manifest.json"));
     let mut state = SessionState {
         schema: 2,
         transaction_id: Some(Uuid::new_v4().simple().to_string()),
@@ -521,10 +517,7 @@ fn start_locked_with<P: SessionPlatform>(
         fallback: initial_plan.fallback.clone(),
         process_start_epoch_secs: None,
         server_sha256: Some(sha256_file(&resolved.server)?),
-        runtime_build_sha256: build_manifest
-            .filter(|path| path.is_file())
-            .map(|path| sha256_file(&path))
-            .transpose()?,
+        runtime_build_sha256: Some(runtime_bundle_sha256(&resolved.server)?),
         profile_sha256: Some(resolved.profile_sha256.clone()),
         session_config_sha256: Some(resolved.session_config_sha256.clone()),
         arguments: initial_plan.arguments.clone(),
@@ -736,16 +729,8 @@ fn verify_spawn_inputs_unchanged(
     {
         return Err("Session Config changed between resolution and process start".to_owned());
     }
-    let manifest = resolved
-        .server
-        .parent()
-        .ok_or_else(|| "runtime path has no parent".to_owned())?
-        .join("build-manifest.json");
-    let observed_manifest = manifest
-        .is_file()
-        .then(|| sha256_file(&manifest))
-        .transpose()?;
-    if observed_manifest != state.runtime_build_sha256 {
+    let observed_runtime = runtime_bundle_sha256(&resolved.server)?;
+    if state.runtime_build_sha256.as_deref() != Some(&observed_runtime) {
         return Err("runtime build identity changed between capture and process start".to_owned());
     }
     Ok(())
@@ -1460,18 +1445,10 @@ fn ensure_acquisition_inputs_unchanged(
                 .to_owned(),
         );
     }
-    let manifest = resolved
-        .server
-        .parent()
-        .ok_or_else(|| "runtime path has no parent".to_owned())?
-        .join("build-manifest.json");
-    match (
-        acquisition.runtime_build_sha256.as_deref(),
-        manifest.is_file(),
-    ) {
-        (Some(expected), true) if sha256_file(&manifest)? == expected => {}
-        (None, false) => {}
-        _ => return Err("runtime build identity changed after acquisition".to_owned()),
+    if let Some(expected) = acquisition.runtime_build_sha256.as_deref() {
+        if runtime_bundle_sha256(&resolved.server)? != expected {
+            return Err("runtime bundle identity changed after acquisition".to_owned());
+        }
     }
     let replay = build_arguments(
         &resolved.session,
@@ -2862,6 +2839,7 @@ mod tests {
         let profile_path = directory.path().join("profiles/turbo-16k.json");
         let state = SessionState {
             server_sha256: Some(sha256_file(&resolved.server).unwrap()),
+            runtime_build_sha256: Some(runtime_bundle_sha256(&resolved.server).unwrap()),
             profile_sha256: Some(resolved.profile_sha256.clone()),
             session_config_sha256: Some(resolved.session_config_sha256.clone()),
             ..SessionState::default()

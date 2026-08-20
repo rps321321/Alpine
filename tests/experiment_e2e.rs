@@ -1,7 +1,7 @@
 use alpine_control_plane::{
     Alpine, Decision, EvidencePhase, ExternalEvidenceStatusKind, MicrobenchmarkOptions,
     OperatorReviewOptions, QualificationTarget, RunQualificationOptions, TuningDisposition,
-    TuningOptions,
+    TuningOptions, runtime_bundle_sha256,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -304,7 +304,7 @@ fn write_install(root: &Path, port: u16, runtime: &Path, pid: u32, process_start
             "pid": pid, "process_start_epoch_secs": process_start_epoch_secs,
             "profile": "fixture", "runtime": "official",
             "server": runtime, "server_sha256": sha256(&std::fs::read(runtime).unwrap()),
-            "runtime_build_sha256": sha256(b"fixture build"),
+            "runtime_build_sha256": runtime_bundle_sha256(runtime).unwrap(),
             "profile_sha256": sha256(&std::fs::read(profile).unwrap()),
             "session_config_sha256": sha256(&std::fs::read(root.join("config/session.json")).unwrap()),
             "arguments": ["--fixture"], "environment": {}

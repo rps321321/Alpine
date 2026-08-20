@@ -1,7 +1,7 @@
 use alpine_control_plane::{
     AcquireSessionOptions, Alpine, CleanRestartStabilityOptions, EvidencePhase,
     ExternalEvidenceKind, GoldenAgentOptions, MicrobenchmarkOptions, NearLimitContextOptions,
-    OperatorReviewOptions, ReleaseSessionOptions, RunQualificationOptions,
+    OperatorReviewOptions, ReleaseSessionOptions, RollbackProofOptions, RunQualificationOptions,
     SameProcessStabilityOptions, SessionAcquisition, StartSessionOptions, StopSessionOptions,
     TuningDisposition, TuningOptions,
 };
@@ -220,6 +220,27 @@ enum Commands {
         lease_timeout_ms: u64,
         #[arg(long, default_value_t = 600_000)]
         startup_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    RollbackProof {
+        anchor_run_id: String,
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_os_t = default_result_root())]
+        result_root: PathBuf,
+        #[arg(long, default_value_os_t = default_database())]
+        database: PathBuf,
+        #[arg(long)]
+        allow_legacy_identity: bool,
+        #[arg(long, default_value_t = 15_000)]
+        lease_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        startup_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        request_timeout_ms: u64,
         #[arg(long)]
         compact: bool,
     },
@@ -570,6 +591,32 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
                 allow_legacy_identity,
                 lease_timeout: Duration::from_millis(lease_timeout_ms),
                 startup_timeout: Duration::from_millis(startup_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
+        Commands::RollbackProof {
+            anchor_run_id,
+            repository_root,
+            install_root,
+            result_root,
+            database,
+            allow_legacy_identity,
+            lease_timeout_ms,
+            startup_timeout_ms,
+            request_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::prove_rollback(&RollbackProofOptions {
+                repository_root,
+                install_root,
+                database,
+                result_root,
+                anchor_run_id,
+                allow_legacy_identity,
+                lease_timeout: Duration::from_millis(lease_timeout_ms),
+                startup_timeout: Duration::from_millis(startup_timeout_ms),
+                request_timeout: Duration::from_millis(request_timeout_ms),
             })?;
             write_json(&report, compact)?;
             Ok(0)

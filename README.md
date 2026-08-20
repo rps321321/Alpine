@@ -84,6 +84,7 @@ cargo run --release --bin alpine -- same-process-stability <final-run-id>
 cargo run --release --bin alpine -- clean-restart-stability <final-run-id>
 cargo run --release --bin alpine -- near-limit-context <final-run-id> --ratio 0.85
 cargo run --release --bin alpine -- golden-agent <final-run-id> --task python-off-by-one
+cargo run --release --bin alpine -- rollback-proof <final-run-id>
 ```
 
 The restart gate performs ten actual stop/start cycles under the same exclusive lease, requires ten distinct PID/start/transaction identities, compares the raw 128-token greedy output from every process, and restores the materially exact prior profile, arguments, environment and fallback mode.
@@ -91,6 +92,8 @@ The restart gate performs ten actual stop/start cycles under the same exclusive 
 The context gate uses the server tokenizer to construct a reproducible immutable-ledger prompt within two percent of the configured target ratio, performs the three-needle retrieval twice on one verified process, verifies both raw responses, and restores the prior Session.
 
 The golden-agent gate copies the versioned fixture into an isolated temporary worktree, launches OpenCode directly from Rust with the reviewed minimal policy and a secret-scrubbed child environment, verifies the effective context/safety policy, runs the executable tests, rejects protected-path edits or unexpected files, binds the OpenCode executable hash, and restores the prior Session. It does not invoke the PowerShell launcher.
+
+The rollback proof transactionally switches to the pinned `stable-16k` production Profile, verifies its current Profile/Session/runtime identities, performs a real 16-token inference smoke, and restores the prior material Session before publishing evidence.
 
 Only the explicitly human production review uses manual attachment:
 

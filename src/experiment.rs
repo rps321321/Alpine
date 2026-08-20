@@ -1,7 +1,7 @@
 use crate::clock::UtcTimestamp;
 use crate::config::{self, ResolvedSession};
 use crate::evidence::{EvidenceWriter, NewRun, SampleRecord, TerminalStatus};
-use crate::identity::{sha256_bytes, sha256_file, tree_sha256};
+use crate::identity::{runtime_bundle_sha256, sha256_bytes, sha256_file, tree_sha256};
 use crate::locking::InterprocessLock;
 use crate::process::{resolve_executable, run_bounded};
 use crate::qualification::EvidencePhase;
@@ -258,6 +258,13 @@ fn prepare(options: &MicrobenchmarkOptions) -> Result<PreparedExperiment, String
         return Err(format!(
             "running server identity mismatch: state={}, observed={actual_server}",
             state.server_sha256
+        ));
+    }
+    let actual_runtime = runtime_bundle_sha256(&resolved.server)?;
+    if state.runtime_build_sha256.as_deref() != Some(&actual_runtime) {
+        return Err(format!(
+            "running runtime bundle identity mismatch: state={:?}, observed={actual_runtime}",
+            state.runtime_build_sha256
         ));
     }
 

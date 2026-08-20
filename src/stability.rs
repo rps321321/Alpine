@@ -448,7 +448,7 @@ fn request(
     })
 }
 
-fn completion_tokens(
+pub(crate) fn completion_tokens(
     agent: &ureq::Agent,
     base_url: &str,
     api_key: &str,

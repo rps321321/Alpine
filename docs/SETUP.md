@@ -125,6 +125,7 @@ cargo run --release --bin alpine -- same-process-stability <final-run-id>
 cargo run --release --bin alpine -- clean-restart-stability <final-run-id>
 cargo run --release --bin alpine -- near-limit-context <final-run-id> --ratio 0.85
 cargo run --release --bin alpine -- golden-agent <final-run-id> --task python-off-by-one
+cargo run --release --bin alpine -- rollback-proof <final-run-id>
 ```
 
 The restart harness performs ten real stop/start cycles, proves distinct process identities, compares raw 128-token greedy outputs, and restores the prior material Session configuration before publishing evidence.
@@ -132,6 +133,8 @@ The restart harness performs ten real stop/start cycles, proves distinct process
 The context harness sizes its deterministic ledger with the live tokenizer, reaches within two percent of the requested ratio, requires two exact three-needle retrievals, and records the raw responses and token digests.
 
 The golden-agent harness runs OpenCode directly from Rust in a copied fixture. It verifies the effective 16K policy, strips ambient credential variables from the child, keeps core coding tools available, runs the versioned tests, rejects protected or unexpected changes, and binds evidence to the exact OpenCode executable and task-suite hashes.
+
+The rollback proof launches `stable-16k`, binds its current Profile, Session Config and runtime hashes, performs a real inference smoke, and restores the prior material Session. A merely present JSON Profile is not accepted as rollback evidence.
 
 Manual attachment is reserved for the human capability review:
 

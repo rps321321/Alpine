@@ -1,6 +1,6 @@
 use crate::clock::UtcTimestamp;
 use crate::evidence::{EvidenceStore, EvidenceWriter, RunEvidence};
-use crate::identity::{sha256_bytes, sha256_file, tree_sha256};
+use crate::identity::{runtime_bundle_sha256, sha256_bytes, sha256_file, tree_sha256};
 use crate::qualification::EvidenceIdentity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -170,6 +170,27 @@ pub(crate) struct GoldenAgentEvidence {
     pub agent_stderr_sha256: String,
     pub tests_stdout_sha256: String,
     pub tests_stderr_sha256: String,
+    pub restored_prior_session: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RollbackProfileEvidence {
+    pub schema: u32,
+    pub profile: String,
+    pub profile_path: PathBuf,
+    pub profile_sha256: String,
+    pub session_config_path: PathBuf,
+    pub session_config_sha256: String,
+    pub runtime: String,
+    pub server_path: PathBuf,
+    pub server_sha256: String,
+    pub runtime_build_sha256: String,
+    pub context_tokens: u32,
+    pub process: ProcessEvidence,
+    pub smoke_prompt_sha256: String,
+    pub smoke_token_sha256: String,
+    pub smoke_tokens: Vec<u32>,
     pub restored_prior_session: bool,
 }
 
@@ -576,10 +597,8 @@ fn validate_current(
         let task_root = repository_root
             .join("benchmarks/golden")
             .join(&evidence.task_id);
-        let files = std::fs::read_dir(&task_root)
-            .map_err(|error| format!("golden task is unavailable: {error}"))?
-            .filter_map(Result::ok)
-            .flat_map(|entry| walk_files(entry.path()))
+        let files = walk_files(&task_root)?
+            .into_iter()
             .filter(|path| {
                 !path
                     .components()
@@ -599,6 +618,43 @@ fn validate_current(
             || sha256_file(&current_opencode)? != evidence.opencode_sha256
         {
             return Err("golden-agent OpenCode executable identity is stale".to_owned());
+        }
+    }
+    if kind == ExternalEvidenceKind::RollbackProfileAvailable {
+        let evidence: RollbackProfileEvidence = serde_json::from_value(payload.evidence.clone())
+            .map_err(|error| format!("invalid rollback-profile evidence: {error}"))?;
+        let profile_path = std::fs::canonicalize(&evidence.profile_path)
+            .map_err(|error| format!("rollback Profile is unavailable: {error}"))?;
+        let session_path = std::fs::canonicalize(&evidence.session_config_path)
+            .map_err(|error| format!("rollback Session Config is unavailable: {error}"))?;
+        let server_path = std::fs::canonicalize(&evidence.server_path)
+            .map_err(|error| format!("rollback runtime is unavailable: {error}"))?;
+        let install_root = profile_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| "rollback Profile has no install root".to_owned())?;
+        if profile_path != install_root.join("profiles/stable-16k.json")
+            || session_path != install_root.join("config/session.json")
+            || sha256_file(&profile_path)? != evidence.profile_sha256
+            || sha256_file(&session_path)? != evidence.session_config_sha256
+            || sha256_file(&server_path)? != evidence.server_sha256
+            || runtime_bundle_sha256(&server_path)? != evidence.runtime_build_sha256
+        {
+            return Err(
+                "rollback Profile, Session Config, or runtime identity is stale".to_owned(),
+            );
+        }
+        let profile: crate::config::Profile = serde_json::from_slice(
+            &std::fs::read(&profile_path)
+                .map_err(|error| format!("failed to read rollback Profile: {error}"))?,
+        )
+        .map_err(|error| format!("invalid rollback Profile: {error}"))?;
+        if profile.name != "stable-16k"
+            || profile.status != crate::config::ProfileStatus::Production
+            || profile.context != evidence.context_tokens
+            || profile.runtime != evidence.runtime
+        {
+            return Err("rollback Profile no longer satisfies the production contract".to_owned());
         }
     }
     Ok(())
@@ -632,11 +688,7 @@ fn validate_semantics(
             require_true(&payload.evidence, "/capability_review_passed")?;
         }
         ExternalEvidenceKind::RollbackProfileAvailable => {
-            if string(&payload.evidence, "/profile")? != "stable-16k" {
-                return Err("rollback evidence must prove stable-16k".to_owned());
-            }
-            require_true(&payload.evidence, "/transaction_verified")?;
-            require_true(&payload.evidence, "/restored_prior_session")?;
+            validate_rollback_profile(&payload.evidence)?;
         }
     }
     Ok(())
@@ -866,6 +918,38 @@ fn validate_golden_agent(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_rollback_profile(value: &Value) -> Result<(), String> {
+    let evidence: RollbackProfileEvidence = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid rollback-profile evidence: {error}"))?;
+    let hashes = [
+        &evidence.profile_sha256,
+        &evidence.session_config_sha256,
+        &evidence.server_sha256,
+        &evidence.smoke_prompt_sha256,
+        &evidence.smoke_token_sha256,
+    ];
+    if evidence.schema != 1
+        || evidence.profile != "stable-16k"
+        || evidence.runtime.trim().is_empty()
+        || !evidence.profile_path.is_absolute()
+        || !evidence.session_config_path.is_absolute()
+        || !evidence.server_path.is_absolute()
+        || evidence.context_tokens != 16_384
+        || !valid_process(&evidence.process)
+        || hashes.into_iter().any(|hash| !is_sha256(hash))
+        || !is_sha256(&evidence.runtime_build_sha256)
+        || evidence.smoke_tokens.len() < 16
+        || sha256_bytes(
+            &serde_json::to_vec(&evidence.smoke_tokens)
+                .map_err(|error| format!("failed to encode rollback tokens: {error}"))?,
+        ) != evidence.smoke_token_sha256
+        || !evidence.restored_prior_session
+    {
+        return Err("rollback-profile evidence failed its raw availability contract".to_owned());
+    }
+    Ok(())
+}
+
 fn valid_process(process: &ProcessEvidence) -> bool {
     process.pid != 0
         && process.process_start_epoch_secs != 0
@@ -959,25 +1043,44 @@ fn require_true(value: &Value, pointer: &str) -> Result<(), String> {
     }
 }
 
-fn string<'a>(value: &'a Value, pointer: &str) -> Result<&'a str, String> {
-    value
-        .pointer(pointer)
-        .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty())
-        .ok_or_else(|| format!("evidence field {pointer} must be a non-empty string"))
-}
-
-fn walk_files(path: PathBuf) -> Vec<PathBuf> {
-    if path.is_file() {
-        return vec![path];
+fn walk_files(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "failed to inspect evidence path {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "evidence path must not be a symbolic link: {}",
+            path.display()
+        ));
     }
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .flat_map(|entry| walk_files(entry.path()))
-        .collect()
+    if metadata.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "evidence path is neither a file nor a directory: {}",
+            path.display()
+        ));
+    }
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(path).map_err(|error| {
+        format!(
+            "failed to enumerate evidence path {}: {error}",
+            path.display()
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            format!(
+                "failed to enumerate evidence path {}: {error}",
+                path.display()
+            )
+        })?;
+        files.extend(walk_files(&entry.path())?);
+    }
+    Ok(files)
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -1145,6 +1248,32 @@ mod tests {
         }
     }
 
+    fn rollback_profile() -> RollbackProfileEvidence {
+        let tokens = vec![1; 16];
+        RollbackProfileEvidence {
+            schema: 1,
+            profile: "stable-16k".to_owned(),
+            profile_path: PathBuf::from(r"C:\fixture\profiles\stable-16k.json"),
+            profile_sha256: "a".repeat(64),
+            session_config_path: PathBuf::from(r"C:\fixture\config\session.json"),
+            session_config_sha256: "b".repeat(64),
+            runtime: "official".to_owned(),
+            server_path: PathBuf::from(r"C:\fixture\runtime\llama-server.exe"),
+            server_sha256: "c".repeat(64),
+            runtime_build_sha256: "d".repeat(64),
+            context_tokens: 16_384,
+            process: ProcessEvidence {
+                pid: 42,
+                process_start_epoch_secs: 123,
+                session_identity: "e".repeat(32),
+            },
+            smoke_prompt_sha256: "f".repeat(64),
+            smoke_token_sha256: sha256_bytes(&serde_json::to_vec(&tokens).unwrap()),
+            smoke_tokens: tokens,
+            restored_prior_session: true,
+        }
+    }
+
     #[test]
     fn same_process_gate_recomputes_raw_token_and_sequence_evidence() {
         let valid = serde_json::to_value(same_process()).unwrap();
@@ -1210,5 +1339,20 @@ mod tests {
             .unexpected_files
             .push("unrequested.txt".to_owned());
         assert!(validate_golden_agent(&serde_json::to_value(unexpected).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rollback_gate_recomputes_smoke_and_restoration_contract() {
+        let valid = serde_json::to_value(rollback_profile()).unwrap();
+        assert!(validate_rollback_profile(&valid).is_ok());
+
+        let mut short = rollback_profile();
+        short.smoke_tokens.truncate(1);
+        short.smoke_token_sha256 = sha256_bytes(&serde_json::to_vec(&short.smoke_tokens).unwrap());
+        assert!(validate_rollback_profile(&serde_json::to_value(short).unwrap()).is_err());
+
+        let mut not_restored = rollback_profile();
+        not_restored.restored_prior_session = false;
+        assert!(validate_rollback_profile(&serde_json::to_value(not_restored).unwrap()).is_err());
     }
 }

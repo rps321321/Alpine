@@ -67,10 +67,87 @@ pub fn tree_sha256(root: &Path, paths: &[PathBuf]) -> Result<String, String> {
     Ok(hex_digest(digest.finalize().as_slice()))
 }
 
+pub fn runtime_bundle_sha256(server: &Path) -> Result<String, String> {
+    let server = std::fs::canonicalize(server).map_err(|error| {
+        format!(
+            "failed to resolve runtime executable {}: {error}",
+            server.display()
+        )
+    })?;
+    if !server.is_file() {
+        return Err(format!(
+            "runtime executable is not a file: {}",
+            server.display()
+        ));
+    }
+    let root = server
+        .parent()
+        .ok_or_else(|| format!("runtime executable has no parent: {}", server.display()))?;
+    let mut files = vec![server.clone()];
+    for entry in std::fs::read_dir(root).map_err(|error| {
+        format!(
+            "failed to enumerate runtime bundle {}: {error}",
+            root.display()
+        )
+    })? {
+        let entry =
+            entry.map_err(|error| format!("failed to enumerate runtime bundle entry: {error}"))?;
+        let path = entry.path();
+        if !entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect runtime bundle entry: {error}"))?
+            .is_file()
+        {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        let extension = path
+            .extension()
+            .map(|value| value.to_string_lossy().to_ascii_lowercase());
+        if name == "build-manifest.json"
+            || matches!(extension.as_deref(), Some("dll" | "so" | "dylib"))
+            || name.contains(".so.")
+        {
+            files.push(path);
+        }
+    }
+    tree_sha256(root, &files)
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     let mut encoded = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_bundle_tracks_server_and_shared_libraries_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = directory.path().join("llama-server.exe");
+        let library = directory.path().join("llama-server-impl.dll");
+        let unrelated = directory.path().join("llama-cli.exe");
+        let notes = directory.path().join("README.txt");
+        std::fs::write(&server, b"server-v1").unwrap();
+        std::fs::write(&library, b"library-v1").unwrap();
+        std::fs::write(&unrelated, b"cli-v1").unwrap();
+        std::fs::write(&notes, b"notes-v1").unwrap();
+
+        let initial = runtime_bundle_sha256(&server).unwrap();
+        std::fs::write(&library, b"library-v2").unwrap();
+        let library_changed = runtime_bundle_sha256(&server).unwrap();
+        assert_ne!(initial, library_changed);
+
+        std::fs::write(&unrelated, b"cli-v2").unwrap();
+        std::fs::write(&notes, b"notes-v2").unwrap();
+        assert_eq!(library_changed, runtime_bundle_sha256(&server).unwrap());
+
+        std::fs::write(&server, b"server-v2").unwrap();
+        assert_ne!(library_changed, runtime_bundle_sha256(&server).unwrap());
+    }
 }
