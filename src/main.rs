@@ -1,6 +1,6 @@
 use alpine_control_plane::{
     AcquireSessionOptions, Alpine, EvidencePhase, MicrobenchmarkOptions, ReleaseSessionOptions,
-    SessionAcquisition, StartSessionOptions, StopSessionOptions,
+    RunQualificationOptions, SessionAcquisition, StartSessionOptions, StopSessionOptions,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
@@ -26,6 +26,23 @@ impl From<BenchmarkPhase> for EvidencePhase {
         match value {
             BenchmarkPhase::Tuning => Self::Tuning,
             BenchmarkPhase::Final => Self::Final,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum QualificationStage {
+    Candidate,
+    Validated,
+    Production,
+}
+
+impl From<QualificationStage> for alpine_control_plane::QualificationTarget {
+    fn from(value: QualificationStage) -> Self {
+        match value {
+            QualificationStage::Candidate => Self::Candidate,
+            QualificationStage::Validated => Self::Validated,
+            QualificationStage::Production => Self::Production,
         }
     }
 }
@@ -96,6 +113,23 @@ enum Commands {
         compact: bool,
     },
     Qualify {
+        final_run_id: String,
+        #[arg(long = "tuning-run", required = true)]
+        tuning_run_ids: Vec<String>,
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_os_t = default_database())]
+        database: PathBuf,
+        #[arg(long, value_enum, default_value_t = QualificationStage::Candidate)]
+        target: QualificationStage,
+        #[arg(long, default_value_t = 10_000)]
+        support_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    QualifyRequest {
         #[arg(long)]
         request: PathBuf,
         #[arg(long)]
@@ -383,7 +417,29 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
             write_json(&report, compact)?;
             Ok(report.decision.exit_code())
         }
-        Commands::Qualify { request, compact } => {
+        Commands::Qualify {
+            final_run_id,
+            tuning_run_ids,
+            repository_root,
+            install_root,
+            database,
+            target,
+            support_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::qualify_run(&RunQualificationOptions {
+                repository_root,
+                install_root,
+                database,
+                final_run_id,
+                tuning_run_ids,
+                target: target.into(),
+                support_timeout: Duration::from_millis(support_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(report.decision.exit_code())
+        }
+        Commands::QualifyRequest { request, compact } => {
             let report = Alpine::qualify(&request)?;
             write_json(&report, compact)?;
             Ok(report.decision.exit_code())

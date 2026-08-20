@@ -693,6 +693,14 @@ fn load_workloads(
     Ok((workloads, identity, file_names))
 }
 
+pub(crate) fn current_microbenchmark_identity(
+    repository_root: &Path,
+    selected: &[String],
+) -> Result<String, String> {
+    let (_, identity, _) = load_workloads(repository_root, selected)?;
+    Ok(identity)
+}
+
 fn validate_workload(workload: &WorkloadDefinition) -> Result<(), String> {
     if workload.id.is_empty()
         || !workload

@@ -90,6 +90,16 @@ pub struct RunEvidence {
     pub missing_identity_fields: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MeasuredSample {
+    pub workload: String,
+    pub iteration: u32,
+    pub prefill_tps: Option<f64>,
+    pub decode_tps: Option<f64>,
+    pub output_sha256: Option<String>,
+    pub quality_pass: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct NewRun {
     pub id: String,
@@ -260,6 +270,33 @@ impl EvidenceStore {
             missing_identity_fields,
             identity,
         }))
+    }
+
+    pub(crate) fn measured_samples(&self, id: &str) -> Result<Vec<MeasuredSample>, String> {
+        validate_token("run id", id)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT workload, iteration, prefill_tps, decode_tps, output_sha256, quality_pass
+                 FROM samples WHERE run_id=?1 AND warmup=0
+                 ORDER BY workload, iteration",
+            )
+            .map_err(|error| self.database_error(error))?;
+        let rows = statement
+            .query_map(params![id], |row| {
+                let iteration = row.get::<_, u32>(1)?;
+                Ok(MeasuredSample {
+                    workload: row.get(0)?,
+                    iteration,
+                    prefill_tps: row.get(2)?,
+                    decode_tps: row.get(3)?,
+                    output_sha256: row.get(4)?,
+                    quality_pass: row.get(5)?,
+                })
+            })
+            .map_err(|error| self.database_error(error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| self.database_error(error))
     }
 
     fn database_error(&self, error: rusqlite::Error) -> String {

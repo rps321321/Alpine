@@ -97,6 +97,16 @@ Profile status is a lifecycle claim, not a menu label. See `config/promotion-pol
 
 SQLite lives at `results/results.sqlite3`; each run keeps raw JSONL, outputs, logs, configurations and compressed long prompts under `results/runs/<run-id>`. Generated evidence is local by default. Summary reports are regeneratable.
 
+The Rust path is authoritative for new microbenchmark qualification evidence. Run a tuning baseline and a separate, freshly hashed final pass with identical material configuration, then qualify the final SQLite rows:
+
+```powershell
+cargo run --release --bin alpine -- benchmark --profile fast-32k --phase tuning --runs 5 --warmups 1
+cargo run --release --bin alpine -- benchmark --profile fast-32k --phase final --runs 5 --warmups 1 --deep-verify-artifacts
+cargo run --release --bin alpine -- qualify <final-run-id> --tuning-run <tuning-run-id> --target candidate
+```
+
+The legacy `localmodel.ps1 qualify` command remains migration evidence; it is not sufficient for a new Alpine qualification claim.
+
 Measured runs hold an inference-capacity lease tied to their exact Inference Session identity. A second benchmark or unrelated interactive launcher receives a visible busy refusal instead of silently queueing and contaminating timings. The agent benchmark's own launcher carries the governing lease token.
 
 If a harness is interrupted after producing evidence:

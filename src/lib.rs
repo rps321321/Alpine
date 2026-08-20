@@ -14,7 +14,10 @@ pub use config::{Profile, ProfileStatus, ResolvedSession, SessionConfig};
 pub use decision::Decision;
 pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use experiment::{ExperimentReport, MicrobenchmarkOptions};
-pub use qualification::{EvidencePhase, QualificationReport, QualificationRequest};
+pub use qualification::{
+    EvidencePhase, QualificationCheck, QualificationReport, QualificationRequest,
+    QualificationTarget, RunQualificationOptions, RunQualificationReport,
+};
 pub use session::{
     AcquireSessionOptions, InferenceArguments, ProcessIdentityStrength, ReleaseSessionOptions,
     ReleaseSessionReport, SessionAcquisition, SessionAction, SessionSnapshot, SessionStatus,
@@ -117,5 +120,11 @@ impl Alpine {
     pub fn qualify(path: &Path) -> Result<QualificationReport, AlpineError> {
         let request = qualification::read_request(path).map_err(AlpineError::InvalidInput)?;
         qualification::qualify(&request).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn qualify_run(
+        options: &RunQualificationOptions,
+    ) -> Result<RunQualificationReport, AlpineError> {
+        qualification::qualify_run(options).map_err(AlpineError::InvalidInput)
     }
 }

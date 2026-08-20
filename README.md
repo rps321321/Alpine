@@ -61,13 +61,19 @@ cargo run --bin alpine -- inspect
 
 An eligible host intentionally reports `not-proven` and exits with code 2 until identity-bound qualification evidence is evaluated. Alpine never turns successful discovery into an unsupported qualification claim.
 
-Evaluate a Qualification Request:
+Evaluate a final run directly from SQLite against a distinct tuning baseline:
 
 ```powershell
-cargo run --bin alpine -- qualify --request tests/fixtures/alpine/qualified.json
+cargo run --release --bin alpine -- qualify <final-run-id> --tuning-run <tuning-run-id> --target candidate
 ```
 
-Qualification outcomes are `qualified`, `unsupported`, `inconclusive`, `regressed` and `not-proven`. Evidence is bound to hardware, software, model, runtime, workload, configuration and policy identities. Final qualification evidence must be independent from tuning and selection evidence.
+The qualifier recomputes quality, deterministic output hashes, sample count, decode variability and per-workload median regression from non-warmup SQLite rows. It also re-hashes the current policy, workload suite, Alpine binary, hardware manifest and runtime, recomputes material configuration identity, and checks that the fully hashed final model has not changed. Qualification outcomes are `qualified`, `unsupported`, `inconclusive`, `regressed` and `not-proven`. Validated and production targets remain `not-proven` until their inherited external evidence is independently verified.
+
+The old caller-assembled request evaluator remains available only as a migration compatibility command:
+
+```powershell
+cargo run --bin alpine -- qualify-request --request tests/fixtures/alpine/qualified.json
+```
 
 Run the canonical repository verification:
 

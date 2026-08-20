@@ -1,4 +1,7 @@
-use alpine_control_plane::{Alpine, EvidencePhase, MicrobenchmarkOptions};
+use alpine_control_plane::{
+    Alpine, Decision, EvidencePhase, MicrobenchmarkOptions, QualificationTarget,
+    RunQualificationOptions,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
@@ -14,7 +17,7 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
     let repository = directory.path().join("repository");
     let install = directory.path().join("install");
     let results = directory.path().join("results");
-    let (port, mut server, runtime, process_start_epoch_secs) = mock_server(directory.path());
+    let (port, mut server, runtime, process_start_epoch_secs) = mock_server(directory.path(), 6);
     write_repository(&repository);
     write_install(
         &install,
@@ -24,20 +27,23 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
         process_start_epoch_secs,
     );
 
-    let report = Alpine::run_microbenchmark(&MicrobenchmarkOptions {
-        repository_root: repository,
-        install_root: install,
+    let mut options = MicrobenchmarkOptions {
+        repository_root: repository.clone(),
+        install_root: install.clone(),
         result_root: results.clone(),
         profile: "fixture".to_owned(),
         runs: 1,
         warmups: 0,
         workloads: vec!["fixture".to_owned()],
         notes: Some("integration fixture".to_owned()),
-        phase: EvidencePhase::Final,
+        phase: EvidencePhase::Tuning,
         deep_verify_artifacts: false,
         lease_timeout: Duration::from_secs(1),
-    })
-    .expect("Rust benchmark");
+    };
+    let tuning = Alpine::run_microbenchmark(&options).expect("Rust tuning benchmark");
+    options.phase = EvidencePhase::Final;
+    options.deep_verify_artifacts = true;
+    let report = Alpine::run_microbenchmark(&options).expect("Rust final benchmark");
     assert!(server.wait().expect("mock server").success());
 
     assert_eq!(report.status, "passed");
@@ -62,6 +68,45 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
     assert!(raw.join("run.json").is_file());
     assert!(raw.join("samples.jsonl").is_file());
     assert!(raw.join("summary.json").is_file());
+
+    let qualify_options = RunQualificationOptions {
+        repository_root: repository,
+        install_root: install,
+        database: database.clone(),
+        final_run_id: report.run_id.clone(),
+        tuning_run_ids: vec![tuning.run_id],
+        target: QualificationTarget::Candidate,
+        support_timeout: Duration::from_secs(1),
+    };
+    let qualification =
+        Alpine::qualify_run(&qualify_options).expect("database-backed qualification");
+    assert_eq!(qualification.decision, Decision::Qualified);
+    assert!(qualification.checks.iter().all(|check| check.passed));
+
+    let mut validated_options = qualify_options.clone();
+    validated_options.target = QualificationTarget::Validated;
+    let validated = Alpine::qualify_run(&validated_options).expect("validated gate");
+    assert_eq!(validated.decision, Decision::NotProven);
+    assert_eq!(
+        validated.missing_external_evidence,
+        vec!["fixture-external"]
+    );
+
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute(
+            "UPDATE samples SET quality_pass=0 WHERE run_id=?1 AND warmup=0",
+            [&report.run_id],
+        )
+        .unwrap();
+    let tampered = Alpine::qualify_run(&qualify_options).expect("row-backed qualification");
+    assert_eq!(tampered.decision, Decision::Unsupported);
+    assert!(
+        tampered
+            .checks
+            .iter()
+            .any(|check| check.name == "fixture:quality" && !check.passed)
+    );
 }
 
 fn write_repository(root: &Path) {
@@ -78,7 +123,45 @@ fn write_repository(root: &Path) {
         .unwrap(),
     )
     .unwrap();
-    std::fs::write(root.join("config/promotion-policy.json"), b"{\"schema\":1}").unwrap();
+    std::fs::write(
+        root.join("config/promotion-policy.json"),
+        serde_json::to_vec(&json!({
+            "schema": 2,
+            "lifecycle": ["experimental", "candidate", "validated", "production"],
+            "gates": {
+                "candidate": {
+                    "required_workloads": ["fixture"],
+                    "minimum_measured_samples_per_workload": 1,
+                    "require_quality_pass": true,
+                    "require_deterministic_outputs": true,
+                    "maximum_decode_coefficient_of_variation": 0.10,
+                    "maximum_median_performance_regression_fraction": 0.10
+                },
+                "validated": {
+                    "inherits": "candidate",
+                    "requires_external_evidence": ["fixture-external"]
+                },
+                "production": {"inherits": "validated"}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("config/support-envelope.json"),
+        serde_json::to_vec(&json!({
+            "schema": 1,
+            "id": "fixture",
+            "platforms": [{
+                "os": std::env::consts::OS,
+                "architecture": std::env::consts::ARCH
+            }],
+            "required_probes": [],
+            "optional_probes": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     std::fs::write(
         root.join("inventory/hardware-fixture.json"),
         b"{\"gpu\":\"fixture\"}",
@@ -176,7 +259,7 @@ fn write_install(root: &Path, port: u16, runtime: &Path, pid: u32, process_start
     .unwrap();
 }
 
-fn mock_server(root: &Path) -> (u16, Child, PathBuf, u64) {
+fn mock_server(root: &Path, requests: u32) -> (u16, Child, PathBuf, u64) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -198,6 +281,7 @@ from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument('--port', type=int, required=True)
 parser.add_argument('--ready', required=True)
+parser.add_argument('--requests', type=int, required=True)
 args = parser.parse_args()
 
 class Handler(BaseHTTPRequestHandler):
@@ -226,7 +310,7 @@ class Handler(BaseHTTPRequestHandler):
 
 server = HTTPServer(('127.0.0.1', args.port), Handler)
 Path(args.ready).write_text('ready', encoding='utf-8')
-for _ in range(3):
+for _ in range(args.requests):
     server.handle_request()
 "#,
     )
@@ -235,6 +319,7 @@ for _ in range(3):
         .arg(&script)
         .args(["--port", &port.to_string(), "--ready"])
         .arg(&ready)
+        .args(["--requests", &requests.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())

@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "lifecycle": ["experimental", "candidate", "validated", "production"],
   "gates": {
     "candidate": {
@@ -7,7 +7,8 @@
       "minimum_measured_samples_per_workload": 5,
       "require_quality_pass": true,
       "require_deterministic_outputs": true,
-      "maximum_decode_coefficient_of_variation": 0.10
+      "maximum_decode_coefficient_of_variation": 0.10,
+      "maximum_median_performance_regression_fraction": 0.10
     },
     "validated": {
       "inherits": "candidate",

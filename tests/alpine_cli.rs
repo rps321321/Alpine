@@ -8,7 +8,7 @@ fn qualified_fixture_exits_successfully_and_reports_the_decision() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let output = Command::new(env!("CARGO_BIN_EXE_alpine"))
         .args([
-            "qualify",
+            "qualify-request",
             "--request",
             root.join("tests/fixtures/alpine/qualified.json")
                 .to_str()
