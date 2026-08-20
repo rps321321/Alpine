@@ -123,6 +123,34 @@ pub(crate) struct CleanRestartStabilityEvidence {
     pub restored_prior_session: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContextRunEvidence {
+    pub sequence: u32,
+    pub content: String,
+    pub content_sha256: String,
+    pub token_sha256: String,
+    pub tokens: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NearLimitContextEvidence {
+    pub schema: u32,
+    pub profile: String,
+    pub generator: String,
+    pub context_tokens: u32,
+    pub ratio: f64,
+    pub target_prompt_tokens: u32,
+    pub actual_prompt_tokens: u32,
+    pub prompt_sha256: String,
+    pub needles: Vec<String>,
+    pub process_before: ProcessEvidence,
+    pub process_after: ProcessEvidence,
+    pub runs: Vec<ContextRunEvidence>,
+    pub restored_prior_session: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RecordExternalEvidenceOptions {
     pub(crate) repository_root: PathBuf,
@@ -553,19 +581,7 @@ fn validate_semantics(
             validate_clean_restarts(&payload.evidence)?;
         }
         ExternalEvidenceKind::NearLimitContextStress => {
-            let ratio = number(&payload.evidence, "/ratio")?;
-            if !(0.85..=0.95).contains(&ratio) {
-                return Err("context evidence ratio must be between 0.85 and 0.95".to_owned());
-            }
-            require_u64(&payload.evidence, "/runs", 2)?;
-            require_true(&payload.evidence, "/all_quality_pass")?;
-            let context = integer(&payload.evidence, "/context_tokens")?;
-            let prompt = integer(&payload.evidence, "/minimum_prompt_tokens")?;
-            if prompt < (context as f64 * ratio * 0.98) as u64 {
-                return Err(
-                    "context evidence did not reach its claimed near-limit target".to_owned(),
-                );
-            }
+            validate_near_limit_context(&payload.evidence)?;
         }
         ExternalEvidenceKind::GoldenAgentTaskPass => {
             require_true(&payload.evidence, "/success")?;
@@ -736,6 +752,54 @@ fn validate_clean_restarts(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_near_limit_context(value: &Value) -> Result<(), String> {
+    const NEEDLES: [&str; 3] = ["CEDAR-48291", "ORBIT-73064", "VIOLET-19538"];
+    let evidence: NearLimitContextEvidence = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid near-limit context evidence: {error}"))?;
+    if evidence.schema != 1
+        || evidence.profile.trim().is_empty()
+        || evidence.generator != "immutable-ledger-v1"
+        || evidence.context_tokens < 1024
+        || !(0.85..=0.95).contains(&evidence.ratio)
+        || evidence.process_before != evidence.process_after
+        || !valid_process(&evidence.process_before)
+        || !evidence.restored_prior_session
+        || !is_sha256(&evidence.prompt_sha256)
+        || evidence.needles != NEEDLES
+        || evidence.runs.len() != 2
+    {
+        return Err("near-limit context evidence contract is incomplete".to_owned());
+    }
+    let expected_target = (f64::from(evidence.context_tokens) * evidence.ratio).floor() as u32;
+    let minimum_prompt =
+        (f64::from(evidence.context_tokens) * evidence.ratio * 0.98).floor() as u32;
+    if evidence.target_prompt_tokens != expected_target
+        || evidence.actual_prompt_tokens < minimum_prompt
+        || evidence.actual_prompt_tokens > expected_target
+    {
+        return Err("context evidence did not reach its claimed near-limit target".to_owned());
+    }
+    let expected = NEEDLES.join("|");
+    for (offset, run) in evidence.runs.iter().enumerate() {
+        let expected_sequence = u32::try_from(offset + 1)
+            .map_err(|_| "context request sequence overflow".to_owned())?;
+        if run.sequence != expected_sequence
+            || run.content.trim() != expected
+            || run.tokens.is_empty()
+            || !is_sha256(&run.content_sha256)
+            || !is_sha256(&run.token_sha256)
+            || sha256_bytes(run.content.as_bytes()) != run.content_sha256
+            || sha256_bytes(
+                &serde_json::to_vec(&run.tokens)
+                    .map_err(|error| format!("failed to encode context tokens: {error}"))?,
+            ) != run.token_sha256
+        {
+            return Err("context run failed raw retrieval or digest verification".to_owned());
+        }
+    }
+    Ok(())
+}
+
 fn valid_process(process: &ProcessEvidence) -> bool {
     process.pid != 0
         && process.process_start_epoch_secs != 0
@@ -829,17 +893,6 @@ fn require_true(value: &Value, pointer: &str) -> Result<(), String> {
     }
 }
 
-fn require_u64(value: &Value, pointer: &str, minimum: u64) -> Result<(), String> {
-    let observed = integer(value, pointer)?;
-    if observed >= minimum {
-        Ok(())
-    } else {
-        Err(format!(
-            "evidence field {pointer} is {observed}; minimum is {minimum}"
-        ))
-    }
-}
-
 fn require_u64_exact(value: &Value, pointer: &str, expected: u64) -> Result<(), String> {
     let observed = integer(value, pointer)?;
     if observed == expected {
@@ -856,14 +909,6 @@ fn integer(value: &Value, pointer: &str) -> Result<u64, String> {
         .pointer(pointer)
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("evidence field {pointer} must be a non-negative integer"))
-}
-
-fn number(value: &Value, pointer: &str) -> Result<f64, String> {
-    value
-        .pointer(pointer)
-        .and_then(Value::as_f64)
-        .filter(|number| number.is_finite())
-        .ok_or_else(|| format!("evidence field {pointer} must be finite"))
 }
 
 fn string<'a>(value: &'a Value, pointer: &str) -> Result<&'a str, String> {
@@ -993,6 +1038,42 @@ mod tests {
         }
     }
 
+    fn near_limit_context() -> NearLimitContextEvidence {
+        let process = ProcessEvidence {
+            pid: 42,
+            process_start_epoch_secs: 123,
+            session_identity: "a".repeat(32),
+        };
+        let content = "CEDAR-48291|ORBIT-73064|VIOLET-19538".to_owned();
+        let tokens = vec![1, 2, 3, 4];
+        let run = |sequence| ContextRunEvidence {
+            sequence,
+            content_sha256: sha256_bytes(content.as_bytes()),
+            token_sha256: sha256_bytes(&serde_json::to_vec(&tokens).unwrap()),
+            content: content.clone(),
+            tokens: tokens.clone(),
+        };
+        NearLimitContextEvidence {
+            schema: 1,
+            profile: "turbo-16k".to_owned(),
+            generator: "immutable-ledger-v1".to_owned(),
+            context_tokens: 16_384,
+            ratio: 0.85,
+            target_prompt_tokens: 13_926,
+            actual_prompt_tokens: 13_920,
+            prompt_sha256: "b".repeat(64),
+            needles: vec![
+                "CEDAR-48291".to_owned(),
+                "ORBIT-73064".to_owned(),
+                "VIOLET-19538".to_owned(),
+            ],
+            process_before: process.clone(),
+            process_after: process,
+            runs: vec![run(1), run(2)],
+            restored_prior_session: true,
+        }
+    }
+
     #[test]
     fn same_process_gate_recomputes_raw_token_and_sequence_evidence() {
         let valid = serde_json::to_value(same_process()).unwrap();
@@ -1025,5 +1106,20 @@ mod tests {
         divergent.restarts[1].token_sha256 =
             sha256_bytes(&serde_json::to_vec(&divergent.restarts[1].tokens).unwrap());
         assert!(validate_clean_restarts(&serde_json::to_value(divergent).unwrap()).is_err());
+    }
+
+    #[test]
+    fn context_gate_recomputes_distance_and_raw_retrieval() {
+        let valid = serde_json::to_value(near_limit_context()).unwrap();
+        assert!(validate_near_limit_context(&valid).is_ok());
+
+        let mut shallow = near_limit_context();
+        shallow.actual_prompt_tokens = 100;
+        assert!(validate_near_limit_context(&serde_json::to_value(shallow).unwrap()).is_err());
+
+        let mut wrong = near_limit_context();
+        wrong.runs[1].content = "wrong".to_owned();
+        wrong.runs[1].content_sha256 = sha256_bytes(b"wrong");
+        assert!(validate_near_limit_context(&serde_json::to_value(wrong).unwrap()).is_err());
     }
 }

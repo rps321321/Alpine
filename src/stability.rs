@@ -519,7 +519,10 @@ fn completion_tokens(
     Ok(tokens)
 }
 
-fn verify_acquisition(config: &Value, acquisition: &SessionAcquisition) -> Result<(), String> {
+pub(crate) fn verify_acquisition(
+    config: &Value,
+    acquisition: &SessionAcquisition,
+) -> Result<(), String> {
     let launch = config
         .get("launch")
         .ok_or_else(|| "anchor run launch evidence is missing".to_owned())?;
@@ -548,7 +551,7 @@ fn verify_acquisition(config: &Value, acquisition: &SessionAcquisition) -> Resul
     }
 }
 
-fn process_evidence(
+pub(crate) fn process_evidence(
     status: &SessionStatus,
     acquisition: &SessionAcquisition,
 ) -> Result<ProcessEvidence, String> {
@@ -572,7 +575,11 @@ fn process_evidence(
     })
 }
 
-fn verify_health(agent: &ureq::Agent, base_url: &str, api_key: &str) -> Result<(), String> {
+pub(crate) fn verify_health(
+    agent: &ureq::Agent,
+    base_url: &str,
+    api_key: &str,
+) -> Result<(), String> {
     let authorization = format!("Bearer {api_key}");
     let mut response = agent
         .get(&format!("{base_url}/health"))

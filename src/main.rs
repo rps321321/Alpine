@@ -1,8 +1,8 @@
 use alpine_control_plane::{
     AcquireSessionOptions, Alpine, CleanRestartStabilityOptions, EvidencePhase,
-    ExternalEvidenceKind, MicrobenchmarkOptions, OperatorReviewOptions, ReleaseSessionOptions,
-    RunQualificationOptions, SameProcessStabilityOptions, SessionAcquisition, StartSessionOptions,
-    StopSessionOptions, TuningDisposition, TuningOptions,
+    ExternalEvidenceKind, MicrobenchmarkOptions, NearLimitContextOptions, OperatorReviewOptions,
+    ReleaseSessionOptions, RunQualificationOptions, SameProcessStabilityOptions,
+    SessionAcquisition, StartSessionOptions, StopSessionOptions, TuningDisposition, TuningOptions,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
@@ -159,6 +159,29 @@ enum Commands {
     },
     CleanRestartStability {
         anchor_run_id: String,
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_os_t = default_result_root())]
+        result_root: PathBuf,
+        #[arg(long, default_value_os_t = default_database())]
+        database: PathBuf,
+        #[arg(long)]
+        allow_legacy_identity: bool,
+        #[arg(long, default_value_t = 15_000)]
+        lease_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        startup_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        request_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    NearLimitContext {
+        anchor_run_id: String,
+        #[arg(long, default_value_t = 0.85)]
+        ratio: f64,
         #[arg(long, default_value_os_t = default_repository_root())]
         repository_root: PathBuf,
         #[arg(long, default_value_os_t = default_install_root())]
@@ -467,6 +490,34 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
                 database,
                 result_root,
                 anchor_run_id,
+                allow_legacy_identity,
+                lease_timeout: Duration::from_millis(lease_timeout_ms),
+                startup_timeout: Duration::from_millis(startup_timeout_ms),
+                request_timeout: Duration::from_millis(request_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
+        Commands::NearLimitContext {
+            anchor_run_id,
+            ratio,
+            repository_root,
+            install_root,
+            result_root,
+            database,
+            allow_legacy_identity,
+            lease_timeout_ms,
+            startup_timeout_ms,
+            request_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::run_near_limit_context(&NearLimitContextOptions {
+                repository_root,
+                install_root,
+                database,
+                result_root,
+                anchor_run_id,
+                ratio,
                 allow_legacy_identity,
                 lease_timeout: Duration::from_millis(lease_timeout_ms),
                 startup_timeout: Duration::from_millis(startup_timeout_ms),

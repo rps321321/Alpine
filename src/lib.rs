@@ -1,5 +1,6 @@
 mod clock;
 mod config;
+mod context;
 mod decision;
 mod evidence;
 mod experiment;
@@ -14,6 +15,7 @@ mod support;
 mod tuning;
 
 pub use config::{Profile, ProfileStatus, ResolvedSession, SessionConfig};
+pub use context::{NearLimitContextOptions, NearLimitContextReport};
 pub use decision::Decision;
 pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use experiment::{ExperimentReport, MicrobenchmarkOptions};
@@ -160,5 +162,11 @@ impl Alpine {
         options: &CleanRestartStabilityOptions,
     ) -> Result<CleanRestartStabilityReport, AlpineError> {
         stability::run_clean_restarts(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn run_near_limit_context(
+        options: &NearLimitContextOptions,
+    ) -> Result<NearLimitContextReport, AlpineError> {
+        context::run(options).map_err(AlpineError::InvalidInput)
     }
 }
