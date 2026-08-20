@@ -1,8 +1,8 @@
 use alpine_control_plane::{
-    AcquireSessionOptions, Alpine, MicrobenchmarkOptions, ReleaseSessionOptions,
+    AcquireSessionOptions, Alpine, EvidencePhase, MicrobenchmarkOptions, ReleaseSessionOptions,
     SessionAcquisition, StartSessionOptions, StopSessionOptions,
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,6 +13,21 @@ use std::time::Duration;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BenchmarkPhase {
+    Tuning,
+    Final,
+}
+
+impl From<BenchmarkPhase> for EvidencePhase {
+    fn from(value: BenchmarkPhase) -> Self {
+        match value {
+            BenchmarkPhase::Tuning => Self::Tuning,
+            BenchmarkPhase::Final => Self::Final,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -34,6 +49,8 @@ enum Commands {
         workloads: Vec<String>,
         #[arg(long)]
         notes: Option<String>,
+        #[arg(long, value_enum, default_value_t = BenchmarkPhase::Tuning)]
+        phase: BenchmarkPhase,
         #[arg(long)]
         deep_verify_artifacts: bool,
         #[arg(long, default_value_t = 100)]
@@ -191,6 +208,7 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
             warmups,
             workloads,
             notes,
+            phase,
             deep_verify_artifacts,
             lease_timeout_ms,
             compact,
@@ -204,6 +222,7 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
                 warmups,
                 workloads,
                 notes,
+                phase: phase.into(),
                 deep_verify_artifacts,
                 lease_timeout: Duration::from_millis(lease_timeout_ms),
             })?;

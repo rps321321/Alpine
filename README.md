@@ -47,10 +47,11 @@ These commands open the legacy database read-only during migration. Missing iden
 Run the Rust-owned microbenchmark against an already healthy, exactly matching Inference Session:
 
 ```powershell
-cargo run --release --bin alpine -- benchmark --profile fast-32k --runs 5 --warmups 1
+cargo run --release --bin alpine -- benchmark --profile fast-32k --phase tuning --runs 5 --warmups 1
+cargo run --release --bin alpine -- benchmark --profile fast-32k --phase final --runs 5 --warmups 1 --deep-verify-artifacts
 ```
 
-Alpine holds the cross-process inference-capacity lease and rejects a mismatched running Profile before sending a request. New runs require complete hardware, Alpine binary, model, runtime, workload, material configuration and promotion-policy identities. The first run fully hashes the model; unchanged later runs reuse a metadata-bound local attestation. Use `--deep-verify-artifacts` for a fresh full digest, including final qualification runs. SQLite is the authority; the per-run JSON/JSONL files are durable inspection copies.
+Alpine holds the cross-process inference-capacity lease and rejects a mismatched or legacy-authored running Session before sending a request. New runs require a verified PID/executable/port/process-start identity plus complete hardware, Alpine binary, model, runtime, workload, material configuration and promotion-policy identities. `--phase tuning` is the default; final qualification runs must explicitly use `--phase final`. The first run fully hashes the model; unchanged later runs reuse a metadata-bound local attestation. Use `--deep-verify-artifacts` for a fresh full digest, including final qualification runs. SQLite is the authority; the per-run JSON/JSONL files are durable inspection copies.
 
 Inspect the host against the versioned Support Envelope:
 

@@ -4,6 +4,8 @@ use crate::evidence::{EvidenceWriter, NewRun, SampleRecord, TerminalStatus};
 use crate::identity::{sha256_bytes, sha256_file, tree_sha256};
 use crate::locking::InterprocessLock;
 use crate::process::{resolve_executable, run_bounded};
+use crate::qualification::EvidencePhase;
+use crate::session::{self, ProcessIdentityStrength};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +29,7 @@ pub struct MicrobenchmarkOptions {
     pub warmups: u32,
     pub workloads: Vec<String>,
     pub notes: Option<String>,
+    pub phase: EvidencePhase,
     pub deep_verify_artifacts: bool,
     pub lease_timeout: Duration,
 }
@@ -57,6 +60,8 @@ struct BackendArtifact {
 
 #[derive(Debug, Deserialize)]
 struct SessionState {
+    schema: u32,
+    transaction_id: String,
     phase: String,
     pid: u32,
     profile: String,
@@ -65,10 +70,11 @@ struct SessionState {
     server_sha256: String,
     runtime_build_sha256: Option<String>,
     profile_sha256: String,
+    session_config_sha256: String,
+    process_start_epoch_secs: u64,
     arguments: Vec<String>,
     #[serde(default)]
     environment: Value,
-    session_identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,7 +237,8 @@ fn prepare(options: &MicrobenchmarkOptions) -> Result<PreparedExperiment, String
     let repository_root = canonical_directory(&options.repository_root, "repository root")?;
     let resolved = config::resolve(&options.install_root, Some(&options.profile), true)?;
     let state: SessionState = read_json(&resolved.state_file, "Inference Session state")?;
-    validate_active_session(&resolved, &state)?;
+    let observed = session::status(&options.install_root, options.lease_timeout)?;
+    validate_active_session(&resolved, &state, &observed)?;
 
     let artifact_path = repository_root.join("config/artifacts.json");
     let artifacts: ArtifactManifest = read_json(&artifact_path, "artifact manifest")?;
@@ -298,6 +305,7 @@ fn prepare(options: &MicrobenchmarkOptions) -> Result<PreparedExperiment, String
         "server_sha256": state.server_sha256,
         "runtime_build_sha256": runtime_identity,
         "profile_sha256": profile_sha256,
+        "session_config_sha256": state.session_config_sha256,
         "arguments": state.arguments,
         "environment": state.environment,
     });
@@ -333,6 +341,7 @@ fn prepare(options: &MicrobenchmarkOptions) -> Result<PreparedExperiment, String
             "hardware": {"path": hardware_manifest, "sha256": hardware_sha256},
             "software": {"git_commit": git_commit, "alpine_binary_sha256": alpine_binary_sha256},
             "model_verification": model_verification,
+            "evidence_phase": options.phase,
             "profile": resolved.profile,
             "benchmark": benchmark_configuration,
             "launch": {
@@ -342,7 +351,9 @@ fn prepare(options: &MicrobenchmarkOptions) -> Result<PreparedExperiment, String
                 "server_sha256": state.server_sha256,
                 "runtime_build_sha256": runtime_identity,
                 "profile_sha256": profile_sha256,
-                "session_identity": state.session_identity,
+                "session_config_sha256": state.session_config_sha256,
+                "transaction_id": state.transaction_id,
+                "process_start_epoch_secs": state.process_start_epoch_secs,
                 "arguments": state.arguments,
                 "environment": state.environment,
             },
@@ -711,7 +722,17 @@ fn validate_workload(workload: &WorkloadDefinition) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_active_session(resolved: &ResolvedSession, state: &SessionState) -> Result<(), String> {
+fn validate_active_session(
+    resolved: &ResolvedSession,
+    state: &SessionState,
+    observed: &session::SessionStatus,
+) -> Result<(), String> {
+    if state.schema != 2 {
+        return Err(format!(
+            "Inference Session state schema {} is not eligible for evidence; expected Rust schema 2",
+            state.schema
+        ));
+    }
     if state.phase != "healthy" {
         return Err(format!(
             "Inference Session is not healthy; observed phase '{}'",
@@ -722,6 +743,27 @@ fn validate_active_session(resolved: &ResolvedSession, state: &SessionState) -> 
         return Err(format!(
             "running session is {}/{}, requested {}/{}",
             state.profile, state.runtime, resolved.profile_name, resolved.runtime_name
+        ));
+    }
+    if state.profile_sha256 != resolved.profile_sha256 {
+        return Err("running Profile hash does not match the selected Profile bytes".to_owned());
+    }
+    if state.session_config_sha256 != resolved.session_config_sha256 {
+        return Err(
+            "running Session Config hash does not match the selected config bytes".to_owned(),
+        );
+    }
+    if !observed.active
+        || !observed.healthy
+        || observed.foreign
+        || observed.identity_strength != ProcessIdentityStrength::Verified
+        || observed.pid != Some(state.pid)
+        || observed.transaction_id.as_deref() != Some(state.transaction_id.as_str())
+        || observed.process_start_epoch_secs != Some(state.process_start_epoch_secs)
+    {
+        return Err(format!(
+            "Inference Session process identity is not verified: {:?}",
+            observed.identity_failures
         ));
     }
     let state_server = std::fs::canonicalize(&state.server).map_err(|error| {

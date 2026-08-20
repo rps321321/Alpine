@@ -14,7 +14,7 @@ pub use config::{Profile, ProfileStatus, ResolvedSession, SessionConfig};
 pub use decision::Decision;
 pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use experiment::{ExperimentReport, MicrobenchmarkOptions};
-pub use qualification::{QualificationReport, QualificationRequest};
+pub use qualification::{EvidencePhase, QualificationReport, QualificationRequest};
 pub use session::{
     AcquireSessionOptions, InferenceArguments, ProcessIdentityStrength, ReleaseSessionOptions,
     ReleaseSessionReport, SessionAcquisition, SessionAction, SessionSnapshot, SessionStatus,

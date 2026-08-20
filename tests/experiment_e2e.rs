@@ -1,13 +1,12 @@
-use alpine_control_plane::{Alpine, MicrobenchmarkOptions};
+use alpine_control_plane::{Alpine, EvidencePhase, MicrobenchmarkOptions};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::Path;
-use std::process::Command;
-use std::thread;
-use std::time::Duration;
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+use sysinfo::{Pid, System};
 
 #[test]
 fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
@@ -15,9 +14,15 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
     let repository = directory.path().join("repository");
     let install = directory.path().join("install");
     let results = directory.path().join("results");
-    let (port, server) = mock_server();
+    let (port, mut server, runtime, process_start_epoch_secs) = mock_server(directory.path());
     write_repository(&repository);
-    write_install(&install, port);
+    write_install(
+        &install,
+        port,
+        &runtime,
+        server.id(),
+        process_start_epoch_secs,
+    );
 
     let report = Alpine::run_microbenchmark(&MicrobenchmarkOptions {
         repository_root: repository,
@@ -28,11 +33,12 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
         warmups: 0,
         workloads: vec!["fixture".to_owned()],
         notes: Some("integration fixture".to_owned()),
+        phase: EvidencePhase::Final,
         deep_verify_artifacts: false,
         lease_timeout: Duration::from_secs(1),
     })
     .expect("Rust benchmark");
-    server.join().expect("mock server");
+    assert!(server.wait().expect("mock server").success());
 
     assert_eq!(report.status, "passed");
     assert_eq!(report.summary["all_quality_pass"], true);
@@ -41,6 +47,13 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
     assert!(evidence.identity_complete);
     assert_eq!(evidence.summary.sample_count, 1);
     assert_eq!(evidence.summary.status, "passed");
+    assert_eq!(evidence.config["evidence_phase"], "final");
+    assert_eq!(
+        evidence.config["launch"]["session_config_sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
     assert_eq!(
         evidence.config["model_verification"]["method"],
         "full-sha256"
@@ -109,17 +122,15 @@ fn write_repository(root: &Path) {
     assert!(commit.success());
 }
 
-fn write_install(root: &Path, port: u16) {
+fn write_install(root: &Path, port: u16, runtime: &Path, pid: u32, process_start_epoch_secs: u64) {
     std::fs::create_dir_all(root.join("config")).unwrap();
     std::fs::create_dir_all(root.join("profiles")).unwrap();
     std::fs::create_dir_all(root.join("models")).unwrap();
     std::fs::create_dir_all(root.join("runtime")).unwrap();
     std::fs::create_dir_all(root.join("logs")).unwrap();
     let model = root.join("models/model.gguf");
-    let runtime = root.join("runtime/llama-server.exe");
     let profile = root.join("profiles/fixture.json");
     std::fs::write(&model, b"fixture model").unwrap();
-    std::fs::write(&runtime, b"fixture runtime").unwrap();
     std::fs::write(root.join("config/api-key.txt"), b"fixture-secret").unwrap();
     std::fs::write(
         &profile,
@@ -151,66 +162,101 @@ fn write_install(root: &Path, port: u16) {
     std::fs::write(
         root.join("logs/session-state.json"),
         serde_json::to_vec(&json!({
-            "phase": "healthy", "pid": 1, "profile": "fixture", "runtime": "official",
-            "server": runtime, "server_sha256": sha256(b"fixture runtime"),
+            "schema": 2, "transaction_id": "fixture-session", "phase": "healthy",
+            "pid": pid, "process_start_epoch_secs": process_start_epoch_secs,
+            "profile": "fixture", "runtime": "official",
+            "server": runtime, "server_sha256": sha256(&std::fs::read(runtime).unwrap()),
             "runtime_build_sha256": sha256(b"fixture build"),
             "profile_sha256": sha256(&std::fs::read(profile).unwrap()),
-            "arguments": ["--fixture"], "environment": {}, "session_identity": "fixture-session"
+            "session_config_sha256": sha256(&std::fs::read(root.join("config/session.json")).unwrap()),
+            "arguments": ["--fixture"], "environment": {}
         }))
         .unwrap(),
     )
     .unwrap();
 }
 
-fn mock_server() -> (u16, thread::JoinHandle<()>) {
+fn mock_server(root: &Path) -> (u16, Child, PathBuf, u64) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let handle = thread::spawn(move || {
-        for _ in 0..2 {
-            let (stream, _) = listener.accept().unwrap();
-            respond(stream);
-        }
-    });
-    (port, handle)
-}
+    drop(listener);
+    let python = Command::new("python")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .expect("locate Python");
+    assert!(python.status.success());
+    let executable = PathBuf::from(String::from_utf8(python.stdout).unwrap().trim());
+    let script = root.join("fixture_server.py");
+    let ready = root.join("fixture-server.ready");
+    std::fs::write(
+        &script,
+        r#"import argparse
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
-fn respond(mut stream: TcpStream) {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line).unwrap();
-    let mut content_length = 0;
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        if line == "\r\n" {
-            break;
-        }
-        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-            content_length = value.trim().parse().unwrap();
-        }
-    }
-    let mut request_body = vec![0; content_length];
-    reader.read_exact(&mut request_body).unwrap();
-    let body = if request_line.contains(" /health ") {
-        "{\"status\":\"ok\"}".to_owned()
-    } else {
-        concat!(
-            "data: {\"content\":\"ok\",\"stop\":false}\n\n",
-            "data: {\"content\":\"\",\"stop\":true,\"tokens_evaluated\":1,",
-            "\"tokens_predicted\":1,\"truncated\":false,\"stop_type\":\"limit\",",
-            "\"timings\":{\"prompt_n\":1,\"predicted_n\":1,\"prompt_per_second\":100.0,",
-            "\"predicted_per_second\":10.0,\"draft_n\":2,\"draft_n_accepted\":1}}\n\n"
-        )
-        .to_owned()
-    };
-    write!(
-        stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
+parser = argparse.ArgumentParser()
+parser.add_argument('--port', type=int, required=True)
+parser.add_argument('--ready', required=True)
+args = parser.parse_args()
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        body = b'{\"status\":\"ok\"}'
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', '0'))
+        self.rfile.read(length)
+        body = (b'data: {\"content\":\"ok\",\"stop\":false}\n\n'
+                b'data: {\"content\":\"\",\"stop\":true,\"tokens_evaluated\":1,'
+                b'\"tokens_predicted\":1,\"truncated\":false,\"stop_type\":\"limit\",'
+                b'\"timings\":{\"prompt_n\":1,\"predicted_n\":1,\"prompt_per_second\":100.0,'
+                b'\"predicted_per_second\":10.0,\"draft_n\":2,\"draft_n_accepted\":1}}\n\n')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+server = HTTPServer(('127.0.0.1', args.port), Handler)
+Path(args.ready).write_text('ready', encoding='utf-8')
+for _ in range(3):
+    server.handle_request()
+"#,
     )
     .unwrap();
-    stream.flush().unwrap();
+    let mut child = Command::new(&executable)
+        .arg(&script)
+        .args(["--port", &port.to_string(), "--ready"])
+        .arg(&ready)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("start mock server");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready.is_file() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("mock server exited before readiness: {status}");
+        }
+        assert!(Instant::now() < deadline, "mock server readiness timed out");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let process_start_epoch_secs = loop {
+        let system = System::new_all();
+        if let Some(process) = system.process(Pid::from_u32(child.id())) {
+            break process.start_time();
+        }
+        assert!(Instant::now() < deadline, "mock server identity timed out");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    (port, child, executable, process_start_epoch_secs)
 }
 
 fn sha256(bytes: &[u8]) -> String {
