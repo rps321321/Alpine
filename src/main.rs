@@ -13,6 +13,16 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Resolve {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        allow_missing_runtime: bool,
+        #[arg(long)]
+        compact: bool,
+    },
     Inspect {
         #[arg(long, default_value = "config/support-envelope.json")]
         envelope: PathBuf,
@@ -41,6 +51,17 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<Decision, Box<dyn std::error::Error>> {
     match cli.command {
+        Commands::Resolve {
+            install_root,
+            profile,
+            allow_missing_runtime,
+            compact,
+        } => {
+            let resolved =
+                Alpine::resolve_session(&install_root, profile.as_deref(), !allow_missing_runtime)?;
+            write_json(&resolved, compact)?;
+            Ok(Decision::Qualified)
+        }
         Commands::Inspect {
             envelope,
             timeout_ms,
@@ -56,6 +77,14 @@ fn run(cli: Cli) -> Result<Decision, Box<dyn std::error::Error>> {
             Ok(report.decision)
         }
     }
+}
+
+fn default_install_root() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("local-models")
 }
 
 fn write_json(value: &impl serde::Serialize, compact: bool) -> Result<(), serde_json::Error> {

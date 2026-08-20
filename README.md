@@ -6,6 +6,12 @@ Alpine is being introduced through verified vertical replacements. The existing 
 
 ## Current Rust interface
 
+Resolve and validate the generated Session Config and selected Profile without Python or PowerShell:
+
+```powershell
+cargo run --bin alpine -- resolve
+```
+
 Inspect the host against the versioned Support Envelope:
 
 ```powershell
