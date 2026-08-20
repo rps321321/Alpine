@@ -1,7 +1,7 @@
 use alpine_control_plane::{
-    Alpine, Decision, EvidencePhase, ExternalEvidenceKind, ExternalEvidenceStatusKind,
-    MicrobenchmarkOptions, QualificationTarget, RecordExternalEvidenceOptions,
-    RunQualificationOptions, TuningDisposition, TuningOptions,
+    Alpine, Decision, EvidencePhase, ExternalEvidenceStatusKind, MicrobenchmarkOptions,
+    OperatorReviewOptions, QualificationTarget, RunQualificationOptions, TuningDisposition,
+    TuningOptions,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -102,31 +102,27 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
     assert_eq!(validated.decision, Decision::NotProven);
     assert_eq!(
         validated.missing_external_evidence,
-        vec!["same-process-50-request-greedy-stability"]
+        vec!["operator-reviewed-capability-report"]
     );
 
-    let evidence_options = RecordExternalEvidenceOptions {
+    let evidence_options = OperatorReviewOptions {
         repository_root: qualify_options.repository_root.clone(),
         database: database.clone(),
         result_root: results.clone(),
         anchor_run_id: report.run_id.clone(),
-        kind: ExternalEvidenceKind::SameProcess50RequestGreedyStability,
         evidence: json!({
-            "target_requests": 50,
-            "contaminating_requests": 50,
-            "unique_output_hashes": 1,
-            "verified_session": true
+            "capability_review_passed": true
         }),
-        reviewed_by: None,
+        reviewed_by: "integration-test-reviewer".to_owned(),
     };
-    let recorded = Alpine::record_external_evidence(&evidence_options)
+    let recorded = Alpine::record_operator_review(&evidence_options)
         .expect("record immutable external evidence");
-    let retried = Alpine::record_external_evidence(&evidence_options)
+    let retried = Alpine::record_operator_review(&evidence_options)
         .expect("retry identical external evidence");
     assert_eq!(retried, recorded);
     let mut conflicting = evidence_options.clone();
-    conflicting.evidence["contaminating_requests"] = json!(51);
-    assert!(Alpine::record_external_evidence(&conflicting).is_err());
+    conflicting.evidence["capability_review_passed"] = json!(false);
+    assert!(Alpine::record_operator_review(&conflicting).is_err());
 
     let validated = Alpine::qualify_run(&validated_options).expect("satisfied validated gate");
     assert_eq!(validated.decision, Decision::Qualified);
@@ -197,7 +193,7 @@ fn write_repository(root: &Path) {
                 "validated": {
                     "inherits": "candidate",
                     "requires_external_evidence": [
-                        "same-process-50-request-greedy-stability"
+                        "operator-reviewed-capability-report"
                     ]
                 },
                 "production": {"inherits": "validated"}

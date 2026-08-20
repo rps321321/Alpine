@@ -831,9 +831,24 @@ pub fn acquire(options: &AcquireSessionOptions) -> Result<SessionAcquisition, St
     let capacity_path = resolved.install_root.join("logs/inference.lease");
     let _capacity = InterprocessLock::acquire(&capacity_path, options.lock_timeout)
         .map_err(|error| format!("inference capacity is unavailable: {error}"))?;
+    acquire_under_capacity_resolved(&resolved, options)
+}
+
+pub(crate) fn acquire_under_capacity(
+    options: &AcquireSessionOptions,
+) -> Result<SessionAcquisition, String> {
+    validate_startup_timeout(options.startup_timeout)?;
+    let resolved = config::resolve(&options.install_root, options.profile.as_deref(), true)?;
+    acquire_under_capacity_resolved(&resolved, options)
+}
+
+fn acquire_under_capacity_resolved(
+    resolved: &ResolvedSession,
+    options: &AcquireSessionOptions,
+) -> Result<SessionAcquisition, String> {
     let session_lock_path = lock_path(&resolved.state_file, ".session.lock");
     let _session_lock = InterprocessLock::acquire(&session_lock_path, options.lock_timeout)?;
-    acquire_locked_with(&resolved, options, &SystemPlatform)
+    acquire_locked_with(resolved, options, &SystemPlatform)
 }
 
 fn acquire_locked_with<P: SessionPlatform>(
@@ -973,9 +988,49 @@ pub fn release(options: &ReleaseSessionOptions) -> Result<ReleaseSessionReport, 
     let capacity_path = resolved.install_root.join("logs/inference.lease");
     let _capacity = InterprocessLock::acquire(&capacity_path, options.lock_timeout)
         .map_err(|error| format!("inference capacity is unavailable: {error}"))?;
+    release_under_capacity_resolved(&resolved, options)
+}
+
+pub(crate) fn release_under_capacity(
+    options: &ReleaseSessionOptions,
+) -> Result<ReleaseSessionReport, String> {
+    validate_startup_timeout(options.startup_timeout)?;
+    validate_acquisition(&options.acquisition)?;
+    if options.keep_server || !options.acquisition.changed {
+        let status = status(&options.install_root, options.lock_timeout)?;
+        return Ok(ReleaseSessionReport {
+            changed: options.acquisition.changed,
+            kept: options.keep_server,
+            restored: "unchanged".to_owned(),
+            status,
+        });
+    }
+    let resolved = config::resolve(
+        &options.install_root,
+        Some(&options.acquisition.profile),
+        true,
+    )?;
+    ensure_snapshot_restorable(&resolved.install_root, &options.acquisition.prior)?;
+    release_under_capacity_resolved(&resolved, options)
+}
+
+fn release_under_capacity_resolved(
+    resolved: &ResolvedSession,
+    options: &ReleaseSessionOptions,
+) -> Result<ReleaseSessionReport, String> {
     let session_lock_path = lock_path(&resolved.state_file, ".session.lock");
     let _session_lock = InterprocessLock::acquire(&session_lock_path, options.lock_timeout)?;
-    release_locked_with(&resolved, options, &SystemPlatform)
+    release_locked_with(resolved, options, &SystemPlatform)
+}
+
+pub(crate) fn snapshot_under_capacity(
+    install_root: &Path,
+    lock_timeout: Duration,
+) -> Result<SessionSnapshot, String> {
+    let resolved = config::resolve(install_root, None, true)?;
+    let session_lock_path = lock_path(&resolved.state_file, ".session.lock");
+    let _session_lock = InterprocessLock::acquire(&session_lock_path, lock_timeout)?;
+    capture_snapshot(&resolved, lock_timeout, &SystemPlatform)
 }
 
 fn release_locked_with<P: SessionPlatform>(
@@ -1047,6 +1102,19 @@ fn capture_snapshot<P: SessionPlatform>(
     let status = status_locked_with(resolved, lock_timeout, platform)?;
     if status.foreign {
         return Err("cannot snapshot a foreign inference listener".to_owned());
+    }
+    if !status.active {
+        return Ok(SessionSnapshot {
+            active: false,
+            healthy: false,
+            profile: String::new(),
+            vision: false,
+            runtime: String::new(),
+            fallback: None,
+            arguments: Vec::new(),
+            environment: BTreeMap::new(),
+            session_identity: None,
+        });
     }
     let state = read_state(&resolved.state_file, lock_timeout)?;
     Ok(SessionSnapshot {

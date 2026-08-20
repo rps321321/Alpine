@@ -52,15 +52,76 @@ struct ExternalEvidence {
     reviewed_by: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProcessEvidence {
+    pub pid: u32,
+    pub process_start_epoch_secs: u64,
+    pub session_identity: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum StabilityRequestRole {
+    Contaminant,
+    Target,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StabilityRequestContract {
+    pub target_prompt_sha256: String,
+    pub target_n_predict: u32,
+    pub contaminant_n_predict: u32,
+    pub temperature: f64,
+    pub top_k: u32,
+    pub seed: u64,
+    pub ignore_eos: bool,
+    pub cache_prompt: bool,
+    pub return_tokens: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StabilityRequestEvidence {
+    pub sequence: u32,
+    pub role: StabilityRequestRole,
+    pub prompt_sha256: String,
+    pub token_sha256: String,
+    pub tokens: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SameProcessStabilityEvidence {
+    pub schema: u32,
+    pub profile: String,
+    pub process_before: ProcessEvidence,
+    pub process_after: ProcessEvidence,
+    pub request_contract: StabilityRequestContract,
+    pub requests: Vec<StabilityRequestEvidence>,
+    pub restored_prior_session: bool,
+}
+
 #[derive(Debug, Clone)]
-pub struct RecordExternalEvidenceOptions {
+pub(crate) struct RecordExternalEvidenceOptions {
+    pub(crate) repository_root: PathBuf,
+    pub(crate) database: PathBuf,
+    pub(crate) result_root: PathBuf,
+    pub(crate) anchor_run_id: String,
+    pub(crate) kind: ExternalEvidenceKind,
+    pub(crate) evidence: Value,
+    pub(crate) reviewed_by: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OperatorReviewOptions {
     pub repository_root: PathBuf,
     pub database: PathBuf,
     pub result_root: PathBuf,
     pub anchor_run_id: String,
-    pub kind: ExternalEvidenceKind,
     pub evidence: Value,
-    pub reviewed_by: Option<String>,
+    pub reviewed_by: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -90,7 +151,9 @@ pub struct ExternalEvidenceStatus {
     pub reason: Option<String>,
 }
 
-pub fn record(options: &RecordExternalEvidenceOptions) -> Result<RecordedExternalEvidence, String> {
+pub(crate) fn record(
+    options: &RecordExternalEvidenceOptions,
+) -> Result<RecordedExternalEvidence, String> {
     let evidence_bytes = serde_json::to_vec(&options.evidence)
         .map_err(|error| format!("failed to serialize evidence details: {error}"))?;
     if evidence_bytes.len() > 1024 * 1024 {
@@ -240,6 +303,43 @@ pub fn record(options: &RecordExternalEvidenceOptions) -> Result<RecordedExterna
         path,
         sha256: digest,
     })
+}
+
+pub fn record_operator_review(
+    options: &OperatorReviewOptions,
+) -> Result<RecordedExternalEvidence, String> {
+    record(&RecordExternalEvidenceOptions {
+        repository_root: options.repository_root.clone(),
+        database: options.database.clone(),
+        result_root: options.result_root.clone(),
+        anchor_run_id: options.anchor_run_id.clone(),
+        kind: ExternalEvidenceKind::OperatorReviewedCapabilityReport,
+        evidence: options.evidence.clone(),
+        reviewed_by: Some(options.reviewed_by.clone()),
+    })
+}
+
+pub(crate) fn current_anchor(database: &Path, anchor_run_id: &str) -> Result<RunEvidence, String> {
+    let store = EvidenceStore::open_read_only(database)?;
+    let anchor = store
+        .run(anchor_run_id)?
+        .ok_or_else(|| format!("evidence run not found: {anchor_run_id}"))?;
+    let identity = complete_identity(&anchor)?;
+    if anchor.summary.kind != "micro"
+        || anchor.config.get("evidence_phase").and_then(Value::as_str) != Some("final")
+        || anchor.summary.status != "passed"
+        || anchor.summary.finished_at.is_none()
+    {
+        return Err("external evidence can only attach to a finished, passed final run".to_owned());
+    }
+    let current_binary_sha256 = sha256_file(
+        &std::env::current_exe()
+            .map_err(|error| format!("failed to locate Alpine executable: {error}"))?,
+    )?;
+    if current_binary_sha256 != identity.software {
+        return Err("current Alpine binary does not match the anchor software identity".to_owned());
+    }
+    Ok(anchor)
 }
 
 pub(crate) fn inspect_required(
@@ -427,10 +527,7 @@ fn validate_semantics(
 ) -> Result<(), String> {
     match kind {
         ExternalEvidenceKind::SameProcess50RequestGreedyStability => {
-            require_u64(&payload.evidence, "/target_requests", 50)?;
-            require_u64(&payload.evidence, "/contaminating_requests", 50)?;
-            require_u64(&payload.evidence, "/unique_output_hashes", 1)?;
-            require_true(&payload.evidence, "/verified_session")?;
+            validate_same_process(&payload.evidence)?;
         }
         ExternalEvidenceKind::TenCleanRestartGreedyStability => {
             require_u64(&payload.evidence, "/clean_restarts", 10)?;
@@ -478,6 +575,87 @@ fn validate_semantics(
             require_true(&payload.evidence, "/transaction_verified")?;
             require_true(&payload.evidence, "/restored_prior_session")?;
         }
+    }
+    Ok(())
+}
+
+fn validate_same_process(value: &Value) -> Result<(), String> {
+    let evidence: SameProcessStabilityEvidence = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid same-process evidence: {error}"))?;
+    if evidence.schema != 1
+        || evidence.profile.trim().is_empty()
+        || evidence.process_before != evidence.process_after
+        || evidence.process_before.pid == 0
+        || evidence.process_before.process_start_epoch_secs == 0
+        || !is_session_identity(&evidence.process_before.session_identity)
+        || !evidence.restored_prior_session
+    {
+        return Err(
+            "same-process evidence lacks a stable verified process or restoration proof".to_owned(),
+        );
+    }
+    let contract = &evidence.request_contract;
+    if !is_sha256(&contract.target_prompt_sha256)
+        || contract.target_n_predict < 128
+        || contract.contaminant_n_predict < 16
+        || contract.temperature != 0.0
+        || contract.top_k != 1
+        || contract.seed != 42
+        || !contract.ignore_eos
+        || contract.cache_prompt
+        || !contract.return_tokens
+    {
+        return Err("same-process request contract is weaker than the versioned gate".to_owned());
+    }
+    if evidence.requests.len() != 100 {
+        return Err("same-process evidence must contain exactly 100 request records".to_owned());
+    }
+    let mut target_hashes = std::collections::BTreeSet::new();
+    let mut contaminant_prompts = std::collections::BTreeSet::new();
+    for (offset, request) in evidence.requests.iter().enumerate() {
+        let expected_sequence = u32::try_from(offset + 1)
+            .map_err(|_| "same-process request sequence overflow".to_owned())?;
+        let expected_role = if offset % 2 == 0 {
+            StabilityRequestRole::Contaminant
+        } else {
+            StabilityRequestRole::Target
+        };
+        if request.sequence != expected_sequence || request.role != expected_role {
+            return Err(
+                "same-process requests must alternate contaminant then target in exact sequence"
+                    .to_owned(),
+            );
+        }
+        if !is_sha256(&request.prompt_sha256) || !is_sha256(&request.token_sha256) {
+            return Err("same-process request contains a malformed SHA-256 identity".to_owned());
+        }
+        let token_bytes = serde_json::to_vec(&request.tokens)
+            .map_err(|error| format!("failed to encode stability tokens: {error}"))?;
+        if sha256_bytes(&token_bytes) != request.token_sha256 {
+            return Err("same-process request token digest does not match raw tokens".to_owned());
+        }
+        let required_tokens = match request.role {
+            StabilityRequestRole::Contaminant => {
+                contaminant_prompts.insert(request.prompt_sha256.clone());
+                contract.contaminant_n_predict
+            }
+            StabilityRequestRole::Target => {
+                if request.prompt_sha256 != contract.target_prompt_sha256 {
+                    return Err("same-process target prompt identity changed".to_owned());
+                }
+                target_hashes.insert(request.token_sha256.clone());
+                contract.target_n_predict
+            }
+        };
+        if request.tokens.len() != required_tokens as usize {
+            return Err("same-process request did not generate its full token target".to_owned());
+        }
+    }
+    if contaminant_prompts.len() != 50 || target_hashes.len() != 1 {
+        return Err(
+            "same-process evidence requires 50 distinct contaminants and one target token hash"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -629,4 +807,90 @@ fn walk_files(path: PathBuf) -> Vec<PathBuf> {
 
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_session_identity(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(
+        sequence: u32,
+        role: StabilityRequestRole,
+        prompt_sha256: String,
+        tokens: Vec<u32>,
+    ) -> StabilityRequestEvidence {
+        let bytes = serde_json::to_vec(&tokens).unwrap();
+        StabilityRequestEvidence {
+            sequence,
+            role,
+            prompt_sha256,
+            token_sha256: sha256_bytes(&bytes),
+            tokens,
+        }
+    }
+
+    fn same_process() -> SameProcessStabilityEvidence {
+        let target_prompt_sha256 = "b".repeat(64);
+        let process = ProcessEvidence {
+            pid: 42,
+            process_start_epoch_secs: 123,
+            session_identity: "a".repeat(32),
+        };
+        let mut requests = Vec::new();
+        for iteration in 1..=50_u32 {
+            requests.push(request(
+                requests.len() as u32 + 1,
+                StabilityRequestRole::Contaminant,
+                sha256_bytes(format!("contaminant-{iteration}").as_bytes()),
+                vec![iteration; 16],
+            ));
+            requests.push(request(
+                requests.len() as u32 + 1,
+                StabilityRequestRole::Target,
+                target_prompt_sha256.clone(),
+                vec![7; 128],
+            ));
+        }
+        SameProcessStabilityEvidence {
+            schema: 1,
+            profile: "turbo-16k".to_owned(),
+            process_before: process.clone(),
+            process_after: process,
+            request_contract: StabilityRequestContract {
+                target_prompt_sha256,
+                target_n_predict: 128,
+                contaminant_n_predict: 16,
+                temperature: 0.0,
+                top_k: 1,
+                seed: 42,
+                ignore_eos: true,
+                cache_prompt: false,
+                return_tokens: true,
+            },
+            requests,
+            restored_prior_session: true,
+        }
+    }
+
+    #[test]
+    fn same_process_gate_recomputes_raw_token_and_sequence_evidence() {
+        let valid = serde_json::to_value(same_process()).unwrap();
+        assert!(validate_same_process(&valid).is_ok());
+
+        let mut tampered = same_process();
+        tampered.requests[1].tokens[0] = 8;
+        assert!(validate_same_process(&serde_json::to_value(tampered).unwrap()).is_err());
+
+        let mut reordered = same_process();
+        reordered.requests.swap(0, 1);
+        assert!(validate_same_process(&serde_json::to_value(reordered).unwrap()).is_err());
+
+        let mut changed_process = same_process();
+        changed_process.process_after.pid += 1;
+        assert!(validate_same_process(&serde_json::to_value(changed_process).unwrap()).is_err());
+    }
 }

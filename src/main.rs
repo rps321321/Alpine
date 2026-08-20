@@ -1,7 +1,8 @@
 use alpine_control_plane::{
     AcquireSessionOptions, Alpine, EvidencePhase, ExternalEvidenceKind, MicrobenchmarkOptions,
-    RecordExternalEvidenceOptions, ReleaseSessionOptions, RunQualificationOptions,
-    SessionAcquisition, StartSessionOptions, StopSessionOptions, TuningDisposition, TuningOptions,
+    OperatorReviewOptions, ReleaseSessionOptions, RunQualificationOptions,
+    SameProcessStabilityOptions, SessionAcquisition, StartSessionOptions, StopSessionOptions,
+    TuningDisposition, TuningOptions,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
@@ -50,27 +51,15 @@ impl From<QualificationStage> for alpine_control_plane::QualificationTarget {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum EvidenceKind {
-    SameProcess50RequestGreedyStability,
-    TenCleanRestartGreedyStability,
-    NearLimitContextStress,
-    GoldenAgentTaskPass,
     OperatorReviewedCapabilityReport,
-    RollbackProfileAvailable,
 }
 
 impl From<EvidenceKind> for ExternalEvidenceKind {
     fn from(value: EvidenceKind) -> Self {
         match value {
-            EvidenceKind::SameProcess50RequestGreedyStability => {
-                Self::SameProcess50RequestGreedyStability
-            }
-            EvidenceKind::TenCleanRestartGreedyStability => Self::TenCleanRestartGreedyStability,
-            EvidenceKind::NearLimitContextStress => Self::NearLimitContextStress,
-            EvidenceKind::GoldenAgentTaskPass => Self::GoldenAgentTaskPass,
             EvidenceKind::OperatorReviewedCapabilityReport => {
                 Self::OperatorReviewedCapabilityReport
             }
-            EvidenceKind::RollbackProfileAvailable => Self::RollbackProfileAvailable,
         }
     }
 }
@@ -144,6 +133,27 @@ enum Commands {
         result_root: PathBuf,
         #[arg(long, default_value_os_t = default_database())]
         database: PathBuf,
+        #[arg(long)]
+        compact: bool,
+    },
+    SameProcessStability {
+        anchor_run_id: String,
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_os_t = default_result_root())]
+        result_root: PathBuf,
+        #[arg(long, default_value_os_t = default_database())]
+        database: PathBuf,
+        #[arg(long)]
+        allow_legacy_identity: bool,
+        #[arg(long, default_value_t = 15_000)]
+        lease_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        startup_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        request_timeout_ms: u64,
         #[arg(long)]
         compact: bool,
     },
@@ -367,19 +377,53 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
             database,
             compact,
         } => {
+            let kind: ExternalEvidenceKind = kind.into();
+            if kind != ExternalEvidenceKind::OperatorReviewedCapabilityReport {
+                return Err(
+                    "automated evidence must be produced by its Rust-owned harness; record-evidence is reserved for the human capability review"
+                        .into(),
+                );
+            }
             let metadata = std::fs::metadata(&evidence)?;
             if !metadata.is_file() || metadata.len() > 1024 * 1024 {
                 return Err("evidence details must be a JSON file no larger than 1 MiB".into());
             }
             let details = serde_json::from_slice(&std::fs::read(&evidence)?)?;
-            let report = Alpine::record_external_evidence(&RecordExternalEvidenceOptions {
+            let report = Alpine::record_operator_review(&OperatorReviewOptions {
                 repository_root,
                 database,
                 result_root,
                 anchor_run_id,
-                kind: kind.into(),
                 evidence: details,
-                reviewed_by,
+                reviewed_by: reviewed_by.ok_or(
+                    "record-evidence requires --reviewed-by for the human capability gate",
+                )?,
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
+        Commands::SameProcessStability {
+            anchor_run_id,
+            repository_root,
+            install_root,
+            result_root,
+            database,
+            allow_legacy_identity,
+            lease_timeout_ms,
+            startup_timeout_ms,
+            request_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::run_same_process_stability(&SameProcessStabilityOptions {
+                repository_root,
+                install_root,
+                database,
+                result_root,
+                anchor_run_id,
+                allow_legacy_identity,
+                lease_timeout: Duration::from_millis(lease_timeout_ms),
+                startup_timeout: Duration::from_millis(startup_timeout_ms),
+                request_timeout: Duration::from_millis(request_timeout_ms),
             })?;
             write_json(&report, compact)?;
             Ok(0)

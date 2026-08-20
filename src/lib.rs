@@ -9,6 +9,7 @@ mod locking;
 mod process;
 mod qualification;
 mod session;
+mod stability;
 mod support;
 mod tuning;
 
@@ -18,7 +19,7 @@ pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use experiment::{ExperimentReport, MicrobenchmarkOptions};
 pub use external::{
     ExternalEvidenceKind, ExternalEvidenceStatus, ExternalEvidenceStatusKind,
-    RecordExternalEvidenceOptions, RecordedExternalEvidence,
+    OperatorReviewOptions, RecordedExternalEvidence,
 };
 pub use qualification::{
     EvidencePhase, QualificationCheck, QualificationReport, QualificationRequest,
@@ -29,6 +30,7 @@ pub use session::{
     ReleaseSessionReport, SessionAcquisition, SessionAction, SessionSnapshot, SessionStatus,
     StartSessionOptions, StartSessionReport, StopSessionOptions, StopSessionReport,
 };
+pub use stability::{SameProcessStabilityOptions, SameProcessStabilityReport};
 pub use support::{SupportEnvelope, SupportReport};
 pub use tuning::{TuningDisposition, TuningOptions, TuningReport};
 
@@ -139,9 +141,15 @@ impl Alpine {
         tuning::tune(options).map_err(AlpineError::InvalidInput)
     }
 
-    pub fn record_external_evidence(
-        options: &RecordExternalEvidenceOptions,
+    pub fn record_operator_review(
+        options: &OperatorReviewOptions,
     ) -> Result<RecordedExternalEvidence, AlpineError> {
-        external::record(options).map_err(AlpineError::InvalidInput)
+        external::record_operator_review(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn run_same_process_stability(
+        options: &SameProcessStabilityOptions,
+    ) -> Result<SameProcessStabilityReport, AlpineError> {
+        stability::run_same_process(options).map_err(AlpineError::InvalidInput)
     }
 }
