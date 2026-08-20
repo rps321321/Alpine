@@ -7,6 +7,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
 use std::thread;
+use std::time::Duration;
 
 #[test]
 fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
@@ -28,6 +29,7 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
         workloads: vec!["fixture".to_owned()],
         notes: Some("integration fixture".to_owned()),
         deep_verify_artifacts: false,
+        lease_timeout: Duration::from_secs(1),
     })
     .expect("Rust benchmark");
     server.join().expect("mock server");

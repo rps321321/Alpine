@@ -1,6 +1,7 @@
 use crate::config::{self, ResolvedSession};
 use crate::evidence::{EvidenceWriter, NewRun, SampleRecord, TerminalStatus};
 use crate::identity::{sha256_bytes, sha256_file, tree_sha256};
+use crate::locking::InterprocessLock;
 use crate::process::{resolve_executable, run_bounded};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,6 +29,7 @@ pub struct MicrobenchmarkOptions {
     pub workloads: Vec<String>,
     pub notes: Option<String>,
     pub deep_verify_artifacts: bool,
+    pub lease_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -138,6 +140,9 @@ struct ArtifactVerification {
 }
 
 pub fn run_microbenchmark(options: &MicrobenchmarkOptions) -> Result<ExperimentReport, String> {
+    let capacity_path = options.install_root.join("logs/inference.lease");
+    let _capacity = InterprocessLock::acquire(&capacity_path, options.lease_timeout)
+        .map_err(|error| format!("Inference capacity is already in use; {error}"))?;
     std::fs::create_dir_all(&options.result_root).map_err(|error| {
         format!(
             "failed to create result root {}: {error}",

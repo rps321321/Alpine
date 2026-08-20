@@ -3,6 +3,7 @@ mod decision;
 mod evidence;
 mod experiment;
 mod identity;
+mod locking;
 mod process;
 mod qualification;
 mod support;
