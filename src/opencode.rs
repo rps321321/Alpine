@@ -676,7 +676,19 @@ fn safety_gated_commands() -> &'static [&'static str] {
         "git push *",
         "git pull",
         "git pull *",
-        "gh api *",
+        "gh api * --method POST *",
+        "gh api * --method PUT *",
+        "gh api * --method PATCH *",
+        "gh api * --method DELETE *",
+        "gh api * --method=POST *",
+        "gh api * --method=PUT *",
+        "gh api * --method=PATCH *",
+        "gh api * --method=DELETE *",
+        "gh api * -f *",
+        "gh api * -F *",
+        "gh api * --raw-field *",
+        "gh api * --field *",
+        "gh api * --input *",
         "gh issue create *",
         "gh issue edit *",
         "gh issue close *",
@@ -727,10 +739,50 @@ fn safety_gated_commands() -> &'static [&'static str] {
         "scp *",
         "sftp *",
         "rsync *",
-        "curl *",
-        "wget *",
-        "invoke-webrequest *",
-        "invoke-restmethod *",
+        "curl * -X POST *",
+        "curl * -X PUT *",
+        "curl * -X PATCH *",
+        "curl * -X DELETE *",
+        "curl * --request POST *",
+        "curl * --request PUT *",
+        "curl * --request PATCH *",
+        "curl * --request DELETE *",
+        "curl * --data *",
+        "curl * --data-raw *",
+        "curl * --data-binary *",
+        "curl * --json *",
+        "curl * --form *",
+        "curl * --upload-file *",
+        "curl * --user *",
+        "curl * --oauth2-bearer *",
+        "wget * --method=POST *",
+        "wget * --method=PUT *",
+        "wget * --method=PATCH *",
+        "wget * --method=DELETE *",
+        "wget * --post-data *",
+        "wget * --post-file *",
+        "wget * --body-data *",
+        "wget * --body-file *",
+        "wget * --user *",
+        "wget * --password *",
+        "invoke-webrequest * -method post *",
+        "invoke-webrequest * -method put *",
+        "invoke-webrequest * -method patch *",
+        "invoke-webrequest * -method delete *",
+        "invoke-webrequest * -body *",
+        "invoke-webrequest * -infile *",
+        "invoke-webrequest * -credential *",
+        "invoke-webrequest * -authentication *",
+        "invoke-webrequest * -token *",
+        "invoke-restmethod * -method post *",
+        "invoke-restmethod * -method put *",
+        "invoke-restmethod * -method patch *",
+        "invoke-restmethod * -method delete *",
+        "invoke-restmethod * -body *",
+        "invoke-restmethod * -infile *",
+        "invoke-restmethod * -credential *",
+        "invoke-restmethod * -authentication *",
+        "invoke-restmethod * -token *",
         "rm *",
         "remove-item *",
         "del *",
@@ -1107,7 +1159,17 @@ mod tests {
         assert!(gated.contains(&"git push *"));
         assert!(gated.contains(&"gh issue create *"));
         assert!(gated.contains(&"rm *"));
-        assert!(gated.contains(&"curl *"));
+        assert!(gated.contains(&"curl * --data *"));
+        assert!(gated.contains(&"gh api * --method POST *"));
+        for read_only_research in [
+            "gh api *",
+            "curl *",
+            "wget *",
+            "invoke-webrequest *",
+            "invoke-restmethod *",
+        ] {
+            assert!(!gated.contains(&read_only_research));
+        }
         assert!(!gated.iter().any(|command| command.contains("search")));
         assert!(!gated.iter().any(|command| command.contains("read source")));
     }
@@ -1126,7 +1188,7 @@ mod tests {
         assert!(assert_effective_policy(&policy, &resolved, false).is_ok());
 
         let mut weakened = policy.clone();
-        weakened["permission"]["bash"]["gh api *"] = json!("allow");
+        weakened["permission"]["bash"]["gh api * --method POST *"] = json!("allow");
         assert!(assert_effective_policy(&weakened, &resolved, false).is_err());
 
         let mut capability_removed = policy;

@@ -22,6 +22,16 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("alpine.exe\" opencode", command)
         self.assertNotIn("powershell", command.lower())
 
+    def test_adapter_fallback_uses_the_rust_failure_log_lock(self) -> None:
+        source = (REPO_ROOT / "runtime" / "launcher" / "OpenLocalQwen.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"launcher-failure-log.lock"', source)
+        self.assertNotIn("OpenLocalQwenAdapterFailureLog", source)
+        rust_record_branch = source[source.index("if (File.Exists(invocationLog))") :]
+        rust_record_branch = rust_record_branch[: rust_record_branch.index("else")]
+        self.assertNotIn("PublishStableFailure", rust_record_branch)
+
     def build_fixture_launcher(
         self,
         install: Path,
@@ -143,7 +153,9 @@ internal static class FakeAlpine
             ",\"skills\":" + Has(args, "--skills").ToString().ToLowerInvariant() + "}";
         File.WriteAllText(Path.Combine(logs, "launcher-args.json"), observed, new UTF8Encoding(false));
         bool diagnostic = Has(args, "--diagnostic-failure");
-        bool failure = diagnostic || Environment.GetEnvironmentVariable("LOCALMODEL_LAUNCHER_FIXTURE_MODE") == "fail";
+        string fixtureMode = Environment.GetEnvironmentVariable("LOCALMODEL_LAUNCHER_FIXTURE_MODE");
+        if (fixtureMode == "exit-without-log") return 23;
+        bool failure = diagnostic || fixtureMode == "fail";
         if (!failure) return 0;
         string message = diagnostic
             ? "Deterministic installed launcher diagnostic failure"
@@ -555,6 +567,61 @@ internal static class FakeAlpine
             observed = (install / "logs" / "launcher-last-error.log").read_text(encoding="utf-8")
             self.assertIn("could not start Alpine", observed)
             self.assertIn("Win32Exception", observed)
+
+    def test_adapter_failure_does_not_persist_an_untrusted_profile_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            install = Path(directory) / "install"
+            project = Path(directory) / "project"
+            project.mkdir(parents=True)
+            launcher = self.build_fixture_launcher(install, real_entrypoint=True)
+            (install / "alpine.exe").write_bytes(b"not a Windows executable")
+            environment = os.environ.copy()
+            environment["LOCALMODEL_LAUNCHER_NO_DIALOG"] = "1"
+            untrusted_profile = "DATABASE_URL=postgresql://user:secret@host/db"
+
+            result = subprocess.run(
+                [str(launcher), "--project", str(project), "--profile", untrusted_profile],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+                timeout=10,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            observed = (install / "logs" / "launcher-last-error.log").read_text(encoding="utf-8")
+            self.assertIn("profile=<invalid>", observed)
+            self.assertNotIn(untrusted_profile, observed)
+            self.assertNotIn("secret", observed)
+
+    def test_nonzero_child_without_its_own_record_publishes_a_stable_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            install = Path(directory) / "install"
+            project = Path(directory) / "project"
+            project.mkdir(parents=True)
+            launcher = self.build_fixture_launcher(install)
+            environment = os.environ.copy()
+            environment["LOCALMODEL_LAUNCHER_NO_DIALOG"] = "1"
+            environment["LOCALMODEL_LAUNCHER_FIXTURE_MODE"] = "exit-without-log"
+
+            result = subprocess.run(
+                [str(launcher), "--project", str(project), "--profile", "stable-16k"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 23)
+            failure_log = install / "logs" / "launcher-last-error.log"
+            self.assertTrue(failure_log.is_file())
+            observed = failure_log.read_text(encoding="utf-8")
+            self.assertIn("Alpine exited with code 23", observed)
+            self.assertIn("without producing its per-launch failure record", observed)
+            invocation_logs = list((install / "logs" / "launcher-errors").glob("*.log"))
+            self.assertEqual(len(invocation_logs), 1)
+            self.assertEqual(invocation_logs[0].read_text(encoding="utf-8"), observed)
 
     def test_executable_installed_diagnostic_failure_uses_the_supervised_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

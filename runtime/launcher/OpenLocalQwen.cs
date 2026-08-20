@@ -59,14 +59,23 @@ namespace LocalModelsLauncher
                 string details;
                 try
                 {
-                    details = File.Exists(invocationLog)
-                        ? File.ReadAllText(invocationLog)
-                        : "The PowerShell supervisor exited with code " + exitCode +
-                          " without producing its per-launch failure record.";
+                    if (File.Exists(invocationLog))
+                    {
+                        details = File.ReadAllText(invocationLog);
+                    }
+                    else
+                    {
+                        details = "Alpine exited with code " + exitCode +
+                            " without producing its per-launch failure record.";
+                        failureLog = RecordFailure(root, launchId, SafeProfile(args), details);
+                    }
                 }
                 catch (Exception readError)
                 {
-                    details = "The per-launch failure record could not be read: " + readError.Message;
+                    details = "Alpine exited with code " + exitCode +
+                        " and its per-launch failure record could not be read (" +
+                        readError.GetType().Name + ").";
+                    failureLog = RecordFailure(root, launchId, SafeProfile(args), details);
                 }
 
                 if (DialogsEnabled())
@@ -199,6 +208,17 @@ namespace LocalModelsLauncher
         private static string RecordAdapterFailure(string root, string[] args, Exception error)
         {
             string launchId = Guid.NewGuid().ToString("N");
+            string message = "The launcher adapter could not start Alpine (" +
+                error.GetType().Name + "). Re-run setup.";
+            return RecordFailure(root, launchId, SafeProfile(args), message);
+        }
+
+        private static string RecordFailure(
+            string root,
+            string launchId,
+            string profile,
+            string message)
+        {
             string logs = Path.Combine(root, "logs");
             string directory = Path.Combine(logs, "launcher-errors");
             string invocation = Path.Combine(directory, launchId + ".log");
@@ -206,22 +226,50 @@ namespace LocalModelsLauncher
             Directory.CreateDirectory(directory);
             string content = "timestamp=" + DateTime.UtcNow.ToString("o") + Environment.NewLine +
                 "launch_id=" + launchId + Environment.NewLine +
-                "profile=" + (ValueAfter(args, "--profile") ?? "stable-16k") + Environment.NewLine +
+                "profile=" + profile + Environment.NewLine +
                 "error:" + Environment.NewLine +
-                "The launcher adapter could not start Alpine (" + error.GetType().Name + "). Re-run setup." + Environment.NewLine;
+                message + Environment.NewLine;
             WriteAtomic(invocation, content);
-            using (Mutex mutex = new Mutex(false, @"Local\OpenLocalQwenAdapterFailureLog"))
+            PublishStableFailure(root, content);
+            return stable;
+        }
+
+        private static void PublishStableFailure(string root, string content)
+        {
+            string logs = Path.Combine(root, "logs");
+            string stable = Path.Combine(root, "logs", "launcher-last-error.log");
+            string lockPath = Path.Combine(logs, "launcher-failure-log.lock");
+            DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+            while (true)
             {
-                bool acquired = false;
                 try
                 {
-                    try { acquired = mutex.WaitOne(TimeSpan.FromSeconds(5)); }
-                    catch (AbandonedMutexException) { acquired = true; }
-                    if (acquired) WriteAtomic(stable, content);
+                    using (FileStream lease = new FileStream(
+                        lockPath,
+                        FileMode.OpenOrCreate,
+                        FileAccess.ReadWrite,
+                        FileShare.None))
+                    {
+                        WriteAtomic(stable, content);
+                        return;
+                    }
                 }
-                finally { if (acquired) mutex.ReleaseMutex(); }
+                catch (IOException)
+                {
+                    if (DateTime.UtcNow >= deadline) throw;
+                    Thread.Sleep(25);
+                }
             }
-            return stable;
+        }
+
+        private static string SafeProfile(string[] args)
+        {
+            string supplied = ValueAfter(args, "--profile") ?? "stable-16k";
+            foreach (string known in new[] { "stable-16k", "turbo-16k", "fast-32k", "long-64k" })
+            {
+                if (string.Equals(supplied, known, StringComparison.OrdinalIgnoreCase)) return known;
+            }
+            return "<invalid>";
         }
 
         private static void WriteAtomic(string path, string content)
