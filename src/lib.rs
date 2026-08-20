@@ -6,6 +6,7 @@ mod identity;
 mod locking;
 mod process;
 mod qualification;
+mod session;
 mod support;
 
 pub use config::{Profile, ProfileStatus, ResolvedSession, SessionConfig};
@@ -13,6 +14,7 @@ pub use decision::Decision;
 pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use experiment::{ExperimentReport, MicrobenchmarkOptions};
 pub use qualification::{QualificationReport, QualificationRequest};
+pub use session::{InferenceArguments, ProcessIdentityStrength, SessionAction, SessionStatus};
 pub use support::{SupportEnvelope, SupportReport};
 
 use std::path::Path;
@@ -55,6 +57,31 @@ impl Alpine {
         require_runtime: bool,
     ) -> Result<ResolvedSession, AlpineError> {
         config::resolve(install_root, profile, require_runtime).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn plan_session_arguments(
+        install_root: &Path,
+        profile: Option<&str>,
+        vision: bool,
+        force_fallback: bool,
+    ) -> Result<InferenceArguments, AlpineError> {
+        session::plan_arguments(install_root, profile, vision, force_fallback)
+            .map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn session_status(
+        install_root: &Path,
+        lock_timeout: Duration,
+    ) -> Result<SessionStatus, AlpineError> {
+        session::status(install_root, lock_timeout).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn session_action(
+        current: &SessionStatus,
+        requested_profile: &str,
+        requested_vision: bool,
+    ) -> SessionAction {
+        session::resolve_action(current, requested_profile, requested_vision)
     }
 
     pub fn inspect_support(path: &Path, timeout: Duration) -> Result<SupportReport, AlpineError> {

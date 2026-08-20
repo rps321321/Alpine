@@ -62,6 +62,10 @@ enum Commands {
         #[arg(long)]
         compact: bool,
     },
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
+    },
     Inspect {
         #[arg(long, default_value = "config/support-envelope.json")]
         envelope: PathBuf,
@@ -73,6 +77,30 @@ enum Commands {
     Qualify {
         #[arg(long)]
         request: PathBuf,
+        #[arg(long)]
+        compact: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommands {
+    Status {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    Plan {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        vision: bool,
+        #[arg(long)]
+        force_fallback: bool,
         #[arg(long)]
         compact: bool,
     },
@@ -145,6 +173,34 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
             write_json(&resolved, compact)?;
             Ok(0)
         }
+        Commands::Session { command } => match command {
+            SessionCommands::Status {
+                install_root,
+                lock_timeout_ms,
+                compact,
+            } => {
+                let status =
+                    Alpine::session_status(&install_root, Duration::from_millis(lock_timeout_ms))?;
+                write_json(&status, compact)?;
+                Ok(if status.foreign { 2 } else { 0 })
+            }
+            SessionCommands::Plan {
+                install_root,
+                profile,
+                vision,
+                force_fallback,
+                compact,
+            } => {
+                let plan = Alpine::plan_session_arguments(
+                    &install_root,
+                    profile.as_deref(),
+                    vision,
+                    force_fallback,
+                )?;
+                write_json(&plan, compact)?;
+                Ok(0)
+            }
+        },
         Commands::Inspect {
             envelope,
             timeout_ms,
