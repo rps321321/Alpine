@@ -1,3 +1,4 @@
+mod clock;
 mod config;
 mod decision;
 mod evidence;
@@ -14,7 +15,10 @@ pub use decision::Decision;
 pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use experiment::{ExperimentReport, MicrobenchmarkOptions};
 pub use qualification::{QualificationReport, QualificationRequest};
-pub use session::{InferenceArguments, ProcessIdentityStrength, SessionAction, SessionStatus};
+pub use session::{
+    InferenceArguments, ProcessIdentityStrength, SessionAction, SessionStatus, StartSessionOptions,
+    StartSessionReport, StopSessionOptions, StopSessionReport,
+};
 pub use support::{SupportEnvelope, SupportReport};
 
 use std::path::Path;
@@ -82,6 +86,14 @@ impl Alpine {
         requested_vision: bool,
     ) -> SessionAction {
         session::resolve_action(current, requested_profile, requested_vision)
+    }
+
+    pub fn start_session(options: &StartSessionOptions) -> Result<StartSessionReport, AlpineError> {
+        session::start(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn stop_session(options: &StopSessionOptions) -> Result<StopSessionReport, AlpineError> {
+        session::stop(options).map_err(AlpineError::InvalidInput)
     }
 
     pub fn inspect_support(path: &Path, timeout: Duration) -> Result<SupportReport, AlpineError> {

@@ -12,6 +12,20 @@ Resolve and validate the generated Session Config and selected Profile without P
 cargo run --bin alpine -- resolve
 ```
 
+Inspect the active listener and preview the exact `llama.cpp` argument/environment contract:
+
+```powershell
+cargo run --bin alpine -- session status
+cargo run --bin alpine -- session plan --profile fast-32k
+```
+
+Rust Session start/stop is implemented behind the same inference-capacity and transition locks used by the migrating installation. It publishes typed state atomically, records PID plus process-start identity, refuses foreign listeners, performs bounded optimized-to-MTP fallback, and restores a configured cleanup process after failure or stop. A one-time stop of a PowerShell-authored state requires `--allow-legacy-identity`; Rust-authored states do not. These commands are not yet routed from the production launcher because live compatibility and independent qualification are still migration gates:
+
+```powershell
+cargo run --release --bin alpine -- session start --profile fast-32k
+cargo run --release --bin alpine -- session stop
+```
+
 List existing experiment runs and inspect one run's identity-bound evidence directly from the SQLite store:
 
 ```powershell

@@ -1,4 +1,6 @@
-use alpine_control_plane::{Alpine, MicrobenchmarkOptions};
+use alpine_control_plane::{
+    Alpine, MicrobenchmarkOptions, StartSessionOptions, StopSessionOptions,
+};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -84,6 +86,32 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum SessionCommands {
+    Start {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        vision: bool,
+        #[arg(long)]
+        force_fallback: bool,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        startup_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    Stop {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long)]
+        allow_legacy_identity: bool,
+        #[arg(long)]
+        compact: bool,
+    },
     Status {
         #[arg(long, default_value_os_t = default_install_root())]
         install_root: PathBuf,
@@ -174,6 +202,40 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
             Ok(0)
         }
         Commands::Session { command } => match command {
+            SessionCommands::Start {
+                install_root,
+                profile,
+                vision,
+                force_fallback,
+                lock_timeout_ms,
+                startup_timeout_ms,
+                compact,
+            } => {
+                let report = Alpine::start_session(&StartSessionOptions {
+                    install_root,
+                    profile,
+                    vision,
+                    force_fallback,
+                    lock_timeout: Duration::from_millis(lock_timeout_ms),
+                    startup_timeout: Duration::from_millis(startup_timeout_ms),
+                })?;
+                write_json(&report, compact)?;
+                Ok(0)
+            }
+            SessionCommands::Stop {
+                install_root,
+                lock_timeout_ms,
+                allow_legacy_identity,
+                compact,
+            } => {
+                let report = Alpine::stop_session(&StopSessionOptions {
+                    install_root,
+                    lock_timeout: Duration::from_millis(lock_timeout_ms),
+                    allow_legacy_identity,
+                })?;
+                write_json(&report, compact)?;
+                Ok(0)
+            }
             SessionCommands::Status {
                 install_root,
                 lock_timeout_ms,
