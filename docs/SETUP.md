@@ -22,17 +22,29 @@ On a new Windows installation, permit setup to install the pinned prerequisites:
 .\setup.ps1 -Profile stable-16k -InstallPrerequisites
 ```
 
-This may install Git, CMake 4.2.3, CUDA 13.2, Visual Studio 2022 Build Tools, Node.js if needed, and OpenCode 1.18.18. Review this system-wide operation before running it.
+This may install Git, CMake 4.2.3, CUDA 13.2, Visual Studio 2022 Build Tools, Node.js, Rustup/Cargo if needed, and OpenCode 1.18.18. Review this system-wide operation before running it. Setup builds Alpine with the locked Cargo dependency graph and publishes `alpine.exe` in the same recoverable installation transaction as the launcher.
 
 Large artifact downloads are verified by byte size and SHA-256 from `config/artifacts.json`. The installer is safe to rerun and resumes `.part` downloads. A bounded "another setup transaction owns" error means a setup is still active; rerunning after an owner crash repairs any journaled partial publication first.
 
 ## Launch
 
-Double-click `Open Local Qwen.exe` in the install root, choose a project folder, and work in the OpenCode terminal. The executable selects the folder and supervises the visible PowerShell process; the reviewed policy and runtime behavior remain in the installed scripts. A failed session stays visible until acknowledged, and startup PowerShell errors are redacted into a per-launch record before being atomically published at `logs\launcher-last-error.log`. Native OpenCode diagnostics remain visible in that terminal; the stable record includes their non-zero exit code without recording the interactive transcript.
+Double-click `Open Local Qwen.exe` in the install root, choose a project folder, and work in the OpenCode terminal. The executable is a thin folder picker that directly supervises `alpine.exe opencode`; PowerShell is not in the production launch path. Alpine owns the policy, full-lifetime inference lease, transactional Session restoration, Ctrl-C handling, crash-recovery journal, and redacted failure publication. Native OpenCode diagnostics remain visible in the terminal and are not copied into logs.
 
 To verify this failure path without loading the model, run `Open Local Qwen.exe --project <existing-folder> --diagnostic-failure`. It deliberately presents a diagnostic error, writes the stable redacted log, and exits non-zero.
 
-CLI alternatives from the repository:
+Verify the complete effective policy without loading the model:
+
+```powershell
+.\alpine.exe opencode --install-root . --project C:\path\to\project --profile stable-16k --check
+```
+
+The direct installed CLI is:
+
+```powershell
+.\alpine.exe opencode --install-root . --profile stable-16k --project C:\path\to\project
+```
+
+Legacy migration CLI alternatives from the repository remain available while non-launch workflows are retired:
 
 ```powershell
 .\localmodel.ps1 profiles
@@ -146,13 +158,15 @@ The current Alpine executable must match the final run's software identity. Qual
 
 ## OpenCode context and permissions
 
-Bounded 16K/32K profiles disable foreign Claude prompt injection and ambient skill catalogs but keep the nine core coding tools. A captured request is 26,003 bytes: 817 bytes of system prompt and 20,915 bytes of tool schemas. A live fresh `hey` uses 5,529 input tokens. Fast-32K generated an 11-token answer in about 1.55 seconds; the final Stable-16K smoke generated 64 tokens in about 9.76 seconds of model time. Neither compacted.
+Bounded 16K/32K profiles disable foreign Claude prompt injection and ambient skill catalogs but explicitly keep core read, edit, write/patch, search, shell, web, task, and todo capabilities. The local model is fixed at 16,384 context and 4,096 output for `stable-16k`. Skills are a reversible context-budget choice, not a safety rule.
 
-Skills can be enabled explicitly with the installed PowerShell launcher's `-WithSkills`; `long-64k` enables them by profile. This is a context/resource choice, not a content restriction.
+Skills can be enabled explicitly with `alpine.exe opencode --skills`; Profiles may also enable them. This is a context/resource choice, not a content restriction.
 
-The permission policy asks before common destructive, externally visible, credential or privilege effects and shields direct credential-file reads. It does not censor what the abliterated model may discuss or implement. It is also not hostile-code containment: tools execute as the current Windows user. Use a disposable VM or separate restricted Windows identity for adversarial repositories or untrusted generated code.
+The permission policy contains no subject, reasoning, research, reverse-engineering, or technique filter. Routine local coding and read-only web research are allowed. Exact raw credential files are denied to direct tools; outside-project access and representative destructive, external-write, credential, and privilege commands ask for consent. The effective merged configuration is checked before Session acquisition, so project config or plugins cannot silently weaken those invariants.
 
-The launcher rejects OpenCode `--auto`, disables external plugins unless explicitly requested, strips credential-like environment variables, binds inference to localhost, and uses a random file-backed bearer key.
+These shell rules are honest accident tripwires, not effect mediation: Python, PowerShell APIs, aliases, custom executables, or another spelling can bypass command-pattern matching, and tool output/session persistence is not a DLP boundary. Tools still execute as the current Windows user. Use a disposable VM or a separate restricted Windows identity for adversarial repositories or a deliberately hostile agent.
+
+The launcher rejects OpenCode `--auto`, disables external plugins and project config unless explicitly requested, strips credential-like environment variables and credential-pointer variables, binds inference to localhost, and uses a random file-backed bearer key.
 
 ## Recovery and rollback
 

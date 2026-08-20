@@ -5,13 +5,17 @@ use crate::external::{
 };
 use crate::identity::{sha256_bytes, sha256_file, tree_sha256};
 use crate::locking::InterprocessLock;
+use crate::opencode::{
+    HarnessPolicyOptions, MODEL_ID, assert_effective_policy, harness_environment, harness_policy,
+    sanitized_environment,
+};
 use crate::process::{resolve_executable, run_command_bounded};
 use crate::session::{self, AcquireSessionOptions, ReleaseSessionOptions};
 use crate::stability::verify_acquisition;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -178,12 +182,19 @@ fn execute(
     let opencode = std::fs::canonicalize(&opencode)
         .map_err(|error| format!("failed to resolve OpenCode executable: {error}"))?;
     let opencode_sha256 = sha256_file(&opencode)?;
-    let policy = harness_policy(resolved);
+    let policy = harness_policy(
+        resolved,
+        &HarnessPolicyOptions {
+            lean: true,
+            skills_enabled: false,
+            with_convex: false,
+        },
+    );
     let policy_bytes = serde_json::to_vec(&policy)
         .map_err(|error| format!("failed to encode OpenCode policy: {error}"))?;
     let policy_json = String::from_utf8(policy_bytes.clone())
         .map_err(|error| format!("OpenCode policy was not UTF-8: {error}"))?;
-    let environment = harness_environment(&policy_json);
+    let environment = harness_environment(&policy_json, false, false);
 
     let mut check = Command::new(&opencode);
     check
@@ -201,7 +212,7 @@ fn execute(
     }
     let effective: Value = serde_json::from_str(&checked.stdout)
         .map_err(|error| format!("OpenCode effective config was invalid JSON: {error}"))?;
-    assert_effective_policy(&effective, resolved.profile.context)?;
+    assert_effective_policy(&effective, resolved, false)?;
 
     let timeout = Duration::from_secs(task.timeout_seconds);
     let mut agent = Command::new(&opencode);
@@ -210,7 +221,7 @@ fn execute(
             OsStr::new("run"),
             OsStr::new("--pure"),
             OsStr::new("--model"),
-            OsStr::new("local-models/Qwen3.8-27B-ABLITERATED"),
+            OsStr::new(MODEL_ID),
             OsStr::new("--agent"),
             OsStr::new("build"),
             OsStr::new("--format"),
@@ -293,220 +304,6 @@ fn execute(
         tests_stderr_sha256: sha256_bytes(test_output.stderr.as_bytes()),
         restored_prior_session: false,
     })
-}
-
-fn harness_policy(resolved: &config::ResolvedSession) -> Value {
-    let api_path = resolved.api_key_file.to_string_lossy().replace('\\', "/");
-    let base_path = resolved.base_url_file.to_string_lossy().replace('\\', "/");
-    let mut credential_read = Map::new();
-    for path in [
-        "~/.ssh",
-        "~/.ssh/*",
-        "~/.ssh/**",
-        "~/.aws/*",
-        "~/.azure/*",
-        "~/.kube/*",
-        "~/.config/gcloud/*",
-        "~/.docker/config.json",
-        "~/.config/gh/hosts.yml",
-        "~/AppData/Roaming/GitHub CLI/hosts.yml",
-        "~/.git-credentials",
-        "~/.npmrc",
-        "~/.pypirc",
-        "~/.local/share/opencode/auth.json",
-    ] {
-        credential_read.insert(path.to_owned(), json!("deny"));
-    }
-    credential_read.insert(api_path.clone(), json!("deny"));
-    let mut external = Map::new();
-    external.insert("*".to_owned(), json!("ask"));
-    for path in [
-        "~/.ssh/*",
-        "~/.aws/*",
-        "~/.azure/*",
-        "~/.kube/*",
-        "~/.config/gcloud/*",
-        "~/.docker/*",
-        "~/.config/gh/*",
-        "~/AppData/Roaming/GitHub CLI/*",
-    ] {
-        external.insert(path.to_owned(), json!("deny"));
-    }
-    external.insert(api_path, json!("deny"));
-    let mut bash = Map::new();
-    for command in [
-        "git push",
-        "git push *",
-        "git pull",
-        "git pull *",
-        "gh pr merge *",
-        "gh repo create *",
-        "gh release create *",
-        "npm publish",
-        "npm publish *",
-        "pnpm publish *",
-        "yarn npm publish *",
-        "vercel deploy *",
-        "vercel --prod *",
-        "wrangler deploy *",
-        "git reset --hard",
-        "git reset --hard *",
-        "git clean *",
-        "git rebase",
-        "git rebase *",
-        "git filter-branch *",
-        "git filter-repo *",
-        "git checkout -- *",
-        "git checkout -f *",
-        "git restore *",
-        "git commit --amend",
-        "git commit --amend *",
-        "git branch -D *",
-        "git stash drop *",
-        "git stash clear",
-        "git worktree remove *",
-        "git remote add *",
-        "git remote remove *",
-        "git remote rename *",
-        "git remote set-url *",
-        "git config --global *",
-        "git config --system *",
-        "ssh",
-        "ssh *",
-        "scp *",
-        "sftp *",
-        "rsync *",
-        "rm *",
-        "remove-item *",
-        "del *",
-        "erase *",
-        "rmdir *",
-        "rd *",
-        "stop-process *",
-        "taskkill *",
-        "stop-service *",
-        "restart-service *",
-        "restart-computer *",
-        "shutdown *",
-        "runas *",
-    ] {
-        bash.insert(command.to_owned(), json!("ask"));
-    }
-    for command in ["git remote", "git remote *"] {
-        bash.insert(command.to_owned(), json!("allow"));
-    }
-    let prompt = "Act as a production coding agent. Follow the user's request, inspect before editing, preserve unrelated work, use available tools when useful, and verify changes proportionately. Ask before destructive, irreversible, external, credential, or privacy-sensitive effects. Never expose secrets. Report failed or skipped checks.";
-    json!({
-        "provider": {
-            "local-models": {
-                "npm": "@ai-sdk/openai-compatible",
-                "name": "Pinned local Qwen",
-                "options": {
-                    "baseURL": format!("{{file:{base_path}}}"),
-                    "apiKey": format!("{{file:{}}}", resolved.api_key_file.to_string_lossy().replace('\\', "/")),
-                },
-                "models": {
-                    "Qwen3.8-27B-ABLITERATED": {
-                        "name": format!("Qwen3.8-27B Abliterated ({})", resolved.profile.name),
-                        "limit": {"context": resolved.profile.context, "output": resolved.profile.output}
-                    }
-                }
-            }
-        },
-        "agent": {
-            "title": {"disable": true},
-            "build": {"prompt": prompt},
-            "plan": {"prompt": prompt}
-        },
-        "mcp": {"convex": {"enabled": false}},
-        "permission": {
-            "webfetch": "allow",
-            "websearch": "allow",
-            "external_directory": external,
-            "read": credential_read,
-            "bash": bash,
-            "skill": "deny"
-        }
-    })
-}
-
-fn harness_environment(policy: &str) -> Vec<(OsString, OsString)> {
-    let mut environment = sanitized_environment();
-    environment.extend([
-        (
-            OsString::from("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT"),
-            OsString::from("true"),
-        ),
-        (
-            OsString::from("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
-            OsString::from("true"),
-        ),
-        (
-            OsString::from("OPENCODE_DISABLE_PROJECT_CONFIG"),
-            OsString::from("true"),
-        ),
-        (
-            OsString::from("OPENCODE_CONFIG_CONTENT"),
-            OsString::from(policy),
-        ),
-    ]);
-    environment
-}
-
-fn sanitized_environment() -> Vec<(OsString, OsString)> {
-    const EXACT: [&str; 5] = [
-        "SSH_AUTH_SOCK",
-        "SSH_AGENT_PID",
-        "GIT_ASKPASS",
-        "SSH_ASKPASS",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-    ];
-    std::env::vars_os()
-        .filter(|(name, _)| {
-            let upper = name.to_string_lossy().to_ascii_uppercase();
-            !EXACT.contains(&upper.as_str())
-                && ![
-                    "TOKEN",
-                    "SECRET",
-                    "PASSWORD",
-                    "PASSWD",
-                    "API_KEY",
-                    "APIKEY",
-                    "ACCESS_KEY",
-                    "CREDENTIAL",
-                    "AUTH",
-                ]
-                .iter()
-                .any(|word| upper.contains(word))
-        })
-        .collect()
-}
-
-fn assert_effective_policy(effective: &Value, context: u32) -> Result<(), String> {
-    let observed_context = effective
-        .pointer("/provider/local-models/models/Qwen3.8-27B-ABLITERATED/limit/context")
-        .and_then(Value::as_u64);
-    let skill = effective
-        .pointer("/permission/skill")
-        .and_then(Value::as_str);
-    let push = effective
-        .pointer("/permission/bash/git push *")
-        .and_then(Value::as_str);
-    let remote = effective
-        .pointer("/permission/bash/git remote *")
-        .and_then(Value::as_str);
-    if observed_context == Some(u64::from(context))
-        && skill == Some("deny")
-        && push == Some("ask")
-        && remote == Some("allow")
-    {
-        Ok(())
-    } else {
-        Err(
-            "OpenCode effective policy does not preserve the reviewed context and safety boundary"
-                .to_owned(),
-        )
-    }
 }
 
 fn read_task(task_root: &Path, expected_id: &str) -> Result<GoldenTask, String> {
@@ -680,6 +477,7 @@ fn validate_options(options: &GoldenAgentOptions) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn policy_keeps_core_capabilities_and_gates_only_effects() {
@@ -736,10 +534,20 @@ mod tests {
             state_file: root.join("state.json"),
             base_url: "http://127.0.0.1:8100".to_owned(),
         };
-        let policy = harness_policy(&resolved);
+        let policy = harness_policy(
+            &resolved,
+            &HarnessPolicyOptions {
+                lean: true,
+                skills_enabled: false,
+                with_convex: false,
+            },
+        );
         assert_eq!(policy.pointer("/permission/skill"), Some(&json!("deny")));
-        assert!(policy.pointer("/permission/task").is_none());
-        assert!(policy.pointer("/permission/todowrite").is_none());
+        assert_eq!(policy.pointer("/permission/task"), Some(&json!("allow")));
+        assert_eq!(
+            policy.pointer("/permission/todowrite"),
+            Some(&json!("allow"))
+        );
         assert_eq!(
             policy.pointer("/permission/bash/git push *"),
             Some(&json!("ask"))

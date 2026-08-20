@@ -8,6 +8,7 @@ mod external;
 mod golden;
 mod identity;
 mod locking;
+mod opencode;
 mod process;
 mod qualification;
 mod rollback;
@@ -27,6 +28,7 @@ pub use external::{
 };
 pub use golden::{GoldenAgentOptions, GoldenAgentReport};
 pub use identity::runtime_bundle_sha256;
+pub use opencode::{OpenCodeOptions, OpenCodeReport};
 pub use qualification::{
     EvidencePhase, QualificationCheck, QualificationReport, QualificationRequest,
     QualificationTarget, RunQualificationOptions, RunQualificationReport,
@@ -185,5 +187,9 @@ impl Alpine {
         options: &RollbackProofOptions,
     ) -> Result<RollbackProofReport, AlpineError> {
         rollback::run(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn open_code(options: &OpenCodeOptions) -> Result<OpenCodeReport, AlpineError> {
+        opencode::run(options).map_err(AlpineError::InvalidInput)
     }
 }

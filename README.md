@@ -6,6 +6,14 @@ Alpine is being introduced through verified vertical replacements. The existing 
 
 ## Current Rust interface
 
+The production OpenCode workflow is a single Rust transaction. It verifies the effective 16K policy before loading the model, holds the inference-capacity lease for the complete interactive child lifetime, survives Ctrl-C long enough to restore the prior Session, and keeps an atomic crash-recovery journal:
+
+```powershell
+cargo run --release --bin alpine -- opencode --profile stable-16k --project C:\path\to\project
+```
+
+The installed `Open Local Qwen.exe` is only a folder-picker Adapter for `alpine.exe opencode`; it does not own Session, policy, logging, or OpenCode behavior. `Open Minimal OpenCode.cmd` is a transparent fallback to that same Rust command.
+
 Resolve and validate the generated Session Config and selected Profile without Python or PowerShell:
 
 ```powershell
@@ -19,7 +27,7 @@ cargo run --bin alpine -- session status
 cargo run --bin alpine -- session plan --profile fast-32k
 ```
 
-Rust Session start/stop is implemented behind the same inference-capacity and transition locks used by the migrating installation. It publishes typed state atomically, records PID plus process-start identity, refuses foreign listeners, performs bounded optimized-to-MTP fallback, and restores a configured cleanup process after failure or stop. A one-time stop of a PowerShell-authored state requires `--allow-legacy-identity`; Rust-authored states do not. These commands are not yet routed from the production launcher because live compatibility and independent qualification are still migration gates:
+Rust Session start/stop is implemented behind the same inference-capacity and transition locks used by the migrating installation. It publishes typed state atomically, records PID plus process-start identity, refuses foreign listeners, performs bounded optimized-to-MTP fallback, and restores a configured cleanup process after failure or stop. A one-time stop of a PowerShell-authored state requires `--allow-legacy-identity`; Rust-authored states do not:
 
 ```powershell
 cargo run --release --bin alpine -- session start --profile fast-32k

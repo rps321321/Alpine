@@ -15,7 +15,20 @@ SUPERVISOR = REPO_ROOT / "runtime" / "scripts" / "launcher-supervisor.ps1"
 
 
 class LauncherTests(unittest.TestCase):
-    def build_fixture_launcher(self, install: Path, *, real_entrypoint: bool = False) -> Path:
+    def test_minimal_cmd_forwards_directly_to_alpine(self) -> None:
+        command = (REPO_ROOT / "runtime" / "launcher" / "Open Minimal OpenCode.cmd").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("alpine.exe\" opencode", command)
+        self.assertNotIn("powershell", command.lower())
+
+    def build_fixture_launcher(
+        self,
+        install: Path,
+        *,
+        real_entrypoint: bool = False,
+        rust_owned: bool = False,
+    ) -> Path:
         shutil.copytree(REPO_ROOT / "runtime" / "scripts", install / "scripts")
         shutil.copytree(REPO_ROOT / "runtime" / "launcher", install / "launcher")
         fake_script = r"""
@@ -71,7 +84,205 @@ exit 0
             timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        if rust_owned or real_entrypoint:
+            alpine = REPO_ROOT / "target" / "debug" / "alpine.exe"
+            if not alpine.is_file():
+                build = subprocess.run(
+                    ["cargo", "build", "--bin", "alpine"],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=180,
+                )
+                self.assertEqual(build.returncode, 0, build.stderr)
+            shutil.copy2(alpine, install / "alpine.exe")
+        else:
+            self.build_fake_alpine(install)
         return launcher
+
+    def build_fake_alpine(self, install: Path) -> None:
+        source = install / "FakeAlpine.cs"
+        source.write_text(
+            r'''
+using System;
+using System.IO;
+using System.Text;
+using System.Threading;
+
+internal static class FakeAlpine
+{
+    private static string ValueAfter(string[] args, string name)
+    {
+        for (int i = 0; i + 1 < args.Length; i++) if (args[i] == name) return args[i + 1];
+        return null;
+    }
+    private static bool Has(string[] args, string name)
+    {
+        foreach (string arg in args) if (arg == name) return true;
+        return false;
+    }
+    private static string Escape(string value)
+    {
+        return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    }
+    public static int Main(string[] args)
+    {
+        Thread.Sleep(600);
+        string root = ValueAfter(args, "--install-root") ?? AppDomain.CurrentDomain.BaseDirectory;
+        string project = ValueAfter(args, "--project") ?? root;
+        string profile = ValueAfter(args, "--profile") ?? "stable-16k";
+        string launchId = ValueAfter(args, "--launch-id") ?? Guid.NewGuid().ToString("N");
+        string logs = Path.Combine(root, "logs");
+        Directory.CreateDirectory(logs);
+        string observed = "{\"project\":\"" + Escape(project) + "\",\"profile\":\"" + Escape(profile) +
+            "\",\"vision\":" + Has(args, "--vision").ToString().ToLowerInvariant() +
+            ",\"lean\":" + Has(args, "--lean").ToString().ToLowerInvariant() +
+            ",\"full_prompt\":" + Has(args, "--full-prompt").ToString().ToLowerInvariant() +
+            ",\"plugins\":" + Has(args, "--plugins").ToString().ToLowerInvariant() +
+            ",\"skills\":" + Has(args, "--skills").ToString().ToLowerInvariant() + "}";
+        File.WriteAllText(Path.Combine(logs, "launcher-args.json"), observed, new UTF8Encoding(false));
+        bool diagnostic = Has(args, "--diagnostic-failure");
+        bool failure = diagnostic || Environment.GetEnvironmentVariable("LOCALMODEL_LAUNCHER_FIXTURE_MODE") == "fail";
+        if (!failure) return 0;
+        string message = diagnostic
+            ? "Deterministic installed launcher diagnostic failure"
+            : "fixture PowerShell failure for " + profile;
+        string content = "profile=" + profile + Environment.NewLine + "error:" + Environment.NewLine + message + Environment.NewLine;
+        string errors = Path.Combine(logs, "launcher-errors");
+        Directory.CreateDirectory(errors);
+        File.WriteAllText(Path.Combine(errors, launchId + ".log"), content, new UTF8Encoding(false));
+        using (Mutex mutex = new Mutex(false, @"Local\FakeAlpineFailureLog"))
+        {
+            bool acquired = false;
+            try
+            {
+                try { acquired = mutex.WaitOne(TimeSpan.FromSeconds(5)); }
+                catch (AbandonedMutexException) { acquired = true; }
+                if (acquired) File.WriteAllText(Path.Combine(logs, "launcher-last-error.log"), content, new UTF8Encoding(false));
+            }
+            finally { if (acquired) mutex.ReleaseMutex(); }
+        }
+        return 1;
+    }
+}
+''',
+            encoding="utf-8",
+        )
+        output = install / "alpine.exe"
+        expression = (
+            f"Add-Type -TypeDefinition (Get-Content -Raw -LiteralPath '{source}') "
+            f"-Language CSharp -ReferencedAssemblies @('System.dll') "
+            f"-OutputAssembly '{output}' -OutputType ConsoleApplication"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", expression],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def write_rust_check_fixture(self, install: Path) -> None:
+        (install / "config").mkdir(parents=True, exist_ok=True)
+        (install / "profiles").mkdir(parents=True, exist_ok=True)
+        (install / "runtime").mkdir(parents=True, exist_ok=True)
+        (install / "models").mkdir(parents=True, exist_ok=True)
+        runtime = install / "runtime" / "llama-server.exe"
+        runtime.write_bytes(b"fixture runtime")
+        (install / "config" / "api-key.txt").write_text("sk-local-fixture", encoding="utf-8")
+        (install / "config" / "base-url.txt").write_text(
+            "http://127.0.0.1:8100/v1", encoding="utf-8"
+        )
+        (install / "profiles" / "stable-16k.json").write_text(
+            json.dumps(
+                {
+                    "name": "stable-16k",
+                    "status": "production",
+                    "runtime": "official",
+                    "context": 16384,
+                    "output": 4096,
+                    "parallel": 1,
+                    "threads": 1,
+                    "batch_size": 32,
+                    "ubatch_size": 16,
+                    "kv_cache": "f16",
+                    "tensor_cpu_through_block": 0,
+                    "mtp_depth": 1,
+                    "ngram_mod": False,
+                    "ngram_reset_on_begin": False,
+                    "external_skills": False,
+                    "skill_tool": False,
+                    "vision_fit": False,
+                    "fit_target_mib": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (install / "config" / "session.json").write_text(
+            json.dumps(
+                {
+                    "schema": 3,
+                    "root": str(install),
+                    "host": "127.0.0.1",
+                    "port": 8100,
+                    "active_profile": "stable-16k",
+                    "runtimes": {"official": str(runtime)},
+                    "model": str(install / "models" / "model.gguf"),
+                    "mmproj": str(install / "models" / "mmproj.gguf"),
+                    "chat_template": str(install / "config" / "chat.jinja"),
+                    "api_key_file": str(install / "config" / "api-key.txt"),
+                    "base_url_file": str(install / "config" / "base-url.txt"),
+                    "state_file": str(install / "logs" / "session-state.json"),
+                    "cleanup": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_executable_uses_the_rust_owned_model_free_check_when_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            install = Path(directory) / "install"
+            launcher = self.build_fixture_launcher(install, rust_owned=True)
+            self.write_rust_check_fixture(install)
+            environment = os.environ.copy()
+            environment["LOCALMODEL_LAUNCHER_NO_DIALOG"] = "1"
+
+            result = subprocess.run(
+                [str(launcher), "--check", "--profile", "stable-16k"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+                timeout=30,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            check_log = (install / "logs" / "launcher-check.log").read_text(encoding="utf-8")
+            self.assertIn("OpenCode check passed: stable-16k context=16384", check_log)
+
+    def test_executable_uses_rust_redacted_failure_records_when_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            install = Path(directory) / "install"
+            project = Path(directory) / "project"
+            project.mkdir(parents=True)
+            launcher = self.build_fixture_launcher(install, rust_owned=True)
+            environment = os.environ.copy()
+            environment["LOCALMODEL_LAUNCHER_NO_DIALOG"] = "1"
+
+            result = subprocess.run(
+                [str(launcher), "--project", str(project), "--diagnostic-failure"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+                timeout=30,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            observed = (install / "logs" / "launcher-last-error.log").read_text(encoding="utf-8")
+            self.assertIn("Deterministic installed launcher diagnostic failure", observed)
 
     def test_failure_log_preserves_the_error_and_redacts_secret_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -298,7 +509,7 @@ exit 0
 
             self.assertNotEqual(return_code, 0)
 
-    def test_executable_preserves_an_actual_early_powershell_error(self) -> None:
+    def test_executable_preserves_an_actual_early_rust_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             install = Path(directory) / "install"
             project = Path(directory) / "project"
@@ -318,19 +529,16 @@ exit 0
 
             self.assertNotEqual(result.returncode, 0)
             observed = (install / "logs" / "launcher-last-error.log").read_text(encoding="utf-8")
-            self.assertIn("Session config missing", observed)
+            self.assertIn("Session Config missing", observed)
             self.assertIn("profile=stable-16k", observed)
 
-    def test_supervisor_captures_a_corrupt_entrypoint_parser_error(self) -> None:
+    def test_adapter_records_a_corrupt_alpine_binary_without_exposing_details(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             install = Path(directory) / "install"
             project = Path(directory) / "project"
             project.mkdir(parents=True)
             launcher = self.build_fixture_launcher(install, real_entrypoint=True)
-            (install / "scripts" / "open-local-opencode.ps1").write_text(
-                "param([string]$Project)\nif ($true) {\n",
-                encoding="utf-8",
-            )
+            (install / "alpine.exe").write_bytes(b"not a Windows executable")
             environment = os.environ.copy()
             environment["LOCALMODEL_LAUNCHER_NO_DIALOG"] = "1"
 
@@ -345,7 +553,8 @@ exit 0
 
             self.assertNotEqual(result.returncode, 0)
             observed = (install / "logs" / "launcher-last-error.log").read_text(encoding="utf-8")
-            self.assertIn("Missing closing", observed)
+            self.assertIn("could not start Alpine", observed)
+            self.assertIn("Win32Exception", observed)
 
     def test_executable_installed_diagnostic_failure_uses_the_supervised_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

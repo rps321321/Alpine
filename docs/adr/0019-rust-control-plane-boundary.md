@@ -14,12 +14,13 @@ This decision reopens the implementation recommendation in `docs/AUDIT-2026-08-1
 
 Project Alpine is a Rust control plane. `llama.cpp` and its C++/CUDA implementation remain below the Inference Server boundary.
 
-Alpine is organized as four deep Modules behind one small CLI Interface:
+Alpine is organized as five deep Modules behind one small CLI Interface:
 
 - **Support Envelope** discovers a host through a fixed catalog of bounded probes and evaluates it against a versioned, capability-based envelope. Configuration may select probe identities but may not inject commands.
 - **Experiment** owns measured workloads, tuning search, telemetry and durable evidence. Tuning evidence is never final qualification evidence.
 - **Qualification** binds claims to hardware, software, model, runtime, workload, configuration and policy identities. Its outcomes are `qualified`, `unsupported`, `inconclusive`, `regressed` and `not-proven`.
 - **Session** owns transactional start, stop, restore and recovery with exact process identity and bounded operations.
+- **OpenCode Harness** owns the capability-preserving policy, credential-shielded child environment, interactive capacity lease, crash journal, terminal inheritance and exact Session restoration. The C# launcher is only a Windows folder-picker Adapter.
 
 Filesystem, process, clock, HTTP and telemetry Adapters are internal Seams. They exist for platform integration and tests; they are not public workflow APIs. The Rust crate initially stays one package so internal seams do not become shallow cross-crate Interfaces.
 
@@ -59,4 +60,3 @@ Accepted. The Interface stays small while discovery, evidence, qualification and
 The current machine is evidence, not policy. A Support Envelope may initially cover only Windows x86-64 with NVIDIA discovery, but new platforms are added by versioned capability rules and independently qualified evidence rather than new global assumptions.
 
 The repository is currently private and unlicensed. Publication visibility and an open-source license require an explicit owner decision before Alpine can satisfy the public-open-source release condition.
-

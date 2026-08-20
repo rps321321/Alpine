@@ -113,6 +113,11 @@ function Install-Tooling {
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
         & winget install --id OpenJS.NodeJS.LTS --exact @agreements
     }
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        & winget install --id Rustlang.Rustup --exact @agreements
+        $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+        if (Test-Path -LiteralPath $cargoBin) { $env:PATH = "$cargoBin;$env:PATH" }
+    }
     & npm install --global opencode-ai@1.18.18
     if ($LASTEXITCODE -ne 0) { throw 'OpenCode installation failed.' }
 }
@@ -267,6 +272,18 @@ function Copy-ControlPlane([string]$DestinationRoot) {
     Copy-AtomicFile $manifestPath (Join-Path $DestinationRoot 'config\artifacts.json')
 }
 
+function Build-AlpineControlPlane([string]$DestinationRoot) {
+    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $cargo) {
+        throw 'Rust Cargo is required to build the pinned Alpine control plane from this source checkout.'
+    }
+    & $cargo.Source build --locked --release --bin alpine --manifest-path (Join-Path $repoRoot 'Cargo.toml')
+    if ($LASTEXITCODE -ne 0) { throw 'Alpine release build failed.' }
+    $binary = Join-Path $repoRoot 'target\release\alpine.exe'
+    if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Alpine release binary is missing: $binary" }
+    Copy-AtomicFile $binary (Join-Path $DestinationRoot 'alpine.exe')
+}
+
 function Write-ControlPlaneIdentity([string]$DestinationRoot) {
     $entries = @()
     foreach ($mapping in @(
@@ -288,6 +305,12 @@ function Write-ControlPlaneIdentity([string]$DestinationRoot) {
     $generatedLauncher = Join-Path $DestinationRoot 'Open Local Qwen.exe'
     if (Test-Path -LiteralPath $generatedLauncher -PathType Leaf) {
         $entries += [ordered]@{ path = 'Open Local Qwen.exe'; sha256 = Get-Sha256 $generatedLauncher; generated = $true }
+    }
+    foreach ($generated in @('alpine.exe', 'Open Minimal OpenCode.cmd')) {
+        $path = Join-Path $DestinationRoot $generated
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $entries += [ordered]@{ path = $generated; sha256 = Get-Sha256 $path; generated = $true }
+        }
     }
     $commit = (& git -C $repoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
     $identity = [ordered]@{ schema = 1; source_commit = if ($commit) { $commit.Trim() } else { $null }; files = @($entries | Sort-Object path) }
@@ -335,9 +358,11 @@ function Assert-Install {
     Assert-Artifact $session.model $manifest.model
     if (-not $SkipVision) { Assert-Artifact $session.mmproj $manifest.mmproj }
     Assert-Artifact $session.chat_template $manifest.chat_template
-    foreach ($path in @($serverPath, (Join-Path $InstallRoot 'scripts\start-session.ps1'), (Join-Path $InstallRoot 'scripts\open-local-opencode.ps1'))) {
+    foreach ($path in @($serverPath, (Join-Path $InstallRoot 'alpine.exe'), (Join-Path $InstallRoot 'Open Local Qwen.exe'), (Join-Path $InstallRoot 'scripts\start-session.ps1'))) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Install file missing: $path" }
     }
+    & (Join-Path $InstallRoot 'alpine.exe') resolve --install-root $InstallRoot --profile ([string]$profileConfig.name) --compact | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Installed Alpine could not resolve the selected Profile.' }
     $version = & $serverPath --version 2>&1 | Out-String
     if ($version -notmatch '3cb7ffb') { throw "llama-server is not pinned to commit 3cb7ffb:`n$version" }
     Write-Host "Verified install: $InstallRoot"
@@ -365,6 +390,7 @@ try {
         $officialServer = Install-OfficialRuntime $stage
         $customServer = if ($Runtime -eq 'Custom') { Install-CustomRuntime $stage } else { $null }
         Copy-ControlPlane $stage
+        Build-AlpineControlPlane $stage
         Write-SessionConfig $officialServer $customServer $stage
         $stageBuilder = Join-Path $stage 'scripts\build-launcher.ps1'
         & $stageBuilder -Output (Join-Path $stage 'Open Local Qwen.exe') -NoShortcut
@@ -383,6 +409,8 @@ try {
             [pscustomobject]@{ stage='config\artifacts.json'; destination='config\artifacts.json' },
             [pscustomobject]@{ stage='config\control-plane.json'; destination='config\control-plane.json' },
             [pscustomobject]@{ stage='config\session.json'; destination='config\session.json' },
+            [pscustomobject]@{ stage='alpine.exe'; destination='alpine.exe' },
+            [pscustomobject]@{ stage='Open Minimal OpenCode.cmd'; destination='Open Minimal OpenCode.cmd' },
             [pscustomobject]@{ stage='Open Local Qwen.exe'; destination='Open Local Qwen.exe' }
         )
         Publish-SetupBundle -InstallRoot $InstallRoot -StageRoot $stage -Items $items

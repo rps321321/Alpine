@@ -489,11 +489,7 @@ fn start_locked_with<P: SessionPlatform>(
 
     validate_start_artifacts(resolved, options.vision)?;
     let cleanup = cleanup_config(&resolved.session)?;
-    ensure_local_api_key(&resolved.api_key_file, options.lock_timeout)?;
-    atomic_replace(
-        &resolved.base_url_file,
-        format!("{}/v1", resolved.base_url).as_bytes(),
-    )?;
+    ensure_provider_files(resolved, options.lock_timeout)?;
 
     let now = platform.utc_now()?;
     let initial_plan = build_arguments(
@@ -1784,6 +1780,17 @@ fn ensure_local_api_key(path: &Path, lock_timeout: Duration) -> Result<(), Strin
     atomic_replace(path, key.as_bytes())
 }
 
+pub(crate) fn ensure_provider_files(
+    resolved: &ResolvedSession,
+    lock_timeout: Duration,
+) -> Result<(), String> {
+    ensure_local_api_key(&resolved.api_key_file, lock_timeout)?;
+    atomic_replace(
+        &resolved.base_url_file,
+        format!("{}/v1", resolved.base_url).as_bytes(),
+    )
+}
+
 fn save_state(path: &Path, state: &SessionState, lock_timeout: Duration) -> Result<(), String> {
     let write_lock_path = lock_path(path, ".write.lock");
     let _write_lock = InterprocessLock::acquire(&write_lock_path, lock_timeout)?;
@@ -1793,7 +1800,7 @@ fn save_state(path: &Path, state: &SessionState, lock_timeout: Duration) -> Resu
     atomic_replace(path, &bytes)
 }
 
-fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("output path has no parent: {}", path.display()))?;

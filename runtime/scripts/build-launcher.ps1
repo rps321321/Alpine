@@ -24,6 +24,8 @@ if (-not $ShortcutOnly) {
             -ReferencedAssemblies @('System.dll', 'System.Windows.Forms.dll', 'System.Drawing.dll') `
             -OutputAssembly $temporary -OutputType WindowsApplication
         Move-Item -LiteralPath $temporary -Destination $Output -Force
+        Copy-Item -LiteralPath (Join-Path $root 'launcher\Open Minimal OpenCode.cmd') `
+            -Destination (Join-Path (Split-Path $Output -Parent) 'Open Minimal OpenCode.cmd') -Force
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
     }

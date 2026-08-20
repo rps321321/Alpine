@@ -1,11 +1,12 @@
 use alpine_control_plane::{
     AcquireSessionOptions, Alpine, CleanRestartStabilityOptions, EvidencePhase,
     ExternalEvidenceKind, GoldenAgentOptions, MicrobenchmarkOptions, NearLimitContextOptions,
-    OperatorReviewOptions, ReleaseSessionOptions, RollbackProofOptions, RunQualificationOptions,
-    SameProcessStabilityOptions, SessionAcquisition, StartSessionOptions, StopSessionOptions,
-    TuningDisposition, TuningOptions,
+    OpenCodeOptions, OperatorReviewOptions, ReleaseSessionOptions, RollbackProofOptions,
+    RunQualificationOptions, SameProcessStabilityOptions, SessionAcquisition, StartSessionOptions,
+    StopSessionOptions, TuningDisposition, TuningOptions,
 };
 use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -243,6 +244,44 @@ enum Commands {
         request_timeout_ms: u64,
         #[arg(long)]
         compact: bool,
+    },
+    Opencode {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_os_t = default_project())]
+        project: PathBuf,
+        #[arg(long, default_value = "stable-16k")]
+        profile: String,
+        #[arg(long)]
+        launch_id: Option<String>,
+        #[arg(long)]
+        vision: bool,
+        #[arg(long, conflicts_with = "full_prompt")]
+        lean: bool,
+        #[arg(long)]
+        full_prompt: bool,
+        #[arg(long)]
+        convex: bool,
+        #[arg(long)]
+        skills: bool,
+        #[arg(long)]
+        project_config: bool,
+        #[arg(long)]
+        plugins: bool,
+        #[arg(long)]
+        keep_server: bool,
+        #[arg(long)]
+        check: bool,
+        #[arg(long, hide = true)]
+        diagnostic_failure: bool,
+        #[arg(long)]
+        allow_legacy_identity: bool,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        startup_timeout_ms: u64,
+        #[arg(last = true, allow_hyphen_values = true)]
+        opencode_args: Vec<OsString>,
     },
     Resolve {
         #[arg(long, default_value_os_t = default_install_root())]
@@ -621,6 +660,57 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
             write_json(&report, compact)?;
             Ok(0)
         }
+        Commands::Opencode {
+            install_root,
+            project,
+            profile,
+            launch_id,
+            vision,
+            lean,
+            full_prompt,
+            convex,
+            skills,
+            project_config,
+            plugins,
+            keep_server,
+            check,
+            diagnostic_failure,
+            allow_legacy_identity,
+            lock_timeout_ms,
+            startup_timeout_ms,
+            opencode_args,
+        } => {
+            let report = Alpine::open_code(&OpenCodeOptions {
+                install_root,
+                project,
+                profile,
+                launch_id: launch_id.unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()),
+                vision,
+                lean: lean || !full_prompt,
+                with_convex: convex,
+                with_skills: skills,
+                with_project_config: project_config,
+                with_plugins: plugins,
+                keep_server,
+                check,
+                diagnostic_failure,
+                allow_legacy_identity,
+                lock_timeout: Duration::from_millis(lock_timeout_ms),
+                startup_timeout: Duration::from_millis(startup_timeout_ms),
+                opencode_args,
+            })?;
+            if report.checked_only {
+                println!(
+                    "OpenCode check passed: {} context={} project={}",
+                    report.profile,
+                    report.context_tokens,
+                    report.project.display()
+                );
+            } else if report.restored_prior_session {
+                println!("OpenCode closed; the prior Inference Session was restored.");
+            }
+            Ok(u8::try_from(report.exit_code).unwrap_or(1))
+        }
         Commands::Resolve {
             install_root,
             profile,
@@ -795,6 +885,10 @@ fn default_install_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("local-models")
+}
+
+fn default_project() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| default_install_root())
 }
 
 fn default_database() -> PathBuf {
