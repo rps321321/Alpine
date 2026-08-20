@@ -1,5 +1,37 @@
 $ErrorActionPreference = 'Stop'
 
+function Get-NativeVersionText {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$FilePath)
+
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+        throw "Native version probe executable is missing: $FilePath"
+    }
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = [IO.Path]::GetFullPath($FilePath)
+    $start.Arguments = '--version'
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) { throw "Native version probe did not start: $FilePath" }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $text = ([string]$stdout.Result) + ([string]$stderr.Result)
+        if ($process.ExitCode -ne 0) {
+            throw "Native version probe exited with code $($process.ExitCode): $FilePath`n$text"
+        }
+        if (-not $text.Trim()) { throw "Native version probe returned no version text: $FilePath" }
+        return $text
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Get-FileSha256([string]$Path) {
     $stream = [IO.File]::OpenRead($Path)
     $algorithm = [Security.Cryptography.SHA256]::Create()

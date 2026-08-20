@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repoRoot = Split-Path $PSScriptRoot -Parent
+. (Join-Path $repoRoot 'runtime\scripts\lib.ps1')
 $artifacts = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'config\artifacts.json') | ConvertFrom-Json
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 Get-ChildItem -LiteralPath $BuiltRuntime -File | Copy-Item -Destination $Output -Force
@@ -18,7 +19,7 @@ foreach ($name in @('cublas64_13.dll', 'cublasLt64_13.dll', 'cudart64_13.dll')) 
     Copy-Item -LiteralPath $source -Destination $Output -Force
 }
 $server = Join-Path $Output 'llama-server.exe'
-$version = (& $server --version 2>&1 | Out-String).Trim()
+$version = (Get-NativeVersionText $server).Trim()
 if ($version -notmatch '3cb7ffb') { throw "Unexpected llama-server build:`n$version" }
 $files = [ordered]@{}
 Get-ChildItem -LiteralPath $Output -File | Where-Object Name -ne 'build-manifest.json' | Sort-Object Name | ForEach-Object {

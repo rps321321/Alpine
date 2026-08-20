@@ -75,11 +75,12 @@ function New-HarnessPolicy {
             }
         }
         agent = [ordered]@{ title = [ordered]@{ disable = $true } }
+        tool_output = [ordered]@{ max_lines = 500; max_bytes = 12288 }
         mcp = [ordered]@{ convex = [ordered]@{ enabled = $WithConvex } }
         permission = $permission
     }
     if ($Lean) {
-        $prompt = "Act as a production coding agent. Follow the user's request, inspect before editing, preserve unrelated work, use available tools when useful, and verify changes proportionately. Ask before destructive, irreversible, external, credential, or privacy-sensitive effects. Never expose secrets. Report failed or skipped checks."
+        $prompt = "Act as a production coding agent. Follow the user's request, inspect before editing, preserve unrelated work, use available tools when useful, and verify changes proportionately. Ask before destructive, irreversible, external-write, credential, privilege, or privacy-sensitive effects. Never expose secrets. This policy does not restrict topics, reasoning, or technical methods. Report failed or skipped checks."
         $config.agent.build = [ordered]@{ prompt = $prompt }
         $config.agent.plan = [ordered]@{ prompt = $prompt }
     }
@@ -118,6 +119,7 @@ function Enter-HarnessEnvironment {
     & $set 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT' 'true'
     & $set 'OPENCODE_DISABLE_EXTERNAL_SKILLS' $(if ($SkillsEnabled) { 'false' } else { 'true' })
     & $set 'OPENCODE_DISABLE_PROJECT_CONFIG' $(if ($WithProjectConfig) { 'false' } else { 'true' })
+    & $set 'OPENCODE_ENABLE_EXA' 'true'
     & $set 'OPENCODE_CONFIG_CONTENT' $ConfigJson
 
     $secretPattern = '(?i)(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|CREDENTIALS?|AUTH)(_|$)'
@@ -155,6 +157,14 @@ function Assert-EffectiveHarnessPolicy {
     $local = $Effective.provider.'local-models'.models.'Qwen3.8-27B-ABLITERATED'
     if ([int]$local.limit.context -ne [int]$Profile.context) {
         throw 'OpenCode and server context limits differ.'
+    }
+    if ([int]$Effective.tool_output.max_lines -ne 500 -or [int]$Effective.tool_output.max_bytes -ne 12288) {
+        throw 'OpenCode tool-output bounds do not match the 16K harness.'
+    }
+    foreach ($capability in @('webfetch', 'websearch')) {
+        if ($Effective.permission.$capability -ne 'allow') {
+            throw "$capability is not available for read-only research."
+        }
     }
     foreach ($capability in @('task', 'todowrite')) {
         $property = $Effective.permission.PSObject.Properties[$capability]

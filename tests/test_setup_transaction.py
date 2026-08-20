@@ -24,6 +24,21 @@ def invoke(expression: str) -> subprocess.CompletedProcess[str]:
 
 
 class SetupTransactionTests(unittest.TestCase):
+    def test_native_version_probe_is_powershell_51_safe(self) -> None:
+        result = invoke(
+            "$version=Get-NativeVersionText (Join-Path $env:SystemRoot 'System32\\cmd.exe');"
+            "$version"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Microsoft Windows", result.stdout)
+
+        setup_source = SETUP_SCRIPT.read_text(encoding="utf-8-sig")
+        package_source = (
+            REPO_ROOT / "scripts" / "package-custom-runtime.ps1"
+        ).read_text(encoding="utf-8-sig")
+        self.assertNotIn("--version 2>&1", setup_source)
+        self.assertNotIn("--version 2>&1", package_source)
+
     def test_setup_uses_manifest_bytes_for_download_publication(self) -> None:
         source = SETUP_SCRIPT.read_text(encoding="utf-8-sig")
         self.assertIn(

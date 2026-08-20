@@ -152,7 +152,7 @@ function Assert-CustomRuntime([string]$RuntimeDir) {
         if ([int64]$item.Length -ne [int64]$property.Value.bytes) { throw "Custom runtime size mismatch: $path" }
         if ((Get-Sha256 $path) -ne $property.Value.sha256) { throw "Custom runtime hash mismatch: $path" }
     }
-    $version = & (Join-Path $RuntimeDir 'llama-server.exe') --version 2>&1 | Out-String
+    $version = Get-NativeVersionText (Join-Path $RuntimeDir 'llama-server.exe')
     if ($version -notmatch '3cb7ffb') { throw "Custom runtime version mismatch:`n$version" }
 }
 
@@ -181,7 +181,7 @@ function Install-OfficialRuntime([string]$TransactionStage) {
     $runtimeDir = Join-Path $InstallRoot 'runtime-official'
     $existingServer = Join-Path $runtimeDir 'llama-server.exe'
     if (Test-Path -LiteralPath $existingServer -PathType Leaf) {
-        $existingVersion = & $existingServer --version 2>&1 | Out-String
+        $existingVersion = Get-NativeVersionText $existingServer
         if ($existingVersion -match '3cb7ffb') { return $existingServer }
     }
     $stage = Join-Path $TransactionStage 'runtime-official'
@@ -193,7 +193,7 @@ function Install-OfficialRuntime([string]$TransactionStage) {
     if ($server.DirectoryName -ne $stage) {
         Get-ChildItem $server.DirectoryName -File | Copy-Item -Destination $stage -Force
     }
-    $version = & (Join-Path $stage 'llama-server.exe') --version 2>&1 | Out-String
+    $version = Get-NativeVersionText (Join-Path $stage 'llama-server.exe')
     if ($version -notmatch '3cb7ffb') { throw "Official runtime version mismatch:`n$version" }
     return (Join-Path $runtimeDir 'llama-server.exe')
 }
@@ -371,7 +371,7 @@ function Assert-Install {
     }
     & (Join-Path $InstallRoot 'alpine.exe') resolve --install-root $InstallRoot --compact | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Installed Alpine could not resolve the deployment daily_default.' }
-    $version = & $serverPath --version 2>&1 | Out-String
+    $version = Get-NativeVersionText $serverPath
     if ($version -notmatch '3cb7ffb') { throw "llama-server is not pinned to commit 3cb7ffb:`n$version" }
     Write-Host "Verified install: $InstallRoot"
     Write-Host "Deployment: daily_default=$($deployment.roles.daily_default) | rollback_profile=$($deployment.roles.rollback_profile)"

@@ -32,6 +32,10 @@ class HarnessPolicyTests(unittest.TestCase):
         self.assertEqual(policy["permission"]["bash"]["git push *"], "ask")
         self.assertEqual(policy["permission"]["skill"], "deny")
         self.assertEqual(policy["permission"]["read"]["C:/fixture/api-key.txt"], "deny")
+        self.assertEqual(policy["permission"]["webfetch"], "allow")
+        self.assertEqual(policy["permission"]["websearch"], "allow")
+        self.assertEqual(policy["tool_output"], {"max_lines": 500, "max_bytes": 12288})
+        self.assertIn("does not restrict topics", policy["agent"]["build"]["prompt"])
         self.assertIn("prompt", policy["agent"]["build"])
 
     def test_explicit_full_skills_convex_capture_and_project_config_modes_are_preserved(self) -> None:
@@ -41,7 +45,7 @@ class HarnessPolicyTests(unittest.TestCase):
         $profile = [pscustomobject]@{{ name='stable-16k'; context=16384; output=4096 }}
         $policy = New-HarnessPolicy -Session $session -Profile $profile -Lean $false -SkillsEnabled $true -WithConvex $true -CaptureEndpoint 'http://127.0.0.1:9191/'
         $state = Enter-HarnessEnvironment -ConfigJson '{{}}' -SkillsEnabled $true -WithProjectConfig $true
-        $environment = [pscustomobject]@{{ skills=$env:OPENCODE_DISABLE_EXTERNAL_SKILLS; project=$env:OPENCODE_DISABLE_PROJECT_CONFIG }}
+        $environment = [pscustomobject]@{{ skills=$env:OPENCODE_DISABLE_EXTERNAL_SKILLS; project=$env:OPENCODE_DISABLE_PROJECT_CONFIG; websearch=$env:OPENCODE_ENABLE_EXA }}
         Exit-HarnessEnvironment $state
         [pscustomobject]@{{ policy=$policy; environment=$environment }} | ConvertTo-Json -Depth 14 -Compress
         """
@@ -58,17 +62,21 @@ class HarnessPolicyTests(unittest.TestCase):
         self.assertNotIn("skill", policy["permission"])
         self.assertTrue(policy["mcp"]["convex"]["enabled"])
         self.assertEqual(policy["provider"]["local-models"]["options"]["baseURL"], "http://127.0.0.1:9191")
-        self.assertEqual(observed["environment"], {"skills": "false", "project": "false"})
+        self.assertEqual(
+            observed["environment"],
+            {"skills": "false", "project": "false", "websearch": "true"},
+        )
 
     def test_environment_is_shielded_then_restored_exactly(self) -> None:
         expression = f"""
         . '{MODULE}'
         $env:LOCALMODEL_TEST_TOKEN = 'before'
+        $env:OPENCODE_ENABLE_EXA = 'before'
         Remove-Item Env:LOCALMODEL_TEST_ABSENT -ErrorAction SilentlyContinue
         $state = Enter-HarnessEnvironment -ConfigJson '{{"fixture":true}}' -SkillsEnabled $false -WithProjectConfig $false
-        $during = [pscustomobject]@{{ token=(Test-Path Env:LOCALMODEL_TEST_TOKEN); config=$env:OPENCODE_CONFIG_CONTENT }}
+        $during = [pscustomobject]@{{ token=(Test-Path Env:LOCALMODEL_TEST_TOKEN); config=$env:OPENCODE_CONFIG_CONTENT; websearch=$env:OPENCODE_ENABLE_EXA }}
         Exit-HarnessEnvironment $state
-        [pscustomobject]@{{ during=$during; restored=$env:LOCALMODEL_TEST_TOKEN; absent=(Test-Path Env:LOCALMODEL_TEST_ABSENT) }} | ConvertTo-Json -Compress
+        [pscustomobject]@{{ during=$during; restored=$env:LOCALMODEL_TEST_TOKEN; websearch_restored=$env:OPENCODE_ENABLE_EXA; absent=(Test-Path Env:LOCALMODEL_TEST_ABSENT) }} | ConvertTo-Json -Compress
         """
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command", expression],
@@ -80,7 +88,9 @@ class HarnessPolicyTests(unittest.TestCase):
         observed = json.loads(result.stdout)
         self.assertFalse(observed["during"]["token"])
         self.assertEqual(observed["during"]["config"], '{"fixture":true}')
+        self.assertEqual(observed["during"]["websearch"], "true")
         self.assertEqual(observed["restored"], "before")
+        self.assertEqual(observed["websearch_restored"], "before")
         self.assertFalse(observed["absent"])
 
 

@@ -63,6 +63,9 @@ pub(crate) struct HarnessPolicyOptions {
     pub with_convex: bool,
 }
 
+const TOOL_OUTPUT_MAX_LINES: u64 = 500;
+const TOOL_OUTPUT_MAX_BYTES: u64 = 12 * 1024;
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LaunchJournal {
@@ -483,6 +486,10 @@ pub(crate) fn harness_policy(
             }
         },
         "agent": Value::Object(agent),
+        "tool_output": {
+            "max_lines": TOOL_OUTPUT_MAX_LINES,
+            "max_bytes": TOOL_OUTPUT_MAX_BYTES
+        },
         "mcp": {"convex": {"enabled": options.with_convex}},
         "permission": Value::Object(permission)
     })
@@ -506,6 +513,10 @@ pub(crate) fn harness_environment(
         (
             OsString::from("OPENCODE_DISABLE_PROJECT_CONFIG"),
             OsString::from(if with_project_config { "false" } else { "true" }),
+        ),
+        (
+            OsString::from("OPENCODE_ENABLE_EXA"),
+            OsString::from("true"),
         ),
         (
             OsString::from("OPENCODE_CONFIG_CONTENT"),
@@ -561,6 +572,13 @@ pub(crate) fn assert_effective_policy(
         .get("permission")
         .and_then(Value::as_object)
         .ok_or_else(|| "OpenCode effective permissions are absent".to_owned())?;
+    for capability in ["webfetch", "websearch"] {
+        if permission.get(capability).and_then(Value::as_str) != Some("allow") {
+            return Err(format!(
+                "read-only web capability is unavailable: {capability}"
+            ));
+        }
+    }
     for capability in [
         "edit",
         "write",
@@ -613,6 +631,17 @@ pub(crate) fn assert_effective_policy(
         .ok_or_else(|| "OpenCode external-directory permissions are absent".to_owned())?;
     if external.get("*").and_then(Value::as_str) != Some("ask") {
         return Err("outside-project access is not consent-gated".to_owned());
+    }
+    if effective
+        .pointer("/tool_output/max_lines")
+        .and_then(Value::as_u64)
+        != Some(TOOL_OUTPUT_MAX_LINES)
+        || effective
+            .pointer("/tool_output/max_bytes")
+            .and_then(Value::as_u64)
+            != Some(TOOL_OUTPUT_MAX_BYTES)
+    {
+        return Err("OpenCode tool-output bounds do not match the 16K harness".to_owned());
     }
     for &path in credential_paths() {
         if read.get(path).and_then(Value::as_str) != Some("deny")
@@ -1200,9 +1229,27 @@ mod tests {
         weakened["permission"]["bash"]["gh api * --method POST *"] = json!("allow");
         assert!(assert_effective_policy(&weakened, &resolved, false).is_err());
 
-        let mut capability_removed = policy;
+        let mut capability_removed = policy.clone();
         capability_removed["permission"]["task"] = json!("deny");
         assert!(assert_effective_policy(&capability_removed, &resolved, false).is_err());
+
+        let mut websearch_removed = policy.clone();
+        websearch_removed["permission"]["websearch"] = json!("deny");
+        assert!(assert_effective_policy(&websearch_removed, &resolved, false).is_err());
+
+        let mut output_unbounded = policy;
+        output_unbounded["tool_output"]["max_bytes"] = json!(51_200);
+        assert!(assert_effective_policy(&output_unbounded, &resolved, false).is_err());
+    }
+
+    #[test]
+    fn harness_explicitly_enables_websearch_for_the_local_provider() {
+        let environment = harness_environment("{}", false, false);
+        assert!(
+            environment
+                .iter()
+                .any(|(name, value)| { name == "OPENCODE_ENABLE_EXA" && value == "true" })
+        );
     }
 
     #[test]

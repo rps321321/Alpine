@@ -30,6 +30,8 @@ Large artifact downloads are verified by byte size and SHA-256 from `config/arti
 
 Double-click `Open Local Qwen.exe` in the install root, choose a project folder, and work in the OpenCode terminal. With no Profile argument, it uses the deployment `daily_default`. The executable is a thin folder picker that directly supervises `alpine.exe opencode`; PowerShell is not in the production launch path. Alpine owns the policy, full-lifetime inference lease, transactional Session restoration, Ctrl-C handling, crash-recovery journal, and redacted failure publication. Native OpenCode diagnostics remain visible in the terminal and are not copied into logs.
 
+Do not pipe a lifecycle command through `Tee-Object` while intentionally leaving or restoring a long-lived inference server. On Windows, that descendant can retain the pipeline handle after the Alpine command itself has finished, so the pipe does not report EOF until the server stops. This is a capture-harness limitation, not a server-health failure. Normal interactive launcher use is unaffected; automation should write bounded artifacts directly or return the Session to stopped before waiting for piped EOF.
+
 To verify this failure path without loading the model, run `Open Local Qwen.exe --project <existing-folder> --diagnostic-failure`. It deliberately presents a diagnostic error, writes the stable redacted log, and exits non-zero.
 
 Verify the complete effective policy without loading the model:
@@ -166,6 +168,8 @@ The current Alpine executable must match the final run's software identity. Qual
 ## OpenCode context and permissions
 
 Bounded 16K/32K profiles disable foreign Claude prompt injection and ambient skill catalogs but explicitly keep core read, edit, write/patch, search, shell, web, task, and todo capabilities. The local model is fixed at 16,384 context and 4,096 output for `stable-16k`. Skills are a reversible context-budget choice, not a safety rule.
+
+The local provider explicitly enables OpenCode's Exa-backed `websearch`; an `allow` permission alone does not make that tool visible for a non-OpenCode provider in OpenCode 1.18.18. Search queries therefore leave the machine for the external search service, just as requested URLs leave the machine for `webfetch`. Model-visible tool output is capped at 500 lines or 12,288 bytes. OpenCode retains the complete result in its managed truncation directory so the agent can inspect focused portions with Grep or bounded Read calls instead of spending most of a 16K window on one result.
 
 Skills can be enabled explicitly with `alpine.exe opencode --skills`; Profiles may also enable them. This is a context/resource choice, not a content restriction.
 
