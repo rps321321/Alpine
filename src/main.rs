@@ -1,4 +1,4 @@
-use alpine_control_plane::{Alpine, Decision};
+use alpine_control_plane::Alpine;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,6 +13,21 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Runs {
+        #[arg(long, default_value_os_t = default_database())]
+        database: PathBuf,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        #[arg(long)]
+        compact: bool,
+    },
+    Evidence {
+        run_id: String,
+        #[arg(long, default_value_os_t = default_database())]
+        database: PathBuf,
+        #[arg(long)]
+        compact: bool,
+    },
     Resolve {
         #[arg(long, default_value_os_t = default_install_root())]
         install_root: PathBuf,
@@ -41,7 +56,7 @@ enum Commands {
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
-        Ok(decision) => ExitCode::from(decision.exit_code()),
+        Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("alpine: {error}");
             ExitCode::from(64)
@@ -49,8 +64,24 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<Decision, Box<dyn std::error::Error>> {
+fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
     match cli.command {
+        Commands::Runs {
+            database,
+            limit,
+            compact,
+        } => {
+            write_json(&Alpine::list_runs(&database, limit)?, compact)?;
+            Ok(0)
+        }
+        Commands::Evidence {
+            run_id,
+            database,
+            compact,
+        } => {
+            write_json(&Alpine::run_evidence(&database, &run_id)?, compact)?;
+            Ok(0)
+        }
         Commands::Resolve {
             install_root,
             profile,
@@ -60,7 +91,7 @@ fn run(cli: Cli) -> Result<Decision, Box<dyn std::error::Error>> {
             let resolved =
                 Alpine::resolve_session(&install_root, profile.as_deref(), !allow_missing_runtime)?;
             write_json(&resolved, compact)?;
-            Ok(Decision::Qualified)
+            Ok(0)
         }
         Commands::Inspect {
             envelope,
@@ -69,12 +100,12 @@ fn run(cli: Cli) -> Result<Decision, Box<dyn std::error::Error>> {
         } => {
             let report = Alpine::inspect_support(&envelope, Duration::from_millis(timeout_ms))?;
             write_json(&report, compact)?;
-            Ok(report.decision)
+            Ok(report.decision.exit_code())
         }
         Commands::Qualify { request, compact } => {
             let report = Alpine::qualify(&request)?;
             write_json(&report, compact)?;
-            Ok(report.decision)
+            Ok(report.decision.exit_code())
         }
     }
 }
@@ -85,6 +116,10 @@ fn default_install_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("local-models")
+}
+
+fn default_database() -> PathBuf {
+    PathBuf::from("results/results.sqlite3")
 }
 
 fn write_json(value: &impl serde::Serialize, compact: bool) -> Result<(), serde_json::Error> {

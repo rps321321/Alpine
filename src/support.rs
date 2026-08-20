@@ -1,10 +1,9 @@
 use crate::decision::Decision;
+use crate::identity::sha256_bytes;
 use crate::process::{resolve_executable, run_bounded};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fmt::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -133,7 +132,7 @@ pub fn inspect(
     Ok(SupportReport {
         schema: 1,
         envelope_id: envelope.id.clone(),
-        envelope_sha256: hex_sha256(envelope_bytes),
+        envelope_sha256: sha256_bytes(envelope_bytes),
         host,
         decision,
         reasons,
@@ -187,7 +186,7 @@ fn probe(id: ProbeId, required: bool, timeout: Duration) -> ProbeResult {
                     ProbeStatus::Failed
                 },
                 executable: Some(executable.display().to_string()),
-                output_sha256: Some(hex_sha256(combined.as_bytes())),
+                output_sha256: Some(sha256_bytes(combined.as_bytes())),
                 summary: combined
                     .lines()
                     .find(|line| !line.trim().is_empty())
@@ -215,15 +214,6 @@ pub fn read_envelope(path: &Path) -> Result<(SupportEnvelope, Vec<u8>), String> 
     let envelope = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid Support Envelope {}: {error}", path.display()))?;
     Ok((envelope, bytes))
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
 }
 
 #[cfg(test)]

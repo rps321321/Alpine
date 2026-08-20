@@ -1,10 +1,14 @@
 mod config;
 mod decision;
+mod evidence;
+mod identity;
 mod process;
 mod qualification;
 mod support;
 
+pub use config::{Profile, ProfileStatus, ResolvedSession, SessionConfig};
 pub use decision::Decision;
+pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use qualification::{QualificationReport, QualificationRequest};
 pub use support::{SupportEnvelope, SupportReport};
 
@@ -21,6 +25,21 @@ pub enum AlpineError {
 pub struct Alpine;
 
 impl Alpine {
+    pub fn list_runs(database: &Path, limit: u32) -> Result<Vec<RunSummary>, AlpineError> {
+        let store =
+            evidence::EvidenceStore::open_read_only(database).map_err(AlpineError::InvalidInput)?;
+        store.list_runs(limit).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn run_evidence(database: &Path, id: &str) -> Result<RunEvidence, AlpineError> {
+        let store =
+            evidence::EvidenceStore::open_read_only(database).map_err(AlpineError::InvalidInput)?;
+        store
+            .run(id)
+            .map_err(AlpineError::InvalidInput)?
+            .ok_or_else(|| AlpineError::InvalidInput(format!("evidence run not found: {id}")))
+    }
+
     pub fn resolve_session(
         install_root: &Path,
         profile: Option<&str>,
@@ -39,4 +58,3 @@ impl Alpine {
         qualification::qualify(&request).map_err(AlpineError::InvalidInput)
     }
 }
-pub use config::{Profile, ProfileStatus, ResolvedSession, SessionConfig};

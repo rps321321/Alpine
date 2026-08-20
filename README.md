@@ -12,6 +12,15 @@ Resolve and validate the generated Session Config and selected Profile without P
 cargo run --bin alpine -- resolve
 ```
 
+List existing experiment runs and inspect one run's identity-bound evidence directly from the SQLite store:
+
+```powershell
+cargo run --bin alpine -- runs --limit 10
+cargo run --bin alpine -- evidence 20260819T232908Z-0b18494a
+```
+
+These commands open the legacy database read-only during migration. Missing identity dimensions are reported explicitly; old evidence is not retroactively upgraded or treated as qualification proof.
+
 Inspect the host against the versioned Support Envelope:
 
 ```powershell
