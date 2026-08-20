@@ -30,7 +30,10 @@ pub use session::{
     ReleaseSessionReport, SessionAcquisition, SessionAction, SessionSnapshot, SessionStatus,
     StartSessionOptions, StartSessionReport, StopSessionOptions, StopSessionReport,
 };
-pub use stability::{SameProcessStabilityOptions, SameProcessStabilityReport};
+pub use stability::{
+    CleanRestartStabilityOptions, CleanRestartStabilityReport, SameProcessStabilityOptions,
+    SameProcessStabilityReport,
+};
 pub use support::{SupportEnvelope, SupportReport};
 pub use tuning::{TuningDisposition, TuningOptions, TuningReport};
 
@@ -151,5 +154,11 @@ impl Alpine {
         options: &SameProcessStabilityOptions,
     ) -> Result<SameProcessStabilityReport, AlpineError> {
         stability::run_same_process(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn run_clean_restart_stability(
+        options: &CleanRestartStabilityOptions,
+    ) -> Result<CleanRestartStabilityReport, AlpineError> {
+        stability::run_clean_restarts(options).map_err(AlpineError::InvalidInput)
     }
 }

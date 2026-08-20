@@ -103,6 +103,26 @@ pub(crate) struct SameProcessStabilityEvidence {
     pub restored_prior_session: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RestartRequestEvidence {
+    pub sequence: u32,
+    pub process: ProcessEvidence,
+    pub prompt_sha256: String,
+    pub token_sha256: String,
+    pub tokens: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CleanRestartStabilityEvidence {
+    pub schema: u32,
+    pub profile: String,
+    pub request_contract: StabilityRequestContract,
+    pub restarts: Vec<RestartRequestEvidence>,
+    pub restored_prior_session: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RecordExternalEvidenceOptions {
     pub(crate) repository_root: PathBuf,
@@ -530,10 +550,7 @@ fn validate_semantics(
             validate_same_process(&payload.evidence)?;
         }
         ExternalEvidenceKind::TenCleanRestartGreedyStability => {
-            require_u64(&payload.evidence, "/clean_restarts", 10)?;
-            require_u64(&payload.evidence, "/unique_output_hashes", 1)?;
-            require_u64(&payload.evidence, "/unique_process_identities", 10)?;
-            require_true(&payload.evidence, "/restored_prior_session")?;
+            validate_clean_restarts(&payload.evidence)?;
         }
         ExternalEvidenceKind::NearLimitContextStress => {
             let ratio = number(&payload.evidence, "/ratio")?;
@@ -658,6 +675,71 @@ fn validate_same_process(value: &Value) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn validate_clean_restarts(value: &Value) -> Result<(), String> {
+    let evidence: CleanRestartStabilityEvidence = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid clean-restart evidence: {error}"))?;
+    if evidence.schema != 1
+        || evidence.profile.trim().is_empty()
+        || !evidence.restored_prior_session
+        || evidence.restarts.len() != 10
+    {
+        return Err(
+            "clean-restart evidence requires ten records and exact prior restoration".to_owned(),
+        );
+    }
+    let contract = &evidence.request_contract;
+    if !is_sha256(&contract.target_prompt_sha256)
+        || contract.target_n_predict < 128
+        || contract.contaminant_n_predict != 0
+        || contract.temperature != 0.0
+        || contract.top_k != 1
+        || contract.seed != 42
+        || !contract.ignore_eos
+        || contract.cache_prompt
+        || !contract.return_tokens
+    {
+        return Err("clean-restart request contract is weaker than the versioned gate".to_owned());
+    }
+    let mut process_identities = std::collections::BTreeSet::new();
+    let mut token_hashes = std::collections::BTreeSet::new();
+    for (offset, restart) in evidence.restarts.iter().enumerate() {
+        let expected_sequence = u32::try_from(offset + 1)
+            .map_err(|_| "clean-restart request sequence overflow".to_owned())?;
+        if restart.sequence != expected_sequence
+            || restart.prompt_sha256 != contract.target_prompt_sha256
+            || !valid_process(&restart.process)
+            || !is_sha256(&restart.token_sha256)
+            || restart.tokens.len() != contract.target_n_predict as usize
+        {
+            return Err("clean-restart record has an invalid sequence or identity".to_owned());
+        }
+        let token_bytes = serde_json::to_vec(&restart.tokens)
+            .map_err(|error| format!("failed to encode restart tokens: {error}"))?;
+        if sha256_bytes(&token_bytes) != restart.token_sha256 {
+            return Err("clean-restart token digest does not match raw tokens".to_owned());
+        }
+        process_identities.insert((
+            restart.process.pid,
+            restart.process.process_start_epoch_secs,
+            restart.process.session_identity.clone(),
+        ));
+        token_hashes.insert(restart.token_sha256.clone());
+    }
+    if process_identities.len() != 10 || token_hashes.len() != 1 {
+        return Err(
+            "clean-restart evidence requires ten unique processes and one target token hash"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn valid_process(process: &ProcessEvidence) -> bool {
+    process.pid != 0
+        && process.process_start_epoch_secs != 0
+        && is_session_identity(&process.session_identity)
 }
 
 fn complete_identity(run: &RunEvidence) -> Result<EvidenceIdentity, String> {
@@ -876,6 +958,41 @@ mod tests {
         }
     }
 
+    fn clean_restarts() -> CleanRestartStabilityEvidence {
+        let target_prompt_sha256 = "b".repeat(64);
+        let tokens = vec![7; 128];
+        let token_sha256 = sha256_bytes(&serde_json::to_vec(&tokens).unwrap());
+        CleanRestartStabilityEvidence {
+            schema: 1,
+            profile: "turbo-16k".to_owned(),
+            request_contract: StabilityRequestContract {
+                target_prompt_sha256: target_prompt_sha256.clone(),
+                target_n_predict: 128,
+                contaminant_n_predict: 0,
+                temperature: 0.0,
+                top_k: 1,
+                seed: 42,
+                ignore_eos: true,
+                cache_prompt: false,
+                return_tokens: true,
+            },
+            restarts: (1..=10_u32)
+                .map(|sequence| RestartRequestEvidence {
+                    sequence,
+                    process: ProcessEvidence {
+                        pid: 100 + sequence,
+                        process_start_epoch_secs: 1000 + u64::from(sequence),
+                        session_identity: format!("{sequence:032x}"),
+                    },
+                    prompt_sha256: target_prompt_sha256.clone(),
+                    token_sha256: token_sha256.clone(),
+                    tokens: tokens.clone(),
+                })
+                .collect(),
+            restored_prior_session: true,
+        }
+    }
+
     #[test]
     fn same_process_gate_recomputes_raw_token_and_sequence_evidence() {
         let valid = serde_json::to_value(same_process()).unwrap();
@@ -892,5 +1009,21 @@ mod tests {
         let mut changed_process = same_process();
         changed_process.process_after.pid += 1;
         assert!(validate_same_process(&serde_json::to_value(changed_process).unwrap()).is_err());
+    }
+
+    #[test]
+    fn restart_gate_recomputes_process_and_token_evidence() {
+        let valid = serde_json::to_value(clean_restarts()).unwrap();
+        assert!(validate_clean_restarts(&valid).is_ok());
+
+        let mut reused = clean_restarts();
+        reused.restarts[1].process = reused.restarts[0].process.clone();
+        assert!(validate_clean_restarts(&serde_json::to_value(reused).unwrap()).is_err());
+
+        let mut divergent = clean_restarts();
+        divergent.restarts[1].tokens[0] = 8;
+        divergent.restarts[1].token_sha256 =
+            sha256_bytes(&serde_json::to_vec(&divergent.restarts[1].tokens).unwrap());
+        assert!(validate_clean_restarts(&serde_json::to_value(divergent).unwrap()).is_err());
     }
 }

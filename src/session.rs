@@ -439,9 +439,24 @@ pub fn start(options: &StartSessionOptions) -> Result<StartSessionReport, String
     let capacity_path = resolved.install_root.join("logs/inference.lease");
     let _capacity = InterprocessLock::acquire(&capacity_path, options.lock_timeout)
         .map_err(|error| format!("inference capacity is unavailable: {error}"))?;
+    start_under_capacity_resolved(&resolved, options)
+}
+
+pub(crate) fn start_under_capacity(
+    options: &StartSessionOptions,
+) -> Result<StartSessionReport, String> {
+    validate_startup_timeout(options.startup_timeout)?;
+    let resolved = config::resolve(&options.install_root, options.profile.as_deref(), true)?;
+    start_under_capacity_resolved(&resolved, options)
+}
+
+fn start_under_capacity_resolved(
+    resolved: &ResolvedSession,
+    options: &StartSessionOptions,
+) -> Result<StartSessionReport, String> {
     let session_lock_path = lock_path(&resolved.state_file, ".session.lock");
     let _session_lock = InterprocessLock::acquire(&session_lock_path, options.lock_timeout)?;
-    start_locked_with(&resolved, options, &SystemPlatform)
+    start_locked_with(resolved, options, &SystemPlatform)
 }
 
 fn start_locked_with<P: SessionPlatform>(
@@ -741,9 +756,23 @@ pub fn stop(options: &StopSessionOptions) -> Result<StopSessionReport, String> {
     let capacity_path = resolved.install_root.join("logs/inference.lease");
     let _capacity = InterprocessLock::acquire(&capacity_path, options.lock_timeout)
         .map_err(|error| format!("inference capacity is unavailable: {error}"))?;
+    stop_under_capacity_resolved(&resolved, options)
+}
+
+pub(crate) fn stop_under_capacity(
+    options: &StopSessionOptions,
+) -> Result<StopSessionReport, String> {
+    let resolved = config::resolve(&options.install_root, None, false)?;
+    stop_under_capacity_resolved(&resolved, options)
+}
+
+fn stop_under_capacity_resolved(
+    resolved: &ResolvedSession,
+    options: &StopSessionOptions,
+) -> Result<StopSessionReport, String> {
     let session_lock_path = lock_path(&resolved.state_file, ".session.lock");
     let _session_lock = InterprocessLock::acquire(&session_lock_path, options.lock_timeout)?;
-    stop_locked_with(&resolved, options, &SystemPlatform)
+    stop_locked_with(resolved, options, &SystemPlatform)
 }
 
 fn stop_locked_with<P: SessionPlatform>(
@@ -1031,6 +1060,56 @@ pub(crate) fn snapshot_under_capacity(
     let session_lock_path = lock_path(&resolved.state_file, ".session.lock");
     let _session_lock = InterprocessLock::acquire(&session_lock_path, lock_timeout)?;
     capture_snapshot(&resolved, lock_timeout, &SystemPlatform)
+}
+
+pub(crate) fn restore_snapshot_under_capacity(
+    install_root: &Path,
+    snapshot: &SessionSnapshot,
+    lock_timeout: Duration,
+    startup_timeout: Duration,
+) -> Result<(), String> {
+    validate_startup_timeout(startup_timeout)?;
+    ensure_snapshot_restorable(install_root, snapshot)?;
+    let resolved = config::resolve(install_root, None, false)?;
+    let session_lock_path = lock_path(&resolved.state_file, ".session.lock");
+    let _session_lock = InterprocessLock::acquire(&session_lock_path, lock_timeout)?;
+    let current = status_locked_with(&resolved, lock_timeout, &SystemPlatform)?;
+    if current.foreign {
+        return Err("cannot restore the prior Session over a foreign listener".to_owned());
+    }
+    stop_locked_with(
+        &resolved,
+        &StopSessionOptions {
+            install_root: resolved.install_root.clone(),
+            lock_timeout,
+            allow_legacy_identity: true,
+        },
+        &SystemPlatform,
+    )?;
+    restore_snapshot(
+        &resolved.install_root,
+        snapshot,
+        lock_timeout,
+        startup_timeout,
+        &SystemPlatform,
+    )?;
+    let observed = capture_snapshot(&resolved, lock_timeout, &SystemPlatform)?;
+    if snapshots_materially_equal(&observed, snapshot) {
+        Ok(())
+    } else {
+        Err("restored Session does not match the exact prior snapshot".to_owned())
+    }
+}
+
+pub(crate) fn snapshots_materially_equal(left: &SessionSnapshot, right: &SessionSnapshot) -> bool {
+    left.active == right.active
+        && left.healthy == right.healthy
+        && left.profile == right.profile
+        && left.vision == right.vision
+        && left.runtime == right.runtime
+        && left.fallback == right.fallback
+        && left.arguments == right.arguments
+        && left.environment == right.environment
 }
 
 fn release_locked_with<P: SessionPlatform>(
@@ -3122,6 +3201,26 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn material_snapshot_comparison_allows_a_new_transaction_identity_only() {
+        let mut left = SessionSnapshot {
+            active: true,
+            healthy: true,
+            profile: "stable-16k".to_owned(),
+            vision: false,
+            runtime: "official".to_owned(),
+            fallback: None,
+            arguments: vec!["--threads".to_owned(), "16".to_owned()],
+            environment: BTreeMap::new(),
+            session_identity: Some("old".to_owned()),
+        };
+        let mut right = left.clone();
+        right.session_identity = Some("new".to_owned());
+        assert!(snapshots_materially_equal(&left, &right));
+        left.arguments.push("--changed".to_owned());
+        assert!(!snapshots_materially_equal(&left, &right));
     }
 
     fn acquire_options(root: &Path, profile: &str, vision: bool) -> AcquireSessionOptions {

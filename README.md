@@ -81,7 +81,10 @@ Run the Rust-owned same-process stability gate against the exact passed final ru
 
 ```powershell
 cargo run --release --bin alpine -- same-process-stability <final-run-id>
+cargo run --release --bin alpine -- clean-restart-stability <final-run-id>
 ```
+
+The restart gate performs ten actual stop/start cycles under the same exclusive lease, requires ten distinct PID/start/transaction identities, compares the raw 128-token greedy output from every process, and restores the materially exact prior profile, arguments, environment and fallback mode.
 
 Only the explicitly human production review uses manual attachment:
 
