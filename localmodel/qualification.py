@@ -52,18 +52,18 @@ def qualify_summary(summary: dict[str, Any], target: str = "candidate") -> dict[
     add("required-workloads", not missing_workloads, sorted(present), sorted(required_workloads))
 
     minimum = int(gate.get("minimum_measured_samples_per_workload", 0))
-    max_cv = float(gate.get("maximum_decode_coefficient_of_variation", math.inf))
+    max_cv = float(gate.get("maximum_performance_coefficient_of_variation", math.inf))
+    metrics = gate.get("performance_metric_by_workload", {})
     for name, workload in sorted(summary.get("workloads", {}).items()):
-        decode = workload.get("decode_tps", {})
-        prefill = workload.get("prefill_tps", {})
-        distribution = decode if (decode.get("mean") or 0) > 0 else prefill
-        metric = "decode" if distribution is decode else "prefill"
+        metric = metrics.get(name)
+        distribution = workload.get(metric.replace("-", "_"), {}) if isinstance(metric, str) else {}
+        metric_label = metric.removesuffix("-tps") if isinstance(metric, str) else "missing"
         count = int(distribution.get("n") or 0)
         add(f"{name}:sample-count", count >= minimum, count, f">={minimum}")
         mean = distribution.get("mean")
         stdev = distribution.get("stdev")
         cv = None if not mean else float(stdev or 0.0) / float(mean)
-        add(f"{name}:{metric}-cv", cv is not None and cv <= max_cv, cv, f"<={max_cv}")
+        add(f"{name}:{metric_label}-cv", cv is not None and cv <= max_cv, cv, f"<={max_cv}")
 
     missing = gate.get("requires_external_evidence", [])
     return {

@@ -138,7 +138,7 @@ fn write_repository(root: &Path) {
     std::fs::write(
         root.join("config/promotion-policy.json"),
         serde_json::to_vec(&json!({
-            "schema": 2,
+            "schema": 3,
             "lifecycle": ["experimental", "candidate", "validated", "production"],
             "gates": {
                 "candidate": {
@@ -146,7 +146,8 @@ fn write_repository(root: &Path) {
                     "minimum_measured_samples_per_workload": 1,
                     "require_quality_pass": true,
                     "require_deterministic_outputs": true,
-                    "maximum_decode_coefficient_of_variation": 0.10,
+                    "performance_metric_by_workload": {"fixture": "decode-tps"},
+                    "maximum_performance_coefficient_of_variation": 0.10,
                     "maximum_median_performance_regression_fraction": 0.10,
                     "minimum_tuning_selection_improvement_fraction": 0.03
                 },

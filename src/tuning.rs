@@ -2,7 +2,7 @@ use crate::evidence::{EvidenceStore, MeasuredSample, StoredIdentity};
 use crate::experiment::current_microbenchmark_identity;
 use crate::identity::{sha256_bytes, sha256_file};
 use crate::qualification::{
-    EvidencePhase, current_hardware_identity, material_configuration_sha256,
+    EvidencePhase, PerformanceMetric, current_hardware_identity, material_configuration_sha256,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,7 +64,8 @@ struct Gate {
     minimum_measured_samples_per_workload: Option<u32>,
     require_quality_pass: Option<bool>,
     require_deterministic_outputs: Option<bool>,
-    maximum_decode_coefficient_of_variation: Option<f64>,
+    performance_metric_by_workload: Option<BTreeMap<String, PerformanceMetric>>,
+    maximum_performance_coefficient_of_variation: Option<f64>,
     maximum_median_performance_regression_fraction: Option<f64>,
     minimum_tuning_selection_improvement_fraction: Option<f64>,
     #[serde(default)]
@@ -74,6 +75,7 @@ struct Gate {
 #[derive(Clone)]
 struct SelectionPolicy {
     required_workloads: Vec<String>,
+    performance_metrics: BTreeMap<String, PerformanceMetric>,
     minimum_samples: usize,
     maximum_cv: f64,
     maximum_regression: f64,
@@ -323,6 +325,11 @@ fn evaluate_run(
     let groups = group_samples(&samples);
     let mut medians = BTreeMap::new();
     for workload in &policy.required_workloads {
+        let metric = policy
+            .performance_metrics
+            .get(workload)
+            .copied()
+            .ok_or_else(|| format!("performance metric is missing for {workload}"))?;
         let rows = groups.get(workload.as_str()).cloned().unwrap_or_default();
         if rows.len() < policy.minimum_samples {
             reasons.push(format!(
@@ -348,15 +355,19 @@ fn evaluate_run(
         {
             reasons.push(format!("{workload} output is not deterministic"));
         }
-        let Some(values) = decode_distribution(&rows) else {
+        let Some(values) = performance_distribution(&rows, metric) else {
             reasons.push(format!(
-                "{workload} decode measurements are incomplete or invalid"
+                "{workload} {} measurements are incomplete or invalid",
+                metric.label()
             ));
             continue;
         };
         let cv = coefficient_of_variation(&values);
         if cv.is_none_or(|value| value > policy.maximum_cv) {
-            reasons.push(format!("{workload} decode variability exceeds policy"));
+            reasons.push(format!(
+                "{workload} {} variability exceeds policy",
+                metric.label()
+            ));
         }
         medians.insert(workload.clone(), median(&values));
     }
@@ -380,7 +391,7 @@ fn evaluate_run(
 }
 
 fn selection_policy(policy: &Policy) -> Result<SelectionPolicy, String> {
-    if policy.schema != 2
+    if policy.schema != 3
         || policy.lifecycle != ["experimental", "candidate", "validated", "production"]
     {
         return Err("unsupported promotion policy lifecycle or schema".to_owned());
@@ -407,9 +418,18 @@ fn selection_policy(policy: &Policy) -> Result<SelectionPolicy, String> {
     if gate.require_quality_pass != Some(true) || gate.require_deterministic_outputs != Some(true) {
         return Err("tuning requires explicit quality and determinism gates".to_owned());
     }
+    let performance_metrics = gate
+        .performance_metric_by_workload
+        .clone()
+        .ok_or_else(|| "candidate performance metric map is missing".to_owned())?;
+    if performance_metrics.keys().collect::<BTreeSet<_>>()
+        != workloads.iter().collect::<BTreeSet<_>>()
+    {
+        return Err("candidate performance metric keys must match required workloads".to_owned());
+    }
     let maximum_cv = finite_fraction(
-        gate.maximum_decode_coefficient_of_variation,
-        "maximum decode coefficient of variation",
+        gate.maximum_performance_coefficient_of_variation,
+        "maximum performance coefficient of variation",
     )?;
     let maximum_regression = finite_fraction(
         gate.maximum_median_performance_regression_fraction,
@@ -421,6 +441,7 @@ fn selection_policy(policy: &Policy) -> Result<SelectionPolicy, String> {
     )?;
     Ok(SelectionPolicy {
         required_workloads: workloads,
+        performance_metrics,
         minimum_samples,
         maximum_cv,
         maximum_regression,
@@ -458,10 +479,16 @@ fn group_samples(samples: &[MeasuredSample]) -> BTreeMap<&str, Vec<&MeasuredSamp
     groups
 }
 
-fn decode_distribution(samples: &[&MeasuredSample]) -> Option<Vec<f64>> {
+fn performance_distribution(
+    samples: &[&MeasuredSample],
+    metric: PerformanceMetric,
+) -> Option<Vec<f64>> {
     let values = samples
         .iter()
-        .map(|sample| sample.decode_tps)
+        .map(|sample| match metric {
+            PerformanceMetric::PrefillTps => sample.prefill_tps,
+            PerformanceMetric::DecodeTps => sample.decode_tps,
+        })
         .collect::<Option<Vec<_>>>()?;
     (!values.is_empty() && values.iter().all(|value| value.is_finite() && *value > 0.0))
         .then_some(values)
@@ -541,6 +568,10 @@ mod tests {
             output_sha256: Some("a".repeat(64)),
             quality_pass: Some(true),
         };
-        assert!(decode_distribution(&[&sample]).is_none());
+        assert!(performance_distribution(&[&sample], PerformanceMetric::DecodeTps).is_none());
+        assert_eq!(
+            performance_distribution(&[&sample], PerformanceMetric::PrefillTps),
+            Some(vec![100.0])
+        );
     }
 }

@@ -59,7 +59,7 @@ Rank bounded tuning candidates without mutating the installation:
 cargo run --release --bin alpine -- tune --baseline-run <baseline-tuning-run-id> --candidate-run <candidate-tuning-run-id>
 ```
 
-Tuning holds hardware, Alpine binary, model, workload suite and policy constant while treating runtime and material configuration as search dimensions. Every candidate must pass row-level quality, deterministic-output, sample-count and decode-variability gates. A candidate is recommended only if its equally weighted geometric-mean decode score clears the versioned improvement threshold without violating any per-workload regression floor; otherwise Alpine explicitly retains the baseline.
+Tuning holds hardware, Alpine binary, model, workload suite and policy constant while treating runtime and material configuration as search dimensions. Every candidate must pass row-level quality, deterministic-output, sample-count and variability gates using the metric explicitly assigned to each workload by policy. A candidate is recommended only if its equally weighted geometric-mean performance score clears the versioned improvement threshold without violating any per-workload regression floor; otherwise Alpine explicitly retains the baseline.
 
 Inspect the host against the versioned Support Envelope:
 

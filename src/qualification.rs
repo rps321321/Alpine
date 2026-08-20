@@ -133,11 +133,28 @@ struct PromotionGate {
     minimum_measured_samples_per_workload: Option<u32>,
     require_quality_pass: Option<bool>,
     require_deterministic_outputs: Option<bool>,
-    maximum_decode_coefficient_of_variation: Option<f64>,
+    performance_metric_by_workload: Option<BTreeMap<String, PerformanceMetric>>,
+    maximum_performance_coefficient_of_variation: Option<f64>,
     maximum_median_performance_regression_fraction: Option<f64>,
     minimum_tuning_selection_improvement_fraction: Option<f64>,
     #[serde(default)]
     requires_external_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PerformanceMetric {
+    PrefillTps,
+    DecodeTps,
+}
+
+impl PerformanceMetric {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::PrefillTps => "prefill_tps",
+            Self::DecodeTps => "decode_tps",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -580,8 +597,12 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
     not_proven |= !current_install;
 
     let required_workloads = gate.required_workloads.clone().unwrap_or_default();
+    let performance_metrics = gate
+        .performance_metric_by_workload
+        .clone()
+        .unwrap_or_default();
     let minimum_samples = gate.minimum_measured_samples_per_workload.unwrap_or(0);
-    let maximum_cv = gate.maximum_decode_coefficient_of_variation;
+    let maximum_cv = gate.maximum_performance_coefficient_of_variation;
     let maximum_regression = gate.maximum_median_performance_regression_fraction;
     let final_groups = group_samples(&final_run.samples);
     let tuning_samples = tuning_runs
@@ -635,6 +656,10 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
     }
 
     for workload in &required_workloads {
+        let metric = performance_metrics
+            .get(workload)
+            .copied()
+            .ok_or_else(|| format!("performance metric is missing for {workload}"))?;
         let final_rows = final_groups
             .get(workload.as_str())
             .cloned()
@@ -707,7 +732,7 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
             not_proven |= final_rows.is_empty();
         }
 
-        let final_distribution = performance_distribution(&final_rows);
+        let final_distribution = performance_distribution(&final_rows, metric);
         if let Some(limit) = maximum_cv {
             let cv = final_distribution
                 .as_ref()
@@ -731,7 +756,7 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
             .get(workload.as_str())
             .cloned()
             .unwrap_or_default();
-        let tuning_distribution = performance_distribution(&tuning_rows);
+        let tuning_distribution = performance_distribution(&tuning_rows, metric);
         let comparison = final_distribution
             .as_ref()
             .zip(tuning_distribution.as_ref())
@@ -1023,15 +1048,15 @@ fn inherited_gate(
     policy: &PromotionPolicy,
     target: QualificationTarget,
 ) -> Result<PromotionGate, String> {
-    if policy.schema != 2 {
+    if policy.schema != 3 {
         return Err(format!(
-            "unsupported promotion policy schema {}; expected 2",
+            "unsupported promotion policy schema {}; expected 3",
             policy.schema
         ));
     }
     if policy.lifecycle != ["experimental", "candidate", "validated", "production"] {
         return Err(
-            "promotion policy schema 2 lifecycle must be experimental, candidate, validated, production"
+            "promotion policy schema 3 lifecycle must be experimental, candidate, validated, production"
                 .to_owned(),
         );
     }
@@ -1070,9 +1095,12 @@ fn inherited_gate(
         if gate.require_deterministic_outputs.is_some() {
             merged.require_deterministic_outputs = gate.require_deterministic_outputs;
         }
-        if gate.maximum_decode_coefficient_of_variation.is_some() {
-            merged.maximum_decode_coefficient_of_variation =
-                gate.maximum_decode_coefficient_of_variation;
+        if gate.performance_metric_by_workload.is_some() {
+            merged.performance_metric_by_workload = gate.performance_metric_by_workload;
+        }
+        if gate.maximum_performance_coefficient_of_variation.is_some() {
+            merged.maximum_performance_coefficient_of_variation =
+                gate.maximum_performance_coefficient_of_variation;
         }
         if gate
             .maximum_median_performance_regression_fraction
@@ -1109,8 +1137,15 @@ fn inherited_gate(
     if merged.require_quality_pass.is_none() || merged.require_deterministic_outputs.is_none() {
         return Err("quality and determinism policy requirements must be explicit".to_owned());
     }
+    let metrics = merged
+        .performance_metric_by_workload
+        .as_ref()
+        .ok_or_else(|| "performance metrics must be explicit for every workload".to_owned())?;
+    if metrics.keys().collect::<BTreeSet<_>>() != workloads.iter().collect::<BTreeSet<_>>() {
+        return Err("performance metric keys must exactly match required workloads".to_owned());
+    }
     if merged
-        .maximum_decode_coefficient_of_variation
+        .maximum_performance_coefficient_of_variation
         .is_none_or(|value| !value.is_finite() || value < 0.0)
     {
         return Err("maximum coefficient of variation must be finite and non-negative".to_owned());
@@ -1145,13 +1180,19 @@ fn group_samples(samples: &[MeasuredSample]) -> BTreeMap<&str, Vec<&MeasuredSamp
     groups
 }
 
-fn performance_distribution(samples: &[&MeasuredSample]) -> Option<(&'static str, Vec<f64>)> {
-    let decode = samples
+fn performance_distribution(
+    samples: &[&MeasuredSample],
+    metric: PerformanceMetric,
+) -> Option<(&'static str, Vec<f64>)> {
+    let values = samples
         .iter()
-        .map(|sample| sample.decode_tps)
+        .map(|sample| match metric {
+            PerformanceMetric::PrefillTps => sample.prefill_tps,
+            PerformanceMetric::DecodeTps => sample.decode_tps,
+        })
         .collect::<Option<Vec<_>>>()?;
-    (!decode.is_empty() && decode.iter().all(|value| value.is_finite() && *value > 0.0))
-        .then_some(("decode_tps", decode))
+    (!values.is_empty() && values.iter().all(|value| value.is_finite() && *value > 0.0))
+        .then_some((metric.label(), values))
 }
 
 fn coefficient_of_variation(values: &[f64]) -> Option<f64> {
@@ -1334,7 +1375,7 @@ mod tests {
 
     fn promotion_policy() -> PromotionPolicy {
         serde_json::from_value(json!({
-            "schema": 2,
+            "schema": 3,
             "lifecycle": ["experimental", "candidate", "validated", "production"],
             "gates": {
                 "candidate": {
@@ -1342,7 +1383,8 @@ mod tests {
                     "minimum_measured_samples_per_workload": 2,
                     "require_quality_pass": true,
                     "require_deterministic_outputs": true,
-                    "maximum_decode_coefficient_of_variation": 0.1,
+                    "performance_metric_by_workload": {"fixture": "decode-tps"},
+                    "maximum_performance_coefficient_of_variation": 0.1,
                     "maximum_median_performance_regression_fraction": 0.1,
                     "minimum_tuning_selection_improvement_fraction": 0.03
                 },
@@ -1366,7 +1408,7 @@ mod tests {
         assert!(inherited_gate(&missing, QualificationTarget::Candidate).is_err());
 
         let unknown = serde_json::from_value::<PromotionPolicy>(json!({
-            "schema": 2,
+            "schema": 3,
             "lifecycle": ["experimental", "candidate", "validated", "production"],
             "gates": {
                 "candidate": {
@@ -1374,7 +1416,8 @@ mod tests {
                     "minimum_measured_samples_per_workload": 2,
                     "require_quality_pass": true,
                     "require_deterministic_outputs": true,
-                    "maximum_decode_coefficient_of_variation": 0.1,
+                    "performance_metric_by_workload": {"fixture": "decode-tps"},
+                    "maximum_performance_coefficient_of_variation": 0.1,
                     "maximum_median_performance_regression_fraction": 0.1,
                     "minimum_tuning_selection_improvement_fraction": 0.03,
                     "maximum_typo": 0.1
@@ -1394,7 +1437,13 @@ mod tests {
             output_sha256: Some("a".repeat(64)),
             quality_pass: Some(true),
         };
-        assert!(performance_distribution(&[&sample]).is_none());
+        assert!(performance_distribution(&[&sample], PerformanceMetric::DecodeTps).is_none());
+        assert_eq!(
+            performance_distribution(&[&sample], PerformanceMetric::PrefillTps)
+                .unwrap()
+                .1,
+            vec![100.0]
+        );
         assert_eq!(coefficient_of_variation(&[10.0, 10.0]), Some(0.0));
     }
 }

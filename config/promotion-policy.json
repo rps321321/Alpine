@@ -1,5 +1,5 @@
 {
-  "schema": 2,
+  "schema": 3,
   "lifecycle": ["experimental", "candidate", "validated", "production"],
   "gates": {
     "candidate": {
@@ -7,7 +7,13 @@
       "minimum_measured_samples_per_workload": 5,
       "require_quality_pass": true,
       "require_deterministic_outputs": true,
-      "maximum_decode_coefficient_of_variation": 0.10,
+      "performance_metric_by_workload": {
+        "prefill-4k": "prefill-tps",
+        "novel-256": "decode-tps",
+        "repeat-code-256": "decode-tps",
+        "structured-json-128": "decode-tps"
+      },
+      "maximum_performance_coefficient_of_variation": 0.10,
       "maximum_median_performance_regression_fraction": 0.10,
       "minimum_tuning_selection_improvement_fraction": 0.03
     },
