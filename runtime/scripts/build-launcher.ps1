@@ -36,9 +36,9 @@ if (-not $NoShortcut) {
     $shell = New-Object -ComObject WScript.Shell
     try {
         $items = @(
-            @('Open Local Qwen.lnk', '--profile stable-16k', 'Production local coding profile'),
+            @('Open Local Qwen.lnk', '', 'Current deployment daily default'),
             @('Open Local Qwen 32K.lnk', '--profile fast-32k', 'Candidate general agent profile'),
-            @('Open Local Qwen 16K Stable.lnk', '--profile stable-16k', 'Production rollback profile'),
+            @('Open Local Qwen 16K Stable.lnk', '--profile stable-16k', 'Known-good rollback profile override'),
             @('Open Local Qwen 16K Turbo.lnk', '--profile turbo-16k', 'Repetitive-code candidate profile'),
             @('Open Local Qwen 64K Long.lnk', '--profile long-64k', 'Experimental long-context profile'),
             @('Open Local Qwen Vision.lnk', '--profile fast-32k --vision', 'Vision profile')

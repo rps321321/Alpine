@@ -94,9 +94,10 @@ namespace LocalModelsLauncher
 
         private static ProcessStartInfo Interactive(string root, string alpine, string project, string[] args, string launchId)
         {
-            string profile = ValueAfter(args, "--profile") ?? "stable-16k";
             string options = "opencode --install-root " + Quote(root) + " --project " + Quote(project) +
-                " --profile " + Quote(profile) + " --launch-id " + Quote(launchId) + " --allow-legacy-identity";
+                " --launch-id " + Quote(launchId) + " --allow-legacy-identity";
+            string profile = ValueAfter(args, "--profile");
+            if (profile != null) options += " --profile " + Quote(profile);
             if (Has(args, "--vision")) options += " --vision";
             if (Has(args, "--lean")) options += " --lean";
             if (Has(args, "--full-prompt")) options += " --full-prompt";
@@ -115,12 +116,15 @@ namespace LocalModelsLauncher
 
         private static int RunCheck(string root, string alpine, string[] args)
         {
-            string profile = ValueAfter(args, "--profile") ?? "stable-16k";
             string launchId = Guid.NewGuid().ToString("N");
+            string options = "opencode --install-root " + Quote(root) + " --project " + Quote(root) +
+                " --launch-id " + Quote(launchId) + " --check" + (Has(args, "--lean") ? " --lean" : "");
+            string profile = ValueAfter(args, "--profile");
+            if (profile != null) options += " --profile " + Quote(profile);
             ProcessStartInfo start = new ProcessStartInfo
             {
                 FileName = alpine,
-                Arguments = "opencode --install-root " + Quote(root) + " --project " + Quote(root) + " --profile " + Quote(profile) + " --launch-id " + Quote(launchId) + " --check" + (Has(args, "--lean") ? " --lean" : ""),
+                Arguments = options,
                 WorkingDirectory = root,
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -264,7 +268,8 @@ namespace LocalModelsLauncher
 
         private static string SafeProfile(string[] args)
         {
-            string supplied = ValueAfter(args, "--profile") ?? "stable-16k";
+            string supplied = ValueAfter(args, "--profile");
+            if (supplied == null) return "<deployment-default>";
             foreach (string known in new[] { "stable-16k", "turbo-16k", "fast-32k", "long-64k" })
             {
                 if (string.Equals(supplied, known, StringComparison.OrdinalIgnoreCase)) return known;

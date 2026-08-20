@@ -3,7 +3,7 @@ use alpine_control_plane::{
     OperatorReviewOptions, QualificationTarget, RunQualificationOptions, TuningDisposition,
     TuningOptions, runtime_bundle_sha256,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
 use std::net::TcpListener;
@@ -11,6 +11,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use sysinfo::{Pid, System};
+
+fn capability_scenario(id: &str, category: &str) -> Value {
+    json!({
+        "id": id,
+        "category": category,
+        "task": format!("exercise {category}"),
+        "expected_capability": "the complete workflow behaves usefully and safely",
+        "observed_behavior": "the complete workflow behaved as expected",
+        "outcome": "pass",
+        "limitations": [],
+        "disposition": null,
+        "disposition_rationale": null,
+        "accepted_risk_ids": [],
+        "supporting_artifact_sha256": null
+    })
+}
 
 #[test]
 fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
@@ -134,7 +150,21 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
         result_root: results.clone(),
         anchor_run_id: report.run_id.clone(),
         evidence: json!({
-            "capability_review_passed": true
+            "schema": 1,
+            "reviewer_role": "integration-test-reviewer",
+            "scenarios": [
+                capability_scenario("trivial-conversation", "trivial-conversation"),
+                capability_scenario("repository-orientation", "repository-orientation"),
+                capability_scenario("diagnosis", "diagnosis"),
+                capability_scenario("scoped-code-change", "scoped-code-change"),
+                capability_scenario("longer-horizon-work", "longer-horizon-work"),
+                capability_scenario("web-research", "web-research"),
+                capability_scenario("permission-boundary", "permission-boundary"),
+                capability_scenario("session-lifecycle", "session-lifecycle")
+            ],
+            "accepted_residual_risks": [],
+            "final_decision": "approved",
+            "final_rationale": "all required capability categories passed"
         }),
         reviewed_by: "integration-test-reviewer".to_owned(),
     };
@@ -144,7 +174,7 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
         .expect("retry identical external evidence");
     assert_eq!(retried, recorded);
     let mut conflicting = evidence_options.clone();
-    conflicting.evidence["capability_review_passed"] = json!(false);
+    conflicting.evidence["final_decision"] = json!("rejected");
     assert!(Alpine::record_operator_review(&conflicting).is_err());
 
     let validated = Alpine::qualify_run(&validated_options).expect("satisfied validated gate");

@@ -6,7 +6,7 @@ Amended — 2026-08-19
 
 ## Decision
 
-This Git repository owns artifact pins, profiles, setup/build scripts, the launcher source, benchmark definitions, database schema, reports and ADRs. `%USERPROFILE%\local-models` is a generated machine-local installation containing large model artifacts, runtime bundles, logs, a random localhost API key and rendered Session Config.
+This Git repository owns artifact pins, profiles, setup/build scripts, the launcher source, benchmark definitions, database schema, reports and ADRs. `%USERPROFILE%\local-models` is the default generated machine-local installation containing large model artifacts, runtime bundles, logs, a random localhost API key and rendered Session Config.
 
 The initial Inference Session port is 8100, stored in rendered Session Config. Launch fails clearly if that port is occupied by a different executable; it does not kill the occupant. D: is a USB HDD and is not a weight store.
 

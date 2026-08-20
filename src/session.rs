@@ -2305,7 +2305,6 @@ fn system_powershell() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ProfileStatus;
     use serde_json::json;
     use std::cell::RefCell;
     use std::sync::Arc;
@@ -2495,7 +2494,6 @@ mod tests {
     fn fixture_profile() -> Profile {
         Profile {
             name: "turbo-16k".to_owned(),
-            status: ProfileStatus::Candidate,
             runtime: "custom".to_owned(),
             context: 16384,
             output: 4096,
@@ -2521,7 +2519,7 @@ mod tests {
             root: PathBuf::from(r"C:\fixture"),
             host: "127.0.0.1".to_owned(),
             port: 8100,
-            active_profile: "stable-16k".to_owned(),
+            active_profile: Some("stable-16k".to_owned()),
             runtimes: BTreeMap::new(),
             model: PathBuf::from(r"C:\fixture\model.gguf"),
             mmproj: PathBuf::from(r"C:\fixture\mmproj.gguf"),

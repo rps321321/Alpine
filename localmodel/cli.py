@@ -35,7 +35,7 @@ def cmd_profiles(_: argparse.Namespace) -> int:
         speculation = f"MTP{profile['mtp_depth']}"
         if profile.get("ngram_mod"):
             speculation += "+ngram(request-local)" if profile.get("ngram_reset_on_begin") else "+ngram(shared)"
-        print(f"{name:20} {profile['status']:22} {profile['context']:7} {profile['output']:7} 0-{profile['tensor_cpu_through_block']:<5} {speculation}")
+        print(f"{name:20} {'inference-only':22} {profile['context']:7} {profile['output']:7} 0-{profile['tensor_cpu_through_block']:<5} {speculation}")
     return 0
 
 

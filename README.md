@@ -15,7 +15,7 @@ This one Rust transaction checks the Support Envelope, measures the declared bas
 The production OpenCode workflow is a single Rust transaction. It verifies the effective 16K policy before loading the model, holds the inference-capacity lease for the complete interactive child lifetime, survives Ctrl-C long enough to restore the prior Session, and keeps an atomic crash-recovery journal:
 
 ```powershell
-cargo run --release --bin alpine -- opencode --profile stable-16k --project C:\path\to\project
+cargo run --release --bin alpine -- opencode --project C:\path\to\project
 ```
 
 The installed `Open Local Qwen.exe` is only a folder-picker Adapter for `alpine.exe opencode`; it does not own Session, policy, logging, or OpenCode behavior. `Open Minimal OpenCode.cmd` is a transparent fallback to that same Rust command.
@@ -107,15 +107,34 @@ The context gate uses the server tokenizer to construct a reproducible immutable
 
 The golden-agent gate copies the versioned fixture into an isolated temporary worktree, launches OpenCode directly from Rust with the reviewed minimal policy and a secret-scrubbed child environment, verifies the effective context/safety policy, runs the executable tests, rejects protected-path edits or unexpected files, binds the OpenCode executable hash, and restores the prior Session. It does not invoke the PowerShell launcher.
 
-The rollback proof transactionally switches to the pinned `stable-16k` production Profile, verifies its current Profile/Session/runtime identities, performs a real 16-token inference smoke, and restores the prior material Session before publishing evidence.
+The rollback proof transactionally switches to the configured `stable-16k` rollback Profile, verifies its current deployment role and Profile/Session/runtime identities, performs a real 16-token inference smoke, and restores the prior material Session before publishing evidence.
 
-Only the explicitly human production review uses manual attachment:
+Only the explicitly human production review uses manual attachment. The evidence file is the strict schema documented in `docs/CAPABILITY-REVIEW.md`, not a pass boolean:
 
 ```powershell
 cargo run --release --bin alpine -- record-evidence <final-run-id> --kind operator-reviewed-capability-report --evidence C:\path\to\review-details.json --reviewed-by "operator name"
 ```
 
 Automated evidence cannot be attached from caller-supplied summaries. The harness constructs the versioned envelope, copies the final run's seven-dimensional identity, binds it to the current Alpine executable, publishes it immutably, hashes it, and attaches that digest to SQLite. Qualification recomputes the 50/50 counts, ordering and token hashes from the raw records. Repeating an identical interrupted attachment is idempotent; conflicting or tampered artifacts fail closed. A human reviewer remains mandatory for the operator capability gate.
+
+Qualification does not mutate deployment. Omit `--profile` to use the append-only deployment `daily_default`; an explicit Profile is a one-session override. Promotion, rollback, and incident recording are separate commands:
+
+```powershell
+cargo run --release --bin alpine -- deployment-status
+cargo run --release --bin alpine -- promote --profile turbo-16k --expected-daily-default stable-16k --final-run-id <final> --tuning-run <baseline> --operator <operator> --reason <reason>
+cargo run --release --bin alpine -- rollback --expected-daily-default turbo-16k --promotion-event-id <event> --operator <operator> --reason <reason>
+cargo run --release --bin alpine -- incident --profile turbo-16k --promotion-event-id <event> --operator <operator> --reason <reason>
+```
+
+Promotion re-runs the complete production Qualification and refuses missing/stale human evidence or unresolved suspensions. Evaluation never promotes. See `docs/DEPLOYMENT.md`.
+
+Generate public structural evidence only through the allowlisted projection:
+
+```powershell
+cargo run --release --bin alpine -- public-evidence --final-run-id <final> --tuning-run <baseline> --output public-evidence.json
+```
+
+The projection has no fields for private tasks, observations, prompts, transcripts, risk narratives, repository content, or private reviewer identity.
 
 The old caller-assembled request evaluator remains available only as a migration compatibility command:
 
@@ -136,12 +155,16 @@ This runs Rust formatting, clippy and tests plus the retained legacy compatibili
 - `src/`: Rust control-plane Modules and the `alpine` CLI.
 - `config/support-envelope.json`: versioned capability envelope; current-machine observations do not belong here.
 - `config/evaluation-plan.json`: versioned search space, resource budget and requested qualification target.
-- `config/profiles/` and `config/artifacts.json`: versioned Profile and artifact contracts consumed by Rust.
+- `config/profiles/` and `config/artifacts.json`: versioned inference-only Profile and artifact contracts consumed by Rust; deployment roles are not stored in Profile bytes.
 - `%USERPROFILE%\local-models`: default generated machine-local installation containing large artifacts, runtime bundles, local credentials and logs. The install root remains configurable; it is not source code and must not be committed.
 - `results/`: local identity-bound evidence, intentionally ignored by Git unless an explicit redacted publication artifact is prepared.
 
 Architecture and replacement rules are recorded in [ADR 0019](docs/adr/0019-rust-control-plane-boundary.md); the completed automated evaluation boundary is recorded in [ADR 0020](docs/adr/0020-rust-evaluation-and-live-identity.md).
 
-## Publication status
+## Licensing, support, and publication status
 
-The repository is currently private and has no owner-selected open-source license. Visibility and licensing are explicit release gates; until both are resolved, this project must not be represented as publicly open source.
+Project Alpine's own source is licensed under Apache-2.0 and contributions use DCO 1.1. Third-party artifacts retain their own license boundaries; see `LICENSE`, `THIRD_PARTY.md`, and `CONTRIBUTING.md`.
+
+The Support Envelope means an environment is eligible to evaluate, not universally production-supported. Production qualification applies only to an exact recorded deployment; see `SUPPORT.md`.
+
+This checkout is being prepared for a source-only v0.1, but repository visibility and release publication remain explicit owner actions and have not been performed by these files. See `docs/RELEASING.md`.

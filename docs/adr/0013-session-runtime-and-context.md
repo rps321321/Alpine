@@ -1,6 +1,6 @@
 # Dedicated CUDA llama-server; 16k context; official Qwen chat template
 
-The Inference Session uses a current official ggml-org Windows CUDA 13 `llama-server` under `%USERPROFILE%\local-models\`, pinned in Session Config. `~\llama-cuda` b9608 stays the Whispering :8090 binary. The Vulkan winget `llama-server` on PATH is not used.
+The Inference Session uses a current official ggml-org Windows CUDA 13 `llama-server` under the generated installation root, pinned in Session Config. An unrelated legacy inference service remains outside Alpine's configured endpoint. A `llama-server` found incidentally on `PATH` is not used.
 
 v1 context is 16,384. Raise to 32,768 only after a measured Session stays above the operational floor.
 

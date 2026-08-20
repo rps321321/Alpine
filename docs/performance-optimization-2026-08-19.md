@@ -18,7 +18,7 @@ Fast-32K recovered three needles exactly from a 27,851-token prompt twice: 711.3
 
 OpenCode request capture also supersedes the earlier prompt estimate: a bounded request is 26,003 bytes. A Fast-32K fresh `hey` used 5,529 input tokens, 11 output tokens and about 1.55 seconds; the final Stable-16K smoke used the same input, produced 64 output tokens in about 9.76 seconds of model time, and did not compact. The prior 24–29K request was foreign/global prompt and skill-catalog contamination.
 
-See `docs/AUDIT-2026-08-19.md` for run IDs, lifecycle gates and the current decision.
+The private raw runs and machine inventory behind this dated investigation are intentionally excluded from the public source tree. Reproduce any claim through the current Alpine evidence path before relying on it.
 
 ## Decision
 
@@ -152,4 +152,4 @@ The benchmark scripts are in `scripts/`:
 - `benchmark-tensor-placement.ps1`
 - `benchmark-pr27173.ps1`
 
-Raw server logs are machine-local under `%USERPROFILE%\local-models\logs`.
+Raw server logs are machine-local under the generated installation's `logs` directory and are not public evidence.

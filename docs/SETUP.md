@@ -8,7 +8,7 @@ Clone the repository, open PowerShell in it, and run:
 .\setup.ps1
 ```
 
-The default install root is `C:\Users\<you>\local-models`, and the default selected profile is `stable-16k`:
+The default install root is `%USERPROFILE%\local-models`. A fresh installation conservatively initializes `stable-16k` as both `daily_default` and `rollback_profile`; it inherits no Qualification:
 
 ```powershell
 .\setup.ps1 -Profile stable-16k
@@ -28,20 +28,20 @@ Large artifact downloads are verified by byte size and SHA-256 from `config/arti
 
 ## Launch
 
-Double-click `Open Local Qwen.exe` in the install root, choose a project folder, and work in the OpenCode terminal. The executable is a thin folder picker that directly supervises `alpine.exe opencode`; PowerShell is not in the production launch path. Alpine owns the policy, full-lifetime inference lease, transactional Session restoration, Ctrl-C handling, crash-recovery journal, and redacted failure publication. Native OpenCode diagnostics remain visible in the terminal and are not copied into logs.
+Double-click `Open Local Qwen.exe` in the install root, choose a project folder, and work in the OpenCode terminal. With no Profile argument, it uses the deployment `daily_default`. The executable is a thin folder picker that directly supervises `alpine.exe opencode`; PowerShell is not in the production launch path. Alpine owns the policy, full-lifetime inference lease, transactional Session restoration, Ctrl-C handling, crash-recovery journal, and redacted failure publication. Native OpenCode diagnostics remain visible in the terminal and are not copied into logs.
 
 To verify this failure path without loading the model, run `Open Local Qwen.exe --project <existing-folder> --diagnostic-failure`. It deliberately presents a diagnostic error, writes the stable redacted log, and exits non-zero.
 
 Verify the complete effective policy without loading the model:
 
 ```powershell
-.\alpine.exe opencode --install-root . --project C:\path\to\project --profile stable-16k --check
+.\alpine.exe opencode --install-root . --project C:\path\to\project --check
 ```
 
 The direct installed CLI is:
 
 ```powershell
-.\alpine.exe opencode --install-root . --profile stable-16k --project C:\path\to\project
+.\alpine.exe opencode --install-root . --project C:\path\to\project
 ```
 
 Legacy CLI alternatives remain for compatibility and historical reproduction only. They are not required or accepted as authority for a new supported-production claim:
@@ -72,25 +72,25 @@ The independent final stage of `alpine evaluate` performs a complete model SHA-2
 .\localmodel.ps1 inventory
 ```
 
-The current historical manifest is `inventory/hardware-5070-2026-08-19.json`. New Rust evidence embeds a canonical live CPU/RAM/GPU/driver snapshot, and qualification captures the host again; it does not trust that historical file.
+Historical machine inventories are private, machine-local evidence and are not part of the public source tree. New Rust evidence embeds a canonical live CPU/RAM/GPU/driver snapshot, and qualification captures the host again; it does not trust an inventory file.
 
 ## Profiles
 
 ```text
-stable-16k   production    official runtime, MTP3, no n-gram
-turbo-16k    candidate     custom request-local n-gram + MTP3
-fast-32k     candidate     32K request-local n-gram profile
-long-64k     experimental  research only; failed first near-limit quality gate
+stable-16k   official runtime, MTP3, no n-gram; initialized rollback role
+turbo-16k    custom request-local n-gram + MTP3; requires exact Qualification before Promotion
+fast-32k     32K request-local n-gram Profile; no production claim
+long-64k     research-only long-context Profile; no production claim
 ```
 
-Select a Profile explicitly through the Rust operation; persistent legacy `apply` state is not required:
+Omit `--profile` for the deployment `daily_default`, or select a one-session override explicitly. Neither operation edits deployment history:
 
 ```powershell
 cargo run --release --bin alpine -- session start --profile stable-16k
-cargo run --release --bin alpine -- opencode --profile stable-16k --project C:\path\to\project
+cargo run --release --bin alpine -- opencode --project C:\path\to\project
 ```
 
-Profile status is a lifecycle claim, not a menu label. See `config/promotion-policy.json`.
+Profile files contain inference material only. Qualification and append-only deployment roles carry lifecycle facts; see `config/promotion-policy.json` and `docs/DEPLOYMENT.md`.
 
 ## Benchmark and inspect evidence
 
@@ -153,7 +153,7 @@ The context harness sizes its deterministic ledger with the live tokenizer, reac
 
 The golden-agent harness runs OpenCode directly from Rust in a copied fixture. It verifies the effective 16K policy, strips ambient credential variables from the child, keeps core coding tools available, runs the versioned tests, rejects protected or unexpected changes, and binds evidence to the exact OpenCode executable and task-suite hashes.
 
-The rollback proof launches `stable-16k`, binds its current Profile, Session Config and runtime hashes, performs a real inference smoke, and restores the prior material Session. A merely present JSON Profile is not accepted as rollback evidence.
+The rollback proof launches the current `stable-16k` rollback role, binds its Profile, Session Config and runtime hashes, performs a real inference smoke, and restores the prior material Session. A merely present JSON Profile is not accepted as rollback evidence.
 
 Manual attachment is reserved for the human capability review:
 
@@ -177,6 +177,6 @@ The launcher rejects OpenCode `--auto`, disables external plugins and project co
 
 ## Recovery and rollback
 
-`stable-16k` plus the official runtime is the rollback path. The custom runtime is isolated in `runtime-custom`; the patched source/build is reproducible from the recorded commit and patch. The incomplete NVFP4 download is not referenced by any profile and may remain paused/recoverable outside the production path.
+`stable-16k` plus the official runtime is initialized as the rollback path. The custom runtime is isolated in `runtime-custom`; the patched source/build is reproducible from the recorded commit and patch. Incomplete downloads are not referenced by any Profile and remain outside the production path.
 
-Do not delete older profiles, raw results, backups or runtime bundles merely because a candidate is faster. Promote only after the policy gates and retain the previous production profile.
+Do not delete older Profiles, raw results, backups, or runtime bundles merely because another Profile is faster. Evaluation never promotes. Use the explicit Promotion contract only after current automated evidence and the human Capability Review pass, retain Stable as rollback, and record contradictory operation as an Incident or Rollback.

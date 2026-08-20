@@ -14,7 +14,7 @@ The localhost inference endpoint now requires a random file-backed bearer key fo
 
 **Impact:** A malicious or prompt-injected model can act with the Windows user's filesystem, process, credential, and network authority despite the configured command exceptions.
 
-OpenCode's build agent starts from `"*": "allow"` and later applies user exceptions (`packages/opencode/src/agent/agent.ts:119`). Its shell tool asks against parsed command-source strings and performs external-directory discovery only for a limited set of recognized file commands with statically resolvable paths (`packages/opencode/src/tool/shell.ts:378`). Wrappers such as another shell, aliases, language runtimes, dynamic paths, libraries, and alternate executables can escape those checks. The current configuration only enumerates a small set of Git and SSH strings (`%USERPROFILE%\.config\opencode\opencode.jsonc:28`).
+OpenCode's build agent starts from `"*": "allow"` and later applies user exceptions (`packages/opencode/src/agent/agent.ts:119`). Its shell tool asks against parsed command-source strings and performs external-directory discovery only for a limited set of recognized file commands with statically resolvable paths (`packages/opencode/src/tool/shell.ts:378`). Wrappers such as another shell, aliases, language runtimes, dynamic paths, libraries, and alternate executables can escape those checks. The reviewed machine-local configuration enumerated only a small set of Git and SSH strings (`%USERPROFILE%\.config\opencode\opencode.jsonc`).
 
 **Disposition:** Reclassify the Harness Policy Boundary as a capability-preserving consent/tripwire layer. Do not claim hostile-agent containment. Keep a separate Attack-Lab Isolation Boundary as the real solution.
 
@@ -30,13 +30,13 @@ The OpenCode shell copies `process.env` into every command (`packages/opencode/s
 
 ### PB-03 — The Git policy is simultaneously over-restrictive and incomplete
 
-The current configuration permanently denies `git push`, all `git remote` commands, rebases, and selected reset/config operations (`%USERPROFILE%\.config\opencode\opencode.jsonc:36`). This blocks harmless inspection such as `git remote -v` and prevents explicitly authorized pushes, yet omits other destructive operations such as `git clean`, `git restore`, forced checkout, stash deletion, `filter-repo`, and `update-ref`. All string rules remain bypassable through shell indirection.
+The reviewed configuration permanently denied `git push`, all `git remote` commands, rebases, and selected reset/config operations. This blocked harmless inspection such as `git remote -v` and prevented explicitly authorized pushes, yet omitted other destructive operations such as `git clean`, `git restore`, forced checkout, stash deletion, `filter-repo`, and `update-ref`. All string rules remain bypassable through shell indirection.
 
 **Fix implemented for the minimal profile:** Harmless remote inspection is allowed. Common remote writes, destructive working-tree operations, and history changes use `ask`, not `deny`. The operator can authorize intended work without granting silent execution.
 
 ### PB-04 — Personal credential protection is narrow and provides false confidence
 
-The current direct-read policy protects only `~/.ssh` (`%USERPROFILE%\.config\opencode\opencode.jsonc:31`). It does not cover common cloud, container, package-manager, GitHub CLI, or OpenCode credential files. More importantly, direct Read-tool rules do not mediate arbitrary shell-based reads.
+The reviewed direct-read policy protected only `~/.ssh`. It did not cover common cloud, container, package-manager, GitHub CLI, or OpenCode credential files. More importantly, direct Read-tool rules do not mediate arbitrary shell-based reads.
 
 **Fix implemented:** The minimal profile denies external-directory tool access to common credential directories, denies direct Read-tool access to common personal credential files, and asks before SSH/SCP/SFTP use. Test Credentials must live outside those personal stores. This remains best-effort until the process runs under a restricted identity.
 

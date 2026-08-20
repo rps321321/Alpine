@@ -47,7 +47,7 @@ class PerformanceMatrixConfigTests(unittest.TestCase):
                 self.assertIn("[string]$Profile", source, name)
                 self.assertIn("[switch]$ResolveOnly", source, name)
                 for forbidden in (
-                    "%USERPROFILE%",
+                    "C:\\Users\\private-user",
                     "8100",
                     "127.0.0.1:8100",
                     "LocalPort 8100",

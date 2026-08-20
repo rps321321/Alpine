@@ -1,6 +1,6 @@
 # Project Alpine
 
-The Rust control plane for automatically discovering, measuring, tuning, qualifying and operating local AI inference. `llama.cpp` and its C++/CUDA implementation remain below the Inference Server boundary. The current hardware-5070 deployment is identity-bound evidence, not a permanent product assumption.
+The Rust control plane for automatically discovering, measuring, tuning, qualifying and operating local AI inference. `llama.cpp` and its C++/CUDA implementation remain below the Inference Server boundary. Every evaluated deployment is identity-bound evidence, not a permanent product assumption.
 
 Three different things must not be collapsed:
 
@@ -12,11 +12,11 @@ The model is an untrusted worker.
 
 ## Current system state
 
-This repository is the versioned control plane. `%USERPROFILE%\local-models` is the generated machine-local installation containing large artifacts, runtime bundles, secrets and logs. Run `setup.ps1` to reconstruct it; do not treat the generated install as the source of truth.
+This repository is the versioned control plane. `%USERPROFILE%\local-models` is the default generated machine-local installation containing large artifacts, runtime bundles, secrets and logs. Run `setup.ps1` to reconstruct it; do not treat the generated install as the source of truth.
 
 Rust is the sole control-plane authority for supported discovery, selection, measurement, tuning, qualification, Session and OpenCode workflows. Stable-16K remains the rollback Profile, but Rust owns its operation and proof. Python/PowerShell code is compatibility and research tooling; C# is a folder-picker Adapter. `.\scripts\verify.ps1` verifies the repository and retained compatibility surface. `alpine evaluate` is the single executable path that generates and independently verifies bounded product claims.
 
-The production profile is `stable-16k`. `turbo-16k` and `fast-32k` are measured candidates using the request-local n-gram patch. `long-64k` is experimental and failed its first 55.7K-token retrieval gate. See `docs/AUDIT-2026-08-19.md` for evidence and run IDs.
+Fresh installations initialize `stable-16k` as both `daily_default` and `rollback_profile` without inheriting Qualification. `turbo-16k`, `fast-32k`, and `long-64k` remain available inference configurations, but a Profile file carries no lifecycle claim. Turbo becomes the daily default only after fresh current evidence, the project owner's substantive Capability Review, production Qualification, and an explicit Promotion event.
 
 OpenCode's bounded first request is now about 5.5K tokens in a live greeting, not 24–29K. Core task, todo, file, search, shell and web tools remain. Skill catalogs are omitted from bounded profiles as a context-budget decision and may be explicitly enabled.
 
@@ -30,6 +30,10 @@ _Avoid_: Rust wrapper, llama.cpp replacement, benchmark script collection
 A versioned, capability-based statement of environments Alpine can evaluate. It is not a list of assumptions about the current PC, and eligibility is not qualification.
 _Avoid_: supported hardware list (when evidence is incomplete), current machine config
 
+**Verified Deployment**:
+An exact environment and material configuration that has completed identity-bound Qualification. A Verified Deployment does not prove that other machines within the Support Envelope are production-ready.
+_Avoid_: supported platform, Windows/NVIDIA support, compatible machine
+
 **Evaluation Plan**:
 A versioned, bounded search space plus workload, request budget and qualification target. It may describe a deployment-specific experiment, but it is not a permanent hardware policy and cannot weaken Promotion Policy gates.
 _Avoid_: unbounded autotuning, global optimum claim, hidden benchmark matrix
@@ -41,6 +45,74 @@ _Avoid_: latest result, same machine probably, benchmark name alone
 **Qualification**:
 An evidence decision with one of five outcomes: `qualified`, `unsupported`, `inconclusive`, `regressed` or `not-proven`. Final evidence must be independent from tuning and selection evidence.
 _Avoid_: promotion Boolean, benchmark passed (when external gates remain), best config
+
+**Profile**:
+The inference-material configuration evaluated by Alpine. Qualification state, daily-default selection and rollback responsibility are not Profile fields.
+_Avoid_: deployment status, launcher choice, promotion record
+
+**Deployment Role**:
+A local operational assignment of a still-current qualified Profile, currently `daily_default` or `rollback_profile`. Changing a Deployment Role does not mutate the qualified Profile identity.
+_Avoid_: Profile status, benchmark selection, inherited qualification
+
+**Profile Override**:
+An explicit Profile selection for one Session that does not alter Deployment Roles or append a Deployment Event. Testing, maintenance and temporary Stable use remain Overrides unless the operator separately invokes Rollback.
+_Avoid_: Rollback, Promotion, default change
+
+**Promotion**:
+The transaction that verifies still-current production Qualification, records that decision immutably, and assigns the candidate Profile to the `daily_default` Deployment Role. A fresh installation has no inherited Promotion.
+_Avoid_: editing Profile status, changing a shortcut, benchmark selection
+
+**Deployment Event**:
+An append-only record of a Promotion, Rollback or other Deployment Role transition. Current deployment state is derived from this history; earlier events and their Qualification references are never rewritten.
+_Avoid_: mutable deployment status row, edited Promotion, launcher preference
+
+**Rollback**:
+An explicit deployment transaction that restores the `daily_default` role to the Rollback Profile and appends the operator, reason and reversed Promotion. It does not erase the prior Promotion or its historical Qualification.
+_Avoid_: temporary Stable launch, editing a Promotion, automatic re-promotion
+
+**Incident**:
+Append-only evidence that later operation contradicted or materially challenged a deployment decision. An Incident can suspend eligibility and expose a deficient Qualification policy without rewriting what earlier evidence established.
+_Avoid_: benchmark failure, deleted Qualification, silent demotion
+
+**Capability Review**:
+A substantive human evaluation of whether the complete production workflow is useful and trustworthy across required capability categories and reviewer-chosen realistic scenarios. Its versioned evidence contract records expectations, observations, outcomes, limitations and accepted residual risks while leaving the final judgment to the named human reviewer.
+_Avoid_: capability checkbox, benchmark pass, operator rubber stamp
+
+**Supporting Review Artifact**:
+An optional private, content-addressed supplement to a Capability Review. It contains only redacted material appropriate for retention; raw credentials and secrets are neither stored nor hashed as proof.
+_Avoid_: mandatory transcript, embedded private repository, secret digest
+
+**Production Profile**:
+The daily-default Profile that has satisfied the complete production Qualification, including its Capability Review. Qualification must precede promotion.
+_Avoid_: fastest Profile, selected candidate, benchmark winner
+
+**Rollback Profile**:
+A retained, independently proven Profile that can restore known-good operation if the Production Profile fails. Promoting a candidate does not erase or weaken this fallback.
+_Avoid_: old Profile, backup config, untested fallback
+
+**Public Source Release**:
+The deliberately licensed and privacy-reviewed source form of Project Alpine. v0.1 establishes reproducible source and excludes binaries, installers, generated installations, model weights, runtime bundles, secrets, machine-local state and raw private evidence.
+_Avoid_: making the working directory public, binary/model bundle, public evidence dump
+
+**Public Evidence**:
+A generated, allowlisted representation of private evidence containing only structural facts deliberately approved for reproducibility and public claims. Private review content and reviewer identity remain excluded; any public limitations or risk narrative is separately authored and explicitly approved rather than copied from private evidence.
+_Avoid_: sanitized raw report, public inventory, raw evidence export
+
+**Project License**:
+Apache-2.0 as applied to Project Alpine's own source and documentation. It does not relicense Third-Party Material or erase its notices and attribution requirements.
+_Avoid_: repository-wide relicensing, model license, dependency license
+
+**Third-Party Material**:
+Code, patches, models, templates, runtimes or other artifacts whose rights originate outside Project Alpine. Each item retains its own license boundary, notices, attribution and redistribution conditions.
+_Avoid_: Alpine source, bundled by implication, covered by the Project License
+
+**Contribution Attestation**:
+DCO 1.1 sign-off accompanying a proposed Contribution. No contributor license agreement is required for v0.1.
+_Avoid_: copyright assignment, CLA, informal authorship claim
+
+**Agent-Generation Disclosure**:
+A concise pull-request statement required when a generative agent produced a material part of the submitted diff or autonomously planned and executed multi-step work embodied in it. It identifies that work and the human verification performed; ordinary autocomplete, writing help, explanations, research and manually reimplemented suggestions are outside this term.
+_Avoid_: blanket AI-use disclosure, quality guarantee, transfer of responsibility to a tool
 
 **Frontier Model**:
 The hosted default when raw capability dominates. Today that is GPT-5.6 Sol.

@@ -329,7 +329,7 @@ function Write-SessionConfig([string]$OfficialServer, [string]$CustomServer, [st
             if ($old.cleanup) {
                 $cleanup = Get-PreservedCleanupConfig $old.cleanup
             }
-        } catch { Write-Warning 'Existing session config could not be preserved; writing the canonical v3 config.' }
+        } catch { Write-Warning 'Existing session config could not be preserved; writing the canonical v4 config.' }
     }
     $selectedProfile = Get-Content -Raw -LiteralPath $profileSource | ConvertFrom-Json
     if ($selectedProfile.runtime -eq 'custom' -and -not $CustomServer) {
@@ -349,7 +349,7 @@ function Assert-Install {
     $sessionPath = Join-Path $InstallRoot 'config\session.json'
     if (-not (Test-Path -LiteralPath $sessionPath)) { throw "Session config missing: $sessionPath" }
     $session = Get-Content -Raw -LiteralPath $sessionPath | ConvertFrom-Json
-    $profilePath = Join-Path $InstallRoot "profiles\$($session.active_profile).json"
+    $profilePath = Join-Path $InstallRoot "profiles\$Profile.json"
     if (-not (Test-Path -LiteralPath $profilePath)) { throw "Profile missing: $profilePath" }
     $profileConfig = Get-Content -Raw -LiteralPath $profilePath | ConvertFrom-Json
     $runtimeProperty = $session.runtimes.PSObject.Properties[[string]$profileConfig.runtime]
@@ -363,10 +363,19 @@ function Assert-Install {
     }
     & (Join-Path $InstallRoot 'alpine.exe') resolve --install-root $InstallRoot --profile ([string]$profileConfig.name) --compact | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Installed Alpine could not resolve the selected Profile.' }
+    $deploymentJson = & (Join-Path $InstallRoot 'alpine.exe') deployment-status --install-root $InstallRoot --compact
+    if ($LASTEXITCODE -ne 0) { throw 'Installed Alpine could not derive deployment state.' }
+    $deployment = $deploymentJson | ConvertFrom-Json
+    if (-not $deployment.initialized -or -not $deployment.roles -or -not $deployment.roles.daily_default -or -not $deployment.roles.rollback_profile) {
+        throw 'Installed Alpine has no complete deployment roles.'
+    }
+    & (Join-Path $InstallRoot 'alpine.exe') resolve --install-root $InstallRoot --compact | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Installed Alpine could not resolve the deployment daily_default.' }
     $version = & $serverPath --version 2>&1 | Out-String
     if ($version -notmatch '3cb7ffb') { throw "llama-server is not pinned to commit 3cb7ffb:`n$version" }
     Write-Host "Verified install: $InstallRoot"
-    Write-Host "Profile: $($session.active_profile) | Runtime: $($profileConfig.runtime)"
+    Write-Host "Deployment: daily_default=$($deployment.roles.daily_default) | rollback_profile=$($deployment.roles.rollback_profile)"
+    Write-Host "Verified Profile: $($profileConfig.name) | Runtime: $($profileConfig.runtime)"
 }
 
 $setupLock = Enter-SetupLock $InstallRoot 30000
@@ -395,25 +404,40 @@ try {
         $stageBuilder = Join-Path $stage 'scripts\build-launcher.ps1'
         & $stageBuilder -Output (Join-Path $stage 'Open Local Qwen.exe') -NoShortcut
         Write-ControlPlaneIdentity $stage
-        $items = @()
-        if (Test-Path -LiteralPath (Join-Path $stage 'runtime-official')) {
-            $items += [pscustomobject]@{ stage='runtime-official'; destination='runtime-official' }
-        }
-        if (Test-Path -LiteralPath (Join-Path $stage 'runtime-custom')) {
-            $items += [pscustomobject]@{ stage='runtime-custom'; destination='runtime-custom' }
-        }
-        $items += @(
-            [pscustomobject]@{ stage='scripts'; destination='scripts' },
-            [pscustomobject]@{ stage='launcher'; destination='launcher' },
-            [pscustomobject]@{ stage='profiles'; destination='profiles' },
-            [pscustomobject]@{ stage='config\artifacts.json'; destination='config\artifacts.json' },
-            [pscustomobject]@{ stage='config\control-plane.json'; destination='config\control-plane.json' },
-            [pscustomobject]@{ stage='config\session.json'; destination='config\session.json' },
-            [pscustomobject]@{ stage='alpine.exe'; destination='alpine.exe' },
-            [pscustomobject]@{ stage='Open Minimal OpenCode.cmd'; destination='Open Minimal OpenCode.cmd' },
-            [pscustomobject]@{ stage='Open Local Qwen.exe'; destination='Open Local Qwen.exe' }
-        )
-        Publish-SetupBundle -InstallRoot $InstallRoot -StageRoot $stage -Items $items
+        $deploymentPublicationLock = Enter-InterprocessLock (Join-Path $InstallRoot '.deployment.lock') 30000
+        try {
+            $existingDeploymentEvents = Join-Path $InstallRoot 'deployment\events'
+            $initializeDeployment = -not (Test-Path -LiteralPath $existingDeploymentEvents -PathType Container) -or `
+                -not (Get-ChildItem -LiteralPath $existingDeploymentEvents -Filter '*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($initializeDeployment) {
+                & (Join-Path $stage 'alpine.exe') deployment-init --install-root $stage `
+                    --daily-default stable-16k --rollback-profile stable-16k --operator setup `
+                    --reason 'Initialize conservative deployment roles; qualification is not inherited.' --compact | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Staged Alpine could not initialize deployment roles.' }
+            }
+            $items = @()
+            if (Test-Path -LiteralPath (Join-Path $stage 'runtime-official')) {
+                $items += [pscustomobject]@{ stage='runtime-official'; destination='runtime-official' }
+            }
+            if (Test-Path -LiteralPath (Join-Path $stage 'runtime-custom')) {
+                $items += [pscustomobject]@{ stage='runtime-custom'; destination='runtime-custom' }
+            }
+            if ($initializeDeployment) {
+                $items += [pscustomobject]@{ stage='deployment'; destination='deployment' }
+            }
+            $items += @(
+                [pscustomobject]@{ stage='scripts'; destination='scripts' },
+                [pscustomobject]@{ stage='launcher'; destination='launcher' },
+                [pscustomobject]@{ stage='profiles'; destination='profiles' },
+                [pscustomobject]@{ stage='config\artifacts.json'; destination='config\artifacts.json' },
+                [pscustomobject]@{ stage='config\control-plane.json'; destination='config\control-plane.json' },
+                [pscustomobject]@{ stage='config\session.json'; destination='config\session.json' },
+                [pscustomobject]@{ stage='alpine.exe'; destination='alpine.exe' },
+                [pscustomobject]@{ stage='Open Minimal OpenCode.cmd'; destination='Open Minimal OpenCode.cmd' },
+                [pscustomobject]@{ stage='Open Local Qwen.exe'; destination='Open Local Qwen.exe' }
+            )
+            Publish-SetupBundle -InstallRoot $InstallRoot -StageRoot $stage -Items $items
+        } finally { Exit-InterprocessLock $deploymentPublicationLock }
     } finally {
         if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     }

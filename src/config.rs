@@ -10,7 +10,8 @@ pub struct SessionConfig {
     pub root: PathBuf,
     pub host: String,
     pub port: u16,
-    pub active_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<String>,
     pub runtimes: BTreeMap<String, Option<PathBuf>>,
     pub model: PathBuf,
     pub mmproj: PathBuf,
@@ -22,19 +23,9 @@ pub struct SessionConfig {
     pub cleanup: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProfileStatus {
-    Experimental,
-    Candidate,
-    Validated,
-    Production,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
-    pub status: ProfileStatus,
     pub runtime: String,
     pub context: u32,
     pub output: u32,
@@ -93,7 +84,17 @@ pub fn resolve(
         read_json_with_bytes(&session_path, "Session Config")?;
     validate_session(&session, &session_path, &install_root)?;
 
-    let profile_name = selected_profile.unwrap_or(&session.active_profile);
+    let deployment_default = if selected_profile.is_none() {
+        crate::deployment::daily_default(&install_root)?
+    } else {
+        None
+    };
+    let profile_name = selected_profile
+        .or(deployment_default.as_deref())
+        .or(session.active_profile.as_deref())
+        .ok_or_else(|| {
+            "no Profile was selected and deployment history has no daily_default".to_owned()
+        })?;
     validate_profile_name(profile_name)?;
     let profile_path = install_root
         .join("profiles")
@@ -147,9 +148,9 @@ fn validate_session(
     path: &Path,
     install_root: &Path,
 ) -> Result<(), String> {
-    if session.schema != 3 {
+    if !matches!(session.schema, 3 | 4) {
         return Err(format!(
-            "Unsupported Session Config schema '{}' in {}; expected 3.",
+            "Unsupported Session Config schema '{}' in {}; expected 3 or 4.",
             session.schema,
             path.display()
         ));
@@ -179,17 +180,28 @@ fn validate_session(
             path.display()
         ));
     }
-    for (name, value) in [
-        ("active_profile", &session.active_profile),
-        ("host", &session.host),
-    ] {
-        if value.trim().is_empty() {
+    if session.host.trim().is_empty() {
+        return Err(format!(
+            "{}: required value 'host' must be a non-empty string",
+            path.display()
+        ));
+    }
+    match (session.schema, session.active_profile.as_deref()) {
+        (3, Some(profile)) if !profile.trim().is_empty() => {}
+        (3, _) => {
             return Err(format!(
-                "{}: required value '{}' must be a non-empty string",
-                path.display(),
-                name
+                "{}: schema 3 requires a non-empty legacy active_profile",
+                path.display()
             ));
         }
+        (4, None) => {}
+        (4, Some(_)) => {
+            return Err(format!(
+                "{}: schema 4 stores deployment roles in append-only deployment history, not active_profile",
+                path.display()
+            ));
+        }
+        _ => unreachable!(),
     }
     Ok(())
 }
@@ -408,5 +420,37 @@ mod tests {
         let second = resolve(directory.path(), None, true).unwrap();
         assert_eq!(first.session_config_sha256, second.session_config_sha256);
         assert_ne!(first.profile_sha256, second.profile_sha256);
+    }
+
+    #[test]
+    fn deployment_default_overrides_legacy_selection_without_mutating_material_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_fixture(root);
+        let stable_path = root.join("profiles/stable-16k.json");
+        let mut turbo: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&stable_path).unwrap()).unwrap();
+        turbo["name"] = json!("turbo-16k");
+        std::fs::write(
+            root.join("profiles/turbo-16k.json"),
+            serde_json::to_vec(&turbo).unwrap(),
+        )
+        .unwrap();
+        let legacy = resolve(root, None, true).unwrap();
+        crate::deployment::bootstrap(&crate::deployment::BootstrapDeploymentOptions {
+            install_root: root.to_path_buf(),
+            daily_default: "turbo-16k".to_owned(),
+            rollback_profile: "stable-16k".to_owned(),
+            operator: "test-operator".to_owned(),
+            reason: "prove role selection is separate from material configuration".to_owned(),
+            lock_timeout: std::time::Duration::from_secs(1),
+        })
+        .unwrap();
+        let deployed = resolve(root, None, true).unwrap();
+        let override_session = resolve(root, Some("stable-16k"), true).unwrap();
+        assert_eq!(legacy.profile_name, "stable-16k");
+        assert_eq!(deployed.profile_name, "turbo-16k");
+        assert_eq!(override_session.profile_name, "stable-16k");
+        assert_eq!(legacy.session_config_sha256, deployed.session_config_sha256);
     }
 }

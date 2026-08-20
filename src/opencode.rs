@@ -27,7 +27,7 @@ static INTERRUPT_HANDLER: OnceLock<Result<(), String>> = OnceLock::new();
 pub struct OpenCodeOptions {
     pub install_root: PathBuf,
     pub project: PathBuf,
-    pub profile: String,
+    pub profile: Option<String>,
     pub launch_id: String,
     pub vision: bool,
     pub lean: bool,
@@ -132,7 +132,7 @@ fn run_inner(options: &OpenCodeOptions) -> Result<OpenCodeReport, String> {
             project.display()
         ));
     }
-    let resolved = config::resolve(&options.install_root, Some(&options.profile), true)?;
+    let resolved = config::resolve(&options.install_root, options.profile.as_deref(), true)?;
     session::ensure_provider_files(&resolved, options.lock_timeout)?;
     let skills_enabled = resolved.profile.external_skills || options.with_skills;
     let policy = harness_policy(
@@ -375,14 +375,20 @@ fn ensure_interrupt_handler() -> Result<(), String> {
 }
 
 fn validate_options(options: &OpenCodeOptions) -> Result<(), String> {
-    if options.profile.trim().is_empty()
+    if options
+        .profile
+        .as_deref()
+        .is_some_and(|profile| profile.trim().is_empty())
         || options.launch_id.len() != 32
         || !options
             .launch_id
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err("OpenCode Profile and 32-character launch id are required".to_owned());
+        return Err(
+            "OpenCode Profile override must be non-empty and a 32-character launch id is required"
+                .to_owned(),
+        );
     }
     if options.lock_timeout.is_zero() || options.startup_timeout.is_zero() {
         return Err("OpenCode lock and startup timeouts must be positive".to_owned());
@@ -967,7 +973,11 @@ fn publish_failure(options: &OpenCodeOptions, error: &str) -> Result<PathBuf, St
         "timestamp={}\nlaunch_id={}\nprofile={}\nproject={}\nerror:\n{}\n",
         UtcTimestamp::now()?.rfc3339(),
         options.launch_id.to_ascii_lowercase(),
-        redact_failure(&options.profile),
+        options
+            .profile
+            .as_deref()
+            .map(redact_failure)
+            .unwrap_or_else(|| "<deployment-default>".to_owned()),
         redact_failure(&options.project.display().to_string()),
         redact_failure(error)
     );
@@ -1063,7 +1073,7 @@ mod tests {
                 root: root.clone(),
                 host: "127.0.0.1".to_owned(),
                 port: 8100,
-                active_profile: "stable-16k".to_owned(),
+                active_profile: Some("stable-16k".to_owned()),
                 runtimes: BTreeMap::new(),
                 model: root.join("model.gguf"),
                 mmproj: root.join("mmproj.gguf"),
@@ -1078,7 +1088,6 @@ mod tests {
             profile_name: "stable-16k".to_owned(),
             profile: config::Profile {
                 name: "stable-16k".to_owned(),
-                status: config::ProfileStatus::Production,
                 runtime: "official".to_owned(),
                 context: 16_384,
                 output: 4096,
@@ -1112,7 +1121,7 @@ mod tests {
         OpenCodeOptions {
             install_root: install_root.clone(),
             project: install_root.join("project"),
-            profile: "stable-16k".to_owned(),
+            profile: Some("stable-16k".to_owned()),
             launch_id: "a".repeat(32),
             vision: false,
             lean: true,

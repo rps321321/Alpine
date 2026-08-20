@@ -1,6 +1,5 @@
 {
   "name": "long-64k",
-  "status": "experimental",
   "runtime": "custom",
   "context": 65536,
   "output": 8192,

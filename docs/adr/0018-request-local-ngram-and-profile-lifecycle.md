@@ -2,13 +2,13 @@
 
 ## Status
 
-Accepted — 2026-08-19
+Accepted — 2026-08-19; lifecycle representation superseded by ADR 0022 on 2026-08-20
 
 ## Decision
 
-Maintain a minimal patch against pinned `llama.cpp` b10453 that optionally resets `ngram-mod` state at request begin. Enable it only in `turbo-16k`, `fast-32k` and explicitly experimental profiles. Keep the official MTP-only runtime as `stable-16k` production and rollback.
+Maintain a minimal patch against pinned `llama.cpp` b10453 that optionally resets `ngram-mod` state at request begin. Enable it only in `turbo-16k`, `fast-32k` and research Profiles. Keep the official MTP-only runtime as the `stable-16k` rollback configuration.
 
-Profiles follow `experimental → candidate → validated → production`. Microbenchmark speed alone can reach candidate, but validated/production require same-process and restart stability, near-limit context where applicable, executable agent tasks, capability review and a rollback profile.
+Qualification follows `candidate → validated → production`. Microbenchmark speed alone can reach candidate, but validated/production require same-process and restart stability, near-limit context where applicable, executable agent tasks, Capability Review, and a proven rollback Profile. ADR 0022 removes these lifecycle labels from inference-material Profile files and makes deployment an explicit, append-only action after Qualification.
 
 ## Rationale
 

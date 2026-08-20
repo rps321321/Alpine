@@ -491,7 +491,7 @@ mod tests {
                 root: root.clone(),
                 host: "127.0.0.1".to_owned(),
                 port: 8100,
-                active_profile: "turbo-16k".to_owned(),
+                active_profile: Some("turbo-16k".to_owned()),
                 runtimes: BTreeMap::new(),
                 model: root.join("model"),
                 mmproj: root.join("mmproj"),
@@ -506,7 +506,6 @@ mod tests {
             profile_name: "turbo-16k".to_owned(),
             profile: config::Profile {
                 name: "turbo-16k".to_owned(),
-                status: config::ProfileStatus::Candidate,
                 runtime: "custom".to_owned(),
                 context: 16_384,
                 output: 4096,

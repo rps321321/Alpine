@@ -15,7 +15,7 @@ from .locking import FileLease
 from .io import write_json_atomic
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SESSION_SCHEMA = 3
+SESSION_SCHEMAS = {3, 4}
 
 
 class ConfigError(ValueError):
@@ -78,8 +78,6 @@ def _required_string(value: dict[str, Any], name: str, source: Path) -> str:
 def _validate_profile(profile: dict[str, Any], name: str, source: Path) -> None:
     if _required_string(profile, "name", source) != name:
         raise ConfigError(f"{source}: Profile name does not match selected name '{name}'")
-    if profile.get("status") not in {"experimental", "candidate", "validated", "production"}:
-        raise ConfigError(f"{source}: unsupported Profile status '{profile.get('status')}'")
     _required_string(profile, "runtime", source)
     _required_string(profile, "kv_cache", source)
     positive = ("context", "output", "parallel", "threads", "batch_size", "ubatch_size", "mtp_depth")
@@ -108,10 +106,11 @@ def resolve_session(
         )
     session_path = root / "config" / "session.json"
     session = read_json(session_path)
-    if session.get("schema") != SESSION_SCHEMA:
+    schema = session.get("schema")
+    if schema not in SESSION_SCHEMAS:
         raise ConfigError(
             f"{session_path}: unsupported Session Config schema {session.get('schema')!r}; "
-            f"expected {SESSION_SCHEMA}"
+            "expected 3 or 4"
         )
     configured_root = Path(_required_string(session, "root", session_path)).expanduser().resolve()
     if configured_root != root:
@@ -120,12 +119,35 @@ def resolve_session(
     port = session.get("port")
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
         raise ConfigError(f"{session_path}: 'port' must be an integer between 1 and 65535")
-    selected = profile_name or _required_string(session, "active_profile", session_path)
+    if profile_name:
+        selected = profile_name
+    elif schema == 3:
+        selected = _required_string(session, "active_profile", session_path)
+    else:
+        alpine = root / "alpine.exe"
+        if not alpine.is_file():
+            raise ConfigError(
+                "schema 4 default selection is Rust-owned and requires the installed alpine.exe"
+            )
+        result = subprocess.run(
+            [str(alpine), "deployment-status", "--install-root", str(root), "--compact"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ConfigError("Alpine could not derive the deployment daily_default")
+        try:
+            deployment = json.loads(result.stdout)
+            selected = str(deployment["roles"]["daily_default"])
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise ConfigError("Alpine returned incomplete deployment roles") from exc
     profile_path = root / "profiles" / f"{selected}.json"
     if not profile_path.is_file():
         raise ConfigError(f"Profile missing: {profile_path}")
     profile = read_json(profile_path)
     _validate_profile(profile, selected, profile_path)
+    profile.pop("status", None)
     runtime_name = str(profile["runtime"])
     runtimes = session.get("runtimes")
     runtime_value = runtimes.get(runtime_name) if isinstance(runtimes, dict) else None
@@ -186,6 +208,10 @@ def install_profile(install_root: Path, name: str) -> dict[str, Any]:
 def select_active_profile(install_root: Path, name: str) -> Path:
     """Validate and atomically select an installed Profile, returning the backup path."""
     root = install_root.expanduser().resolve()
+    if read_json(root / "config" / "session.json").get("schema") == 4:
+        raise ConfigError(
+            "schema 4 has no active_profile; use Alpine Promotion or a one-session --profile override"
+        )
     resolve_session(root, name, require_runtime=True)
     path = root / "config" / "session.json"
     with FileLease(root / ".setup.lock", {"kind": "profile-selection", "profile": name}):
@@ -216,7 +242,6 @@ def sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
 
 def hardware_manifest_identity(root: Path = REPO_ROOT) -> dict[str, str] | None:
     candidates = sorted((root / "inventory").glob("hardware-*.json"))
-    candidates += sorted((root / "inventory").glob("hardware-*.json"))
     if not candidates:
         return None
     manifest = candidates[-1]

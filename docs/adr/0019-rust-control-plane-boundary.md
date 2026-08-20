@@ -8,7 +8,7 @@ Accepted — 2026-08-20
 
 The existing Python, PowerShell and C# control plane established a working local-model path, but its authority is split across process lifecycle, configuration, measurement, qualification and launch adapters. Fresh pre-migration verification exposed three failures at those seams: a concurrent launcher-state dialog hang, inventory dependence on PowerShell module autoloading and an inherited-pipe deadlock after a successful profile transition.
 
-This decision reopens the implementation recommendation in `docs/AUDIT-2026-08-19.md`. It does not reopen ADR 0018's production rollback rule or move inference implementation out of `llama.cpp`.
+This decision replaces the earlier script-authority recommendation. It does not reopen ADR 0018's rollback rule or move inference implementation out of `llama.cpp`.
 
 ## Decision
 

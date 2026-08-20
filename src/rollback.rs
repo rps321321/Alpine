@@ -42,10 +42,15 @@ pub fn run(options: &RollbackProofOptions) -> Result<RollbackProofReport, String
     validate_options(options)?;
     external::current_anchor(&options.database, &options.anchor_run_id)?;
     let resolved = config::resolve(&options.install_root, Some(ROLLBACK_PROFILE), true)?;
-    if resolved.profile.status != config::ProfileStatus::Production
+    let deployment = crate::deployment::status(&options.install_root)?;
+    if deployment
+        .roles
+        .as_ref()
+        .map(|roles| roles.rollback_profile.as_str())
+        != Some(ROLLBACK_PROFILE)
         || resolved.profile.context != 16_384
     {
-        return Err("stable-16k is not a 16K production rollback Profile".to_owned());
+        return Err("stable-16k is not the current 16K rollback Profile".to_owned());
     }
     let capacity_path = resolved.install_root.join("logs/inference.lease");
     let _capacity = InterprocessLock::acquire(&capacity_path, options.lease_timeout)

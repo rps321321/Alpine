@@ -2,6 +2,7 @@ mod clock;
 mod config;
 mod context;
 mod decision;
+mod deployment;
 mod evaluation;
 mod evidence;
 mod experiment;
@@ -12,6 +13,7 @@ mod identity;
 mod locking;
 mod opencode;
 mod process;
+mod public_evidence;
 mod qualification;
 mod rollback;
 mod session;
@@ -19,9 +21,14 @@ mod stability;
 mod support;
 mod tuning;
 
-pub use config::{Profile, ProfileStatus, ResolvedSession, SessionConfig};
+pub use config::{Profile, ResolvedSession, SessionConfig};
 pub use context::{NearLimitContextOptions, NearLimitContextReport};
 pub use decision::Decision;
+pub use deployment::{
+    BootstrapDeploymentOptions, DeploymentChangeReport, DeploymentEvent, DeploymentEventPayload,
+    DeploymentRoles, DeploymentStatus, OpenSuspension, PromoteOptions, QualificationReference,
+    RecordIncidentOptions, ResolveIncidentOptions, RollbackDeploymentOptions, RollbackDisposition,
+};
 pub use evaluation::{
     EvaluationLimits, EvaluationOptions, EvaluationPlan, EvaluationReport, MicrobenchmarkBudget,
     ProfileMeasurement, QualificationPlan,
@@ -29,13 +36,18 @@ pub use evaluation::{
 pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use experiment::{ExperimentReport, MicrobenchmarkOptions};
 pub use external::{
-    ExternalEvidenceKind, ExternalEvidenceStatus, ExternalEvidenceStatusKind,
-    OperatorReviewOptions, RecordedExternalEvidence,
+    AcceptedResidualRisk, CapabilityCategory, CapabilityDisposition, CapabilityOutcome,
+    CapabilityReviewDecision, CapabilityReviewEvidence, CapabilityScenario, ExternalEvidenceKind,
+    ExternalEvidenceStatus, ExternalEvidenceStatusKind, OperatorReviewOptions,
+    PublicCapabilityReviewFacts, RecordedExternalEvidence,
 };
 pub use golden::{GoldenAgentOptions, GoldenAgentReport};
 pub use hardware::{HardwareReport, HardwareSnapshot};
 pub use identity::runtime_bundle_sha256;
 pub use opencode::{OpenCodeOptions, OpenCodeReport};
+pub use public_evidence::{
+    PublicArtifactDigest, PublicEvidenceBundle, PublicEvidenceOptions, PublicQualificationFacts,
+};
 pub use qualification::{
     EvidencePhase, QualificationCheck, QualificationReport, QualificationRequest,
     QualificationTarget, RunQualificationOptions, RunQualificationReport,
@@ -147,6 +159,44 @@ impl Alpine {
     pub fn inspect_support(path: &Path, timeout: Duration) -> Result<SupportReport, AlpineError> {
         let (envelope, bytes) = support::read_envelope(path).map_err(AlpineError::InvalidInput)?;
         support::inspect(&envelope, &bytes, timeout).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn deployment_status(install_root: &Path) -> Result<DeploymentStatus, AlpineError> {
+        deployment::status(install_root).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn bootstrap_deployment(
+        options: &BootstrapDeploymentOptions,
+    ) -> Result<DeploymentChangeReport, AlpineError> {
+        deployment::bootstrap(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn promote(options: &PromoteOptions) -> Result<DeploymentChangeReport, AlpineError> {
+        deployment::promote(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn generate_public_evidence(
+        options: &PublicEvidenceOptions,
+    ) -> Result<PublicEvidenceBundle, AlpineError> {
+        public_evidence::generate(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn rollback_deployment(
+        options: &RollbackDeploymentOptions,
+    ) -> Result<DeploymentChangeReport, AlpineError> {
+        deployment::rollback(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn record_incident(
+        options: &RecordIncidentOptions,
+    ) -> Result<DeploymentChangeReport, AlpineError> {
+        deployment::record_incident(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn resolve_incident(
+        options: &ResolveIncidentOptions,
+    ) -> Result<DeploymentChangeReport, AlpineError> {
+        deployment::resolve_incident(options).map_err(AlpineError::InvalidInput)
     }
 
     pub fn inspect_hardware(timeout: Duration) -> Result<HardwareReport, AlpineError> {

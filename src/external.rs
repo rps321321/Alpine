@@ -4,7 +4,7 @@ use crate::identity::{runtime_bundle_sha256, sha256_bytes, sha256_file, tree_sha
 use crate::qualification::EvidenceIdentity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +36,8 @@ impl ExternalEvidenceKind {
 #[serde(rename_all = "kebab-case")]
 enum EvidenceDecision {
     Pass,
+    Fail,
+    Inconclusive,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +196,119 @@ pub(crate) struct RollbackProfileEvidence {
     pub restored_prior_session: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapabilityCategory {
+    TrivialConversation,
+    RepositoryOrientation,
+    Diagnosis,
+    ScopedCodeChange,
+    LongerHorizonWork,
+    WebResearch,
+    PermissionBoundary,
+    SessionLifecycle,
+}
+
+impl CapabilityCategory {
+    const REQUIRED: [Self; 8] = [
+        Self::TrivialConversation,
+        Self::RepositoryOrientation,
+        Self::Diagnosis,
+        Self::ScopedCodeChange,
+        Self::LongerHorizonWork,
+        Self::WebResearch,
+        Self::PermissionBoundary,
+        Self::SessionLifecycle,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TrivialConversation => "trivial-conversation",
+            Self::RepositoryOrientation => "repository-orientation",
+            Self::Diagnosis => "diagnosis",
+            Self::ScopedCodeChange => "scoped-code-change",
+            Self::LongerHorizonWork => "longer-horizon-work",
+            Self::WebResearch => "web-research",
+            Self::PermissionBoundary => "permission-boundary",
+            Self::SessionLifecycle => "session-lifecycle",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapabilityOutcome {
+    Pass,
+    Fail,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapabilityDisposition {
+    Blocking,
+    AcceptedRisk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapabilityReviewDecision {
+    Approved,
+    Rejected,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedResidualRisk {
+    pub id: String,
+    pub description: String,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityScenario {
+    pub id: String,
+    pub category: CapabilityCategory,
+    pub task: String,
+    pub expected_capability: String,
+    pub observed_behavior: String,
+    pub outcome: CapabilityOutcome,
+    #[serde(default)]
+    pub limitations: Vec<String>,
+    pub disposition: Option<CapabilityDisposition>,
+    pub disposition_rationale: Option<String>,
+    #[serde(default)]
+    pub accepted_risk_ids: Vec<String>,
+    pub supporting_artifact_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityReviewEvidence {
+    pub schema: u32,
+    pub reviewer_role: String,
+    pub scenarios: Vec<CapabilityScenario>,
+    #[serde(default)]
+    pub accepted_residual_risks: Vec<AcceptedResidualRisk>,
+    pub final_decision: CapabilityReviewDecision,
+    pub final_rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PublicCapabilityReviewFacts {
+    pub schema: u32,
+    pub reviewer_role: String,
+    pub category_coverage: BTreeMap<String, u32>,
+    pub outcome_counts: BTreeMap<String, u32>,
+    pub disposition_counts: BTreeMap<String, u32>,
+    pub scenario_count: u32,
+    pub accepted_residual_risk_count: u32,
+    pub final_decision: CapabilityReviewDecision,
+    pub supporting_artifact_sha256: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RecordExternalEvidenceOptions {
     pub(crate) repository_root: PathBuf,
@@ -228,6 +343,8 @@ pub struct RecordedExternalEvidence {
 pub enum ExternalEvidenceStatusKind {
     Satisfied,
     Missing,
+    Rejected,
+    Inconclusive,
     Stale,
     IdentityMismatched,
     Invalid,
@@ -305,10 +422,11 @@ pub(crate) fn record(
     {
         return Err("evidence reviewer must be at most 200 printable characters".to_owned());
     }
+    let decision = evidence_decision(options.kind, &options.evidence)?;
     let payload = ExternalEvidence {
         schema: 1,
         kind: options.kind,
-        decision: EvidenceDecision::Pass,
+        decision,
         anchor_run_id: options.anchor_run_id.clone(),
         identity: identity.clone(),
         producer_sha256,
@@ -431,6 +549,87 @@ pub(crate) fn current_anchor(database: &Path, anchor_run_id: &str) -> Result<Run
         return Err("current Alpine binary does not match the anchor software identity".to_owned());
     }
     Ok(anchor)
+}
+
+pub(crate) fn public_capability_review_facts(
+    path: &Path,
+    declared_sha256: &str,
+    anchor_run_id: &str,
+    identity: &EvidenceIdentity,
+) -> Result<PublicCapabilityReviewFacts, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("capability review artifact is unavailable: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 2 * 1024 * 1024
+    {
+        return Err(
+            "capability review artifact must be a real file no larger than 2 MiB".to_owned(),
+        );
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read capability review artifact: {error}"))?;
+    if sha256_bytes(&bytes) != declared_sha256 {
+        return Err("capability review artifact digest does not match Qualification".to_owned());
+    }
+    let payload: ExternalEvidence = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid capability review artifact: {error}"))?;
+    validate_contract(
+        &payload,
+        ExternalEvidenceKind::OperatorReviewedCapabilityReport,
+        anchor_run_id,
+        identity,
+    )?;
+    validate_semantics(
+        &payload,
+        ExternalEvidenceKind::OperatorReviewedCapabilityReport,
+    )?;
+    let review: CapabilityReviewEvidence = serde_json::from_value(payload.evidence)
+        .map_err(|error| format!("invalid structured capability review: {error}"))?;
+
+    let mut category_coverage = BTreeMap::new();
+    let mut outcome_counts = BTreeMap::from([
+        ("pass".to_owned(), 0),
+        ("fail".to_owned(), 0),
+        ("inconclusive".to_owned(), 0),
+    ]);
+    let mut disposition_counts = BTreeMap::from([
+        ("blocking".to_owned(), 0),
+        ("accepted-risk".to_owned(), 0),
+        ("not-applicable".to_owned(), 0),
+    ]);
+    let mut supporting_artifact_sha256 = BTreeSet::new();
+    for scenario in &review.scenarios {
+        *category_coverage
+            .entry(scenario.category.as_str().to_owned())
+            .or_insert(0) += 1;
+        let outcome = match scenario.outcome {
+            CapabilityOutcome::Pass => "pass",
+            CapabilityOutcome::Fail => "fail",
+            CapabilityOutcome::Inconclusive => "inconclusive",
+        };
+        *outcome_counts.entry(outcome.to_owned()).or_insert(0) += 1;
+        let disposition = match scenario.disposition {
+            Some(CapabilityDisposition::Blocking) => "blocking",
+            Some(CapabilityDisposition::AcceptedRisk) => "accepted-risk",
+            None => "not-applicable",
+        };
+        *disposition_counts
+            .entry(disposition.to_owned())
+            .or_insert(0) += 1;
+        if let Some(digest) = &scenario.supporting_artifact_sha256 {
+            supporting_artifact_sha256.insert(digest.clone());
+        }
+    }
+    Ok(PublicCapabilityReviewFacts {
+        schema: review.schema,
+        reviewer_role: review.reviewer_role,
+        category_coverage,
+        outcome_counts,
+        disposition_counts,
+        scenario_count: review.scenarios.len() as u32,
+        accepted_residual_risk_count: review.accepted_residual_risks.len() as u32,
+        final_decision: review.final_decision,
+        supporting_artifact_sha256: supporting_artifact_sha256.into_iter().collect(),
+    })
 }
 
 pub(crate) fn inspect_required(
@@ -559,6 +758,23 @@ fn inspect_artifact(
         .map_err(|reason| (ExternalEvidenceStatusKind::Stale, reason))?;
     validate_semantics(&payload, kind)
         .map_err(|reason| (ExternalEvidenceStatusKind::Invalid, reason))?;
+    if kind == ExternalEvidenceKind::OperatorReviewedCapabilityReport {
+        match payload.decision {
+            EvidenceDecision::Pass => {}
+            EvidenceDecision::Fail => {
+                return Err((
+                    ExternalEvidenceStatusKind::Rejected,
+                    "the human capability review rejected this deployment".to_owned(),
+                ));
+            }
+            EvidenceDecision::Inconclusive => {
+                return Err((
+                    ExternalEvidenceStatusKind::Inconclusive,
+                    "the human capability review was inconclusive".to_owned(),
+                ));
+            }
+        }
+    }
     Ok(digest)
 }
 
@@ -570,7 +786,6 @@ fn validate_contract(
 ) -> Result<(), String> {
     if payload.schema != 1
         || payload.kind != kind
-        || payload.decision != EvidenceDecision::Pass
         || payload.anchor_run_id != anchor_run_id
         || &payload.identity != identity
     {
@@ -649,12 +864,20 @@ fn validate_current(
                 .map_err(|error| format!("failed to read rollback Profile: {error}"))?,
         )
         .map_err(|error| format!("invalid rollback Profile: {error}"))?;
+        let deployment = crate::deployment::status(install_root)?;
+        let rollback_role = deployment
+            .roles
+            .as_ref()
+            .map(|roles| roles.rollback_profile.as_str());
         if profile.name != "stable-16k"
-            || profile.status != crate::config::ProfileStatus::Production
+            || rollback_role != Some("stable-16k")
             || profile.context != evidence.context_tokens
             || profile.runtime != evidence.runtime
         {
-            return Err("rollback Profile no longer satisfies the production contract".to_owned());
+            return Err(
+                "rollback Profile no longer satisfies the current rollback-role contract"
+                    .to_owned(),
+            );
         }
     }
     Ok(())
@@ -685,11 +908,210 @@ fn validate_semantics(
             {
                 return Err("operator capability evidence has no explicit reviewer".to_owned());
             }
-            require_true(&payload.evidence, "/capability_review_passed")?;
+            let review = validate_capability_review(&payload.evidence)?;
+            let expected = match review.final_decision {
+                CapabilityReviewDecision::Approved => EvidenceDecision::Pass,
+                CapabilityReviewDecision::Rejected => EvidenceDecision::Fail,
+                CapabilityReviewDecision::Inconclusive => EvidenceDecision::Inconclusive,
+            };
+            if payload.decision != expected {
+                return Err(
+                    "operator capability decision does not match the structured review".to_owned(),
+                );
+            }
         }
         ExternalEvidenceKind::RollbackProfileAvailable => {
             validate_rollback_profile(&payload.evidence)?;
         }
+    }
+    if kind != ExternalEvidenceKind::OperatorReviewedCapabilityReport
+        && payload.decision != EvidenceDecision::Pass
+    {
+        return Err("automated external evidence must carry a pass decision".to_owned());
+    }
+    Ok(())
+}
+
+fn evidence_decision(
+    kind: ExternalEvidenceKind,
+    value: &Value,
+) -> Result<EvidenceDecision, String> {
+    if kind != ExternalEvidenceKind::OperatorReviewedCapabilityReport {
+        return Ok(EvidenceDecision::Pass);
+    }
+    let review = validate_capability_review(value)?;
+    Ok(match review.final_decision {
+        CapabilityReviewDecision::Approved => EvidenceDecision::Pass,
+        CapabilityReviewDecision::Rejected => EvidenceDecision::Fail,
+        CapabilityReviewDecision::Inconclusive => EvidenceDecision::Inconclusive,
+    })
+}
+
+fn validate_capability_review(value: &Value) -> Result<CapabilityReviewEvidence, String> {
+    let review: CapabilityReviewEvidence = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid capability-review evidence: {error}"))?;
+    if review.schema != 1 {
+        return Err("capability-review evidence schema must be 1".to_owned());
+    }
+    validate_review_text("reviewer_role", &review.reviewer_role, 200)?;
+    validate_review_text("final_rationale", &review.final_rationale, 4000)?;
+    if review.scenarios.len() < CapabilityCategory::REQUIRED.len() || review.scenarios.len() > 64 {
+        return Err("capability review must contain between 8 and 64 scenarios".to_owned());
+    }
+    if review.accepted_residual_risks.len() > 64 {
+        return Err("capability review contains too many accepted residual risks".to_owned());
+    }
+
+    let mut scenario_ids = BTreeSet::new();
+    let mut categories = BTreeSet::new();
+    let mut risk_ids = BTreeSet::new();
+    for risk in &review.accepted_residual_risks {
+        validate_review_id("accepted residual risk", &risk.id)?;
+        validate_review_text(
+            "accepted residual risk description",
+            &risk.description,
+            4000,
+        )?;
+        validate_review_text("accepted residual risk rationale", &risk.rationale, 4000)?;
+        if !risk_ids.insert(risk.id.as_str()) {
+            return Err(format!("duplicate accepted residual risk id: {}", risk.id));
+        }
+    }
+
+    let mut has_blocking = false;
+    for scenario in &review.scenarios {
+        validate_review_id("scenario", &scenario.id)?;
+        if !scenario_ids.insert(scenario.id.as_str()) {
+            return Err(format!("duplicate capability scenario id: {}", scenario.id));
+        }
+        categories.insert(scenario.category);
+        validate_review_text("scenario task", &scenario.task, 8000)?;
+        validate_review_text(
+            "scenario expected_capability",
+            &scenario.expected_capability,
+            4000,
+        )?;
+        validate_review_text(
+            "scenario observed_behavior",
+            &scenario.observed_behavior,
+            8000,
+        )?;
+        if scenario.limitations.len() > 32 {
+            return Err(format!(
+                "scenario {} contains too many limitations",
+                scenario.id
+            ));
+        }
+        for limitation in &scenario.limitations {
+            validate_review_text("scenario limitation", limitation, 4000)?;
+        }
+        if let Some(digest) = scenario.supporting_artifact_sha256.as_deref() {
+            if !is_sha256(digest) {
+                return Err(format!(
+                    "scenario {} supporting artifact digest is not SHA-256",
+                    scenario.id
+                ));
+            }
+        }
+
+        match scenario.outcome {
+            CapabilityOutcome::Pass => {
+                if scenario.disposition.is_some()
+                    || scenario.disposition_rationale.is_some()
+                    || !scenario.accepted_risk_ids.is_empty()
+                {
+                    return Err(format!(
+                        "passing scenario {} must not carry a failure disposition",
+                        scenario.id
+                    ));
+                }
+            }
+            CapabilityOutcome::Fail | CapabilityOutcome::Inconclusive => {
+                let disposition = scenario.disposition.ok_or_else(|| {
+                    format!(
+                        "non-passing scenario {} requires a blocking or accepted-risk disposition",
+                        scenario.id
+                    )
+                })?;
+                validate_review_text(
+                    "scenario disposition rationale",
+                    scenario
+                        .disposition_rationale
+                        .as_deref()
+                        .unwrap_or_default(),
+                    4000,
+                )?;
+                match disposition {
+                    CapabilityDisposition::Blocking => {
+                        has_blocking = true;
+                        if !scenario.accepted_risk_ids.is_empty() {
+                            return Err(format!(
+                                "blocking scenario {} cannot cite accepted residual risks",
+                                scenario.id
+                            ));
+                        }
+                    }
+                    CapabilityDisposition::AcceptedRisk => {
+                        if scenario.accepted_risk_ids.is_empty() {
+                            return Err(format!(
+                                "accepted-risk scenario {} must cite at least one residual risk",
+                                scenario.id
+                            ));
+                        }
+                        for id in &scenario.accepted_risk_ids {
+                            if !risk_ids.contains(id.as_str()) {
+                                return Err(format!(
+                                    "scenario {} cites unknown residual risk {}",
+                                    scenario.id, id
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let missing = CapabilityCategory::REQUIRED
+        .into_iter()
+        .filter(|category| !categories.contains(category))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "capability review is missing required categories: {:?}",
+            missing
+        ));
+    }
+    if review.final_decision == CapabilityReviewDecision::Approved && has_blocking {
+        return Err("approved capability review cannot contain a blocking disposition".to_owned());
+    }
+    Ok(review)
+}
+
+fn validate_review_id(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 100
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(format!(
+            "{label} id must be 1-100 lowercase ASCII letters, digits, or hyphens"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_review_text(label: &str, value: &str, maximum: usize) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > maximum
+        || trimmed
+            .chars()
+            .any(|character| character.is_control() && character != '\n' && character != '\t')
+    {
+        return Err(format!(
+            "{label} must be non-empty, at most {maximum} characters, and contain no unsafe controls"
+        ));
     }
     Ok(())
 }
@@ -1035,14 +1457,6 @@ fn status(
     }
 }
 
-fn require_true(value: &Value, pointer: &str) -> Result<(), String> {
-    if value.pointer(pointer).and_then(Value::as_bool) == Some(true) {
-        Ok(())
-    } else {
-        Err(format!("evidence field {pointer} must be true"))
-    }
-}
-
 fn walk_files(path: &Path) -> Result<Vec<PathBuf>, String> {
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         format!(
@@ -1274,6 +1688,35 @@ mod tests {
         }
     }
 
+    fn capability_review() -> CapabilityReviewEvidence {
+        CapabilityReviewEvidence {
+            schema: 1,
+            reviewer_role: "project-owner-and-daily-operator".to_owned(),
+            scenarios: CapabilityCategory::REQUIRED
+                .into_iter()
+                .enumerate()
+                .map(|(offset, category)| CapabilityScenario {
+                    id: format!("scenario-{}", offset + 1),
+                    category,
+                    task: format!("Realistic task for category {}", offset + 1),
+                    expected_capability: "Complete the task usefully and safely".to_owned(),
+                    observed_behavior: "The complete production workflow behaved as expected"
+                        .to_owned(),
+                    outcome: CapabilityOutcome::Pass,
+                    limitations: Vec::new(),
+                    disposition: None,
+                    disposition_rationale: None,
+                    accepted_risk_ids: Vec::new(),
+                    supporting_artifact_sha256: None,
+                })
+                .collect(),
+            accepted_residual_risks: Vec::new(),
+            final_decision: CapabilityReviewDecision::Approved,
+            final_rationale: "All required categories were exercised with no blocking findings"
+                .to_owned(),
+        }
+    }
+
     #[test]
     fn same_process_gate_recomputes_raw_token_and_sequence_evidence() {
         let valid = serde_json::to_value(same_process()).unwrap();
@@ -1354,5 +1797,91 @@ mod tests {
         let mut not_restored = rollback_profile();
         not_restored.restored_prior_session = false;
         assert!(validate_rollback_profile(&serde_json::to_value(not_restored).unwrap()).is_err());
+    }
+
+    #[test]
+    fn capability_review_requires_complete_human_evidence_without_deciding_risk() {
+        let valid = capability_review();
+        assert!(validate_capability_review(&serde_json::to_value(&valid).unwrap()).is_ok());
+        assert_eq!(
+            evidence_decision(
+                ExternalEvidenceKind::OperatorReviewedCapabilityReport,
+                &serde_json::to_value(&valid).unwrap()
+            )
+            .unwrap(),
+            EvidenceDecision::Pass
+        );
+
+        let mut missing = capability_review();
+        missing.scenarios.pop();
+        assert!(validate_capability_review(&serde_json::to_value(missing).unwrap()).is_err());
+
+        let mut incomplete = capability_review();
+        incomplete.scenarios[0].outcome = CapabilityOutcome::Inconclusive;
+        assert!(validate_capability_review(&serde_json::to_value(incomplete).unwrap()).is_err());
+
+        let mut accepted = capability_review();
+        accepted.accepted_residual_risks = vec![AcceptedResidualRisk {
+            id: "slow-first-response".to_owned(),
+            description: "The first response after loading can be slow".to_owned(),
+            rationale: "The delay is visible, bounded, and acceptable for local operation"
+                .to_owned(),
+        }];
+        accepted.scenarios[0].outcome = CapabilityOutcome::Inconclusive;
+        accepted.scenarios[0].disposition = Some(CapabilityDisposition::AcceptedRisk);
+        accepted.scenarios[0].disposition_rationale = Some(
+            "The workflow remained useful and the bounded delay is explicitly accepted".to_owned(),
+        );
+        accepted.scenarios[0].accepted_risk_ids = vec!["slow-first-response".to_owned()];
+        assert!(validate_capability_review(&serde_json::to_value(accepted).unwrap()).is_ok());
+
+        let mut blocking = capability_review();
+        blocking.scenarios[0].outcome = CapabilityOutcome::Fail;
+        blocking.scenarios[0].disposition = Some(CapabilityDisposition::Blocking);
+        blocking.scenarios[0].disposition_rationale =
+            Some("The workflow changed an unrelated file".to_owned());
+        assert!(validate_capability_review(&serde_json::to_value(blocking).unwrap()).is_err());
+    }
+
+    #[test]
+    fn public_capability_projection_excludes_private_review_content_and_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capability.json");
+        let mut review = capability_review();
+        review.scenarios[0].task = "PRIVATE TASK CONTENT".to_owned();
+        review.scenarios[0].observed_behavior = "PRIVATE OBSERVATION CONTENT".to_owned();
+        review.scenarios[0].supporting_artifact_sha256 = Some("9".repeat(64));
+        let identity = EvidenceIdentity {
+            hardware: "a".repeat(64),
+            software: "b".repeat(64),
+            model: "c".repeat(64),
+            runtime: "d".repeat(64),
+            workload: "e".repeat(64),
+            configuration: "f".repeat(64),
+            policy: "1".repeat(64),
+        };
+        let payload = ExternalEvidence {
+            schema: 1,
+            kind: ExternalEvidenceKind::OperatorReviewedCapabilityReport,
+            decision: EvidenceDecision::Pass,
+            anchor_run_id: "final-run".to_owned(),
+            identity: identity.clone(),
+            producer_sha256: identity.software.clone(),
+            created_at: "2026-08-20T00:00:00Z".to_owned(),
+            evidence: serde_json::to_value(review).unwrap(),
+            reviewed_by: Some("PRIVATE REVIEWER LABEL".to_owned()),
+        };
+        let mut bytes = serde_json::to_vec_pretty(&payload).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(&path, &bytes).unwrap();
+        let facts =
+            public_capability_review_facts(&path, &sha256_bytes(&bytes), "final-run", &identity)
+                .unwrap();
+        let rendered = serde_json::to_string(&facts).unwrap();
+        assert!(!rendered.contains("PRIVATE TASK CONTENT"));
+        assert!(!rendered.contains("PRIVATE OBSERVATION CONTENT"));
+        assert!(!rendered.contains("PRIVATE REVIEWER LABEL"));
+        assert!(rendered.contains("project-owner-and-daily-operator"));
+        assert!(rendered.contains(&"9".repeat(64)));
     }
 }

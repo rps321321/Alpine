@@ -1,6 +1,5 @@
 {
   "name": "turbo-16k",
-  "status": "candidate",
   "runtime": "custom",
   "context": 16384,
   "output": 4096,

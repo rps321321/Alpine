@@ -72,15 +72,12 @@ function New-SessionConfigDocument {
         [Parameter(Mandatory = $true)][string]$ChatTemplatePath,
         [Parameter(Mandatory = $true)]$Cleanup
     )
-    $activeServer = if ($ProfileRuntime -eq 'custom') { $CustomServer } else { $OfficialServer }
     return [ordered]@{
-        schema = 3
+        schema = 4
         root = $InstallRoot
         host = '127.0.0.1'
         port = 8100
-        active_profile = $ProfileName
         runtimes = [ordered]@{ official = $OfficialServer; custom = $CustomServer }
-        llama_server = $activeServer
         model = $ModelPath
         mmproj = $MmprojPath
         chat_template = $ChatTemplatePath

@@ -1,7 +1,9 @@
 use alpine_control_plane::{
-    AcquireSessionOptions, Alpine, CleanRestartStabilityOptions, EvaluationOptions, EvidencePhase,
-    ExternalEvidenceKind, GoldenAgentOptions, MicrobenchmarkOptions, NearLimitContextOptions,
-    OpenCodeOptions, OperatorReviewOptions, ReleaseSessionOptions, RollbackProofOptions,
+    AcquireSessionOptions, Alpine, BootstrapDeploymentOptions, CleanRestartStabilityOptions,
+    EvaluationOptions, EvidencePhase, ExternalEvidenceKind, GoldenAgentOptions,
+    MicrobenchmarkOptions, NearLimitContextOptions, OpenCodeOptions, OperatorReviewOptions,
+    PromoteOptions, PublicEvidenceOptions, RecordIncidentOptions, ReleaseSessionOptions,
+    ResolveIncidentOptions, RollbackDeploymentOptions, RollbackDisposition, RollbackProofOptions,
     RunQualificationOptions, SameProcessStabilityOptions, SessionAcquisition, StartSessionOptions,
     StopSessionOptions, TuningDisposition, TuningOptions,
 };
@@ -56,6 +58,21 @@ enum EvidenceKind {
     OperatorReviewedCapabilityReport,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RollbackDispositionArgument {
+    Suspended,
+    Revoked,
+}
+
+impl From<RollbackDispositionArgument> for RollbackDisposition {
+    fn from(value: RollbackDispositionArgument) -> Self {
+        match value {
+            RollbackDispositionArgument::Suspended => Self::Suspended,
+            RollbackDispositionArgument::Revoked => Self::Revoked,
+        }
+    }
+}
+
 impl From<EvidenceKind> for ExternalEvidenceKind {
     fn from(value: EvidenceKind) -> Self {
         match value {
@@ -68,6 +85,122 @@ impl From<EvidenceKind> for ExternalEvidenceKind {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    DeploymentStatus {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        compact: bool,
+    },
+    DeploymentInit {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        daily_default: String,
+        #[arg(long)]
+        rollback_profile: String,
+        #[arg(long)]
+        operator: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    Promote {
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_os_t = default_database())]
+        database: PathBuf,
+        #[arg(long)]
+        final_run_id: String,
+        #[arg(long = "tuning-run", required = true)]
+        tuning_run_ids: Vec<String>,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        expected_daily_default: String,
+        #[arg(long)]
+        operator: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value_t = 10_000)]
+        support_timeout_ms: u64,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    Rollback {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        expected_daily_default: String,
+        #[arg(long)]
+        promotion_event_id: String,
+        #[arg(long, value_enum, default_value_t = RollbackDispositionArgument::Suspended)]
+        disposition: RollbackDispositionArgument,
+        #[arg(long)]
+        operator: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    Incident {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        promotion_event_id: Option<String>,
+        #[arg(long)]
+        operator: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    ResolveIncident {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        suspension_event_id: String,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        operator: String,
+        #[arg(long)]
+        resolution: String,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    PublicEvidence {
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_os_t = default_database())]
+        database: PathBuf,
+        #[arg(long)]
+        final_run_id: String,
+        #[arg(long = "tuning-run", required = true)]
+        tuning_run_ids: Vec<String>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value_t = 10_000)]
+        support_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
     Evaluate {
         #[arg(long, default_value = "config/evaluation-plan.json")]
         plan: PathBuf,
@@ -264,8 +397,8 @@ enum Commands {
         install_root: PathBuf,
         #[arg(long, default_value_os_t = default_project())]
         project: PathBuf,
-        #[arg(long, default_value = "stable-16k")]
-        profile: String,
+        #[arg(long)]
+        profile: Option<String>,
         #[arg(long)]
         launch_id: Option<String>,
         #[arg(long)]
@@ -446,6 +579,150 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
     match cli.command {
+        Commands::DeploymentStatus {
+            install_root,
+            compact,
+        } => {
+            write_json(&Alpine::deployment_status(&install_root)?, compact)?;
+            Ok(0)
+        }
+        Commands::DeploymentInit {
+            install_root,
+            daily_default,
+            rollback_profile,
+            operator,
+            reason,
+            lock_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::bootstrap_deployment(&BootstrapDeploymentOptions {
+                install_root,
+                daily_default,
+                rollback_profile,
+                operator,
+                reason,
+                lock_timeout: Duration::from_millis(lock_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
+        Commands::Promote {
+            repository_root,
+            install_root,
+            database,
+            final_run_id,
+            tuning_run_ids,
+            profile,
+            expected_daily_default,
+            operator,
+            reason,
+            support_timeout_ms,
+            lock_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::promote(&PromoteOptions {
+                repository_root,
+                install_root,
+                database,
+                final_run_id,
+                tuning_run_ids,
+                profile,
+                expected_daily_default,
+                operator,
+                reason,
+                support_timeout: Duration::from_millis(support_timeout_ms),
+                lock_timeout: Duration::from_millis(lock_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
+        Commands::Rollback {
+            install_root,
+            expected_daily_default,
+            promotion_event_id,
+            disposition,
+            operator,
+            reason,
+            lock_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::rollback_deployment(&RollbackDeploymentOptions {
+                install_root,
+                expected_daily_default,
+                promotion_event_id,
+                disposition: disposition.into(),
+                operator,
+                reason,
+                lock_timeout: Duration::from_millis(lock_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
+        Commands::Incident {
+            install_root,
+            profile,
+            promotion_event_id,
+            operator,
+            reason,
+            lock_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::record_incident(&RecordIncidentOptions {
+                install_root,
+                profile,
+                promotion_event_id,
+                operator,
+                reason,
+                lock_timeout: Duration::from_millis(lock_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
+        Commands::ResolveIncident {
+            install_root,
+            suspension_event_id,
+            profile,
+            operator,
+            resolution,
+            lock_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::resolve_incident(&ResolveIncidentOptions {
+                install_root,
+                suspension_event_id,
+                profile,
+                operator,
+                resolution,
+                lock_timeout: Duration::from_millis(lock_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
+        Commands::PublicEvidence {
+            repository_root,
+            install_root,
+            database,
+            final_run_id,
+            tuning_run_ids,
+            output,
+            support_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::generate_public_evidence(&PublicEvidenceOptions {
+                repository_root,
+                install_root,
+                database,
+                final_run_id,
+                tuning_run_ids,
+                support_timeout: Duration::from_millis(support_timeout_ms),
+            })?;
+            if let Some(path) = output {
+                write_json_file(&path, &report, compact)?;
+            } else {
+                write_json(&report, compact)?;
+            }
+            Ok(0)
+        }
         Commands::Evaluate {
             plan,
             repository_root,

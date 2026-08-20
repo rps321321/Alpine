@@ -38,8 +38,9 @@ function Get-SessionConfig {
     if (-not (Test-Path -LiteralPath $path)) { throw "Session config missing: $path" }
     try { $session = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json }
     catch { throw "Malformed Session Config $path`: $($_.Exception.Message)" }
-    if ([int](Get-PropertyValue $session 'schema' 0) -ne 3) {
-        throw "Unsupported Session Config schema '$((Get-PropertyValue $session 'schema' $null))' in $path; expected 3."
+    $schema = [int](Get-PropertyValue $session 'schema' 0)
+    if ($schema -notin @(3, 4)) {
+        throw "Unsupported Session Config schema '$((Get-PropertyValue $session 'schema' $null))' in $path; expected 3 or 4."
     }
     $configuredRoot = [IO.Path]::GetFullPath((Get-RequiredString $session 'root' $path))
     if ($configuredRoot.TrimEnd('\') -ine ([IO.Path]::GetFullPath($root)).TrimEnd('\')) {
@@ -50,7 +51,11 @@ function Get-SessionConfig {
     if (-not (Test-RequiredInteger $port 1 65535)) {
         throw "Session Config port must be between 1 and 65535: $path"
     }
-    foreach ($name in @('active_profile', 'model', 'mmproj', 'chat_template', 'api_key_file', 'base_url_file', 'state_file')) {
+    if ($schema -eq 3) { Get-RequiredString $session 'active_profile' $path | Out-Null }
+    if ($schema -eq 4 -and (Get-PropertyValue $session 'active_profile' $null)) {
+        throw "Schema 4 stores deployment roles outside Session Config; remove active_profile from $path."
+    }
+    foreach ($name in @('model', 'mmproj', 'chat_template', 'api_key_file', 'base_url_file', 'state_file')) {
         Get-RequiredString $session $name $path | Out-Null
     }
     $runtimes = Get-PropertyValue $session 'runtimes' $null
@@ -62,7 +67,21 @@ function Get-SessionConfig {
 
 function Get-ProfileConfig {
     param($Session, [string]$Name)
-    $selected = if ($Name) { $Name } else { [string]$Session.active_profile }
+    if ($Name) {
+        $selected = $Name
+    } elseif ([int]$Session.schema -eq 3) {
+        $selected = [string]$Session.active_profile
+    } else {
+        $alpine = Join-Path ([string]$Session.root) 'alpine.exe'
+        if (-not (Test-Path -LiteralPath $alpine -PathType Leaf)) {
+            throw 'Schema 4 default selection is Rust-owned and requires the installed alpine.exe.'
+        }
+        $raw = & $alpine deployment-status --install-root ([string]$Session.root) --compact
+        if ($LASTEXITCODE -ne 0) { throw 'Alpine could not derive the deployment daily_default.' }
+        try { $deployment = $raw | ConvertFrom-Json }
+        catch { throw "Alpine returned invalid deployment state: $($_.Exception.Message)" }
+        $selected = Get-RequiredString $deployment.roles 'daily_default' 'Alpine deployment state'
+    }
     $path = Join-Path $Session.root "profiles\$selected.json"
     if (-not (Test-Path -LiteralPath $path)) { throw "Profile missing: $path" }
     try { $profile = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json }
@@ -70,10 +89,7 @@ function Get-ProfileConfig {
     if ((Get-RequiredString $profile 'name' $path) -ne $selected) {
         throw "Profile name '$($profile.name)' does not match selected name '$selected'."
     }
-    $status = Get-RequiredString $profile 'status' $path
-    if ($status -notin @('experimental', 'candidate', 'validated', 'production')) {
-        throw "Unsupported Profile status '$status' in $path."
-    }
+    if ($profile.PSObject.Properties['status']) { $profile.PSObject.Properties.Remove('status') }
     foreach ($field in @('runtime', 'kv_cache')) { Get-RequiredString $profile $field $path | Out-Null }
     foreach ($field in @('context', 'output', 'parallel', 'threads', 'batch_size', 'ubatch_size', 'mtp_depth')) {
         $value = Get-PropertyValue $profile $field $null

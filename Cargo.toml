@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
+description = "Evidence-driven local AI inference control plane"
+license = "Apache-2.0"
+repository = "https://github.com/rps321321/local-models"
 
 [[bin]]
 name = "alpine"

@@ -1,6 +1,5 @@
 {
   "name": "fast-32k",
-  "status": "candidate",
   "runtime": "custom",
   "context": 32768,
   "output": 8192,
