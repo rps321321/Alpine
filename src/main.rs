@@ -1,7 +1,9 @@
 use alpine_control_plane::{
-    Alpine, MicrobenchmarkOptions, StartSessionOptions, StopSessionOptions,
+    AcquireSessionOptions, Alpine, MicrobenchmarkOptions, ReleaseSessionOptions,
+    SessionAcquisition, StartSessionOptions, StopSessionOptions,
 };
 use clap::{Parser, Subcommand};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -86,6 +88,40 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum SessionCommands {
+    Acquire {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        vision: bool,
+        #[arg(long)]
+        force_fallback: bool,
+        #[arg(long)]
+        allow_legacy_identity: bool,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        startup_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    Release {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        acquisition: PathBuf,
+        #[arg(long)]
+        keep_server: bool,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        startup_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
     Start {
         #[arg(long, default_value_os_t = default_install_root())]
         install_root: PathBuf,
@@ -202,6 +238,62 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
             Ok(0)
         }
         Commands::Session { command } => match command {
+            SessionCommands::Acquire {
+                install_root,
+                profile,
+                vision,
+                force_fallback,
+                allow_legacy_identity,
+                lock_timeout_ms,
+                startup_timeout_ms,
+                compact,
+                output,
+            } => {
+                let acquisition = Alpine::acquire_session(&AcquireSessionOptions {
+                    install_root,
+                    profile,
+                    vision,
+                    force_fallback,
+                    allow_legacy_identity,
+                    lock_timeout: Duration::from_millis(lock_timeout_ms),
+                    startup_timeout: Duration::from_millis(startup_timeout_ms),
+                })?;
+                if let Some(path) = output {
+                    write_json_file(&path, &acquisition, compact)?;
+                } else {
+                    write_json(&acquisition, compact)?;
+                }
+                Ok(0)
+            }
+            SessionCommands::Release {
+                install_root,
+                acquisition,
+                keep_server,
+                lock_timeout_ms,
+                startup_timeout_ms,
+                compact,
+            } => {
+                const MAX_ACQUISITION_BYTES: u64 = 1024 * 1024;
+                let metadata = std::fs::metadata(&acquisition)?;
+                if metadata.len() > MAX_ACQUISITION_BYTES {
+                    return Err(format!(
+                        "session acquisition exceeds the 1 MiB input limit: {}",
+                        acquisition.display()
+                    )
+                    .into());
+                }
+                let bytes = std::fs::read(&acquisition)?;
+                let acquisition: SessionAcquisition = serde_json::from_slice(&bytes)?;
+                let report = Alpine::release_session(&ReleaseSessionOptions {
+                    install_root,
+                    acquisition,
+                    keep_server,
+                    lock_timeout: Duration::from_millis(lock_timeout_ms),
+                    startup_timeout: Duration::from_millis(startup_timeout_ms),
+                })?;
+                write_json(&report, compact)?;
+                Ok(0)
+            }
             SessionCommands::Start {
                 install_root,
                 profile,
@@ -306,5 +398,27 @@ fn write_json(value: &impl serde::Serialize, compact: bool) -> Result<(), serde_
     } else {
         println!("{}", serde_json::to_string_pretty(value)?);
     }
+    Ok(())
+}
+
+fn write_json_file(
+    path: &std::path::Path,
+    value: &impl serde::Serialize,
+    compact: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    if compact {
+        serde_json::to_writer(&mut temporary, value)?;
+    } else {
+        serde_json::to_writer_pretty(&mut temporary, value)?;
+    }
+    temporary.write_all(b"\n")?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path)?;
     Ok(())
 }

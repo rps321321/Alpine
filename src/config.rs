@@ -1,3 +1,4 @@
+use crate::identity::sha256_bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -55,7 +56,11 @@ pub struct Profile {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResolvedSession {
     pub install_root: PathBuf,
+    pub session_config_path: PathBuf,
+    pub session_config_sha256: String,
     pub session: SessionConfig,
+    pub profile_path: PathBuf,
+    pub profile_sha256: String,
     pub profile_name: String,
     pub profile: Profile,
     pub runtime_name: String,
@@ -84,7 +89,8 @@ pub fn resolve(
     }
 
     let session_path = install_root.join("config/session.json");
-    let session: SessionConfig = read_json(&session_path, "Session Config")?;
+    let (session, session_bytes): (SessionConfig, _) =
+        read_json_with_bytes(&session_path, "Session Config")?;
     validate_session(&session, &session_path, &install_root)?;
 
     let profile_name = selected_profile.unwrap_or(&session.active_profile);
@@ -92,7 +98,7 @@ pub fn resolve(
     let profile_path = install_root
         .join("profiles")
         .join(format!("{profile_name}.json"));
-    let profile: Profile = read_json(&profile_path, "Profile")?;
+    let (profile, profile_bytes): (Profile, _) = read_json_with_bytes(&profile_path, "Profile")?;
     validate_profile(&profile, profile_name, &profile_path)?;
 
     let server = session
@@ -117,6 +123,10 @@ pub fn resolve(
     let base_url = format!("http://{}:{}", session.host, session.port);
     Ok(ResolvedSession {
         install_root,
+        session_config_path: session_path,
+        session_config_sha256: sha256_bytes(&session_bytes),
+        profile_path,
+        profile_sha256: sha256_bytes(&profile_bytes),
         profile_name: profile.name.clone(),
         runtime_name: profile.runtime.clone(),
         server,
@@ -229,15 +239,19 @@ fn validate_profile_name(name: &str) -> Result<(), String> {
     }
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, kind: &str) -> Result<T, String> {
+fn read_json_with_bytes<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    kind: &str,
+) -> Result<(T, Vec<u8>), String> {
     let bytes = std::fs::read(path).map_err(|error| {
         format!(
             "{kind} missing or unreadable at {}: {error}",
             path.display()
         )
     })?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| format!("Malformed {kind} {}: {error}", path.display()))
+    let value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Malformed {kind} {}: {error}", path.display()))?;
+    Ok((value, bytes))
 }
 
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -380,5 +394,19 @@ mod tests {
                 .unwrap_err()
                 .contains("loopback")
         );
+    }
+
+    #[test]
+    fn resolution_binds_exact_session_and_profile_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        write_fixture(directory.path());
+        let first = resolve(directory.path(), None, true).unwrap();
+        let profile_path = directory.path().join("profiles/stable-16k.json");
+        let mut bytes = std::fs::read(&profile_path).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(&profile_path, bytes).unwrap();
+        let second = resolve(directory.path(), None, true).unwrap();
+        assert_eq!(first.session_config_sha256, second.session_config_sha256);
+        assert_ne!(first.profile_sha256, second.profile_sha256);
     }
 }

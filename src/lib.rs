@@ -16,8 +16,9 @@ pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use experiment::{ExperimentReport, MicrobenchmarkOptions};
 pub use qualification::{QualificationReport, QualificationRequest};
 pub use session::{
-    InferenceArguments, ProcessIdentityStrength, SessionAction, SessionStatus, StartSessionOptions,
-    StartSessionReport, StopSessionOptions, StopSessionReport,
+    AcquireSessionOptions, InferenceArguments, ProcessIdentityStrength, ReleaseSessionOptions,
+    ReleaseSessionReport, SessionAcquisition, SessionAction, SessionSnapshot, SessionStatus,
+    StartSessionOptions, StartSessionReport, StopSessionOptions, StopSessionReport,
 };
 pub use support::{SupportEnvelope, SupportReport};
 
@@ -94,6 +95,18 @@ impl Alpine {
 
     pub fn stop_session(options: &StopSessionOptions) -> Result<StopSessionReport, AlpineError> {
         session::stop(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn acquire_session(
+        options: &AcquireSessionOptions,
+    ) -> Result<SessionAcquisition, AlpineError> {
+        session::acquire(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn release_session(
+        options: &ReleaseSessionOptions,
+    ) -> Result<ReleaseSessionReport, AlpineError> {
+        session::release(options).map_err(AlpineError::InvalidInput)
     }
 
     pub fn inspect_support(path: &Path, timeout: Duration) -> Result<SupportReport, AlpineError> {

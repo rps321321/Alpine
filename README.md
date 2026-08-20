@@ -26,6 +26,15 @@ cargo run --release --bin alpine -- session start --profile fast-32k
 cargo run --release --bin alpine -- session stop
 ```
 
+Harnesses use the transactional interface instead of direct start/stop. `acquire` atomically reuses or replaces the Session and writes the exact prior-state contract; `release` rejects stale identities and restores that contract or the prior idle state. Failed replacement rolls back immediately, and failed release restoration recovers the acquired Session when it can still be replayed exactly:
+
+```powershell
+cargo run --release --bin alpine -- session acquire --profile fast-32k --output acquisition.json
+cargo run --release --bin alpine -- session release --acquisition acquisition.json
+```
+
+A matching PowerShell-authored Session is deliberately migrated rather than silently accepted as Rust-authored evidence. Its one-time replacement requires `--allow-legacy-identity`.
+
 List existing experiment runs and inspect one run's identity-bound evidence directly from the SQLite store:
 
 ```powershell

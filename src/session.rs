@@ -91,6 +91,66 @@ pub struct StopSessionReport {
     pub status: SessionStatus,
 }
 
+#[derive(Debug, Clone)]
+pub struct AcquireSessionOptions {
+    pub install_root: PathBuf,
+    pub profile: Option<String>,
+    pub vision: bool,
+    pub force_fallback: bool,
+    pub allow_legacy_identity: bool,
+    pub lock_timeout: Duration,
+    pub startup_timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSnapshot {
+    pub active: bool,
+    pub healthy: bool,
+    pub profile: String,
+    pub vision: bool,
+    pub runtime: String,
+    pub fallback: Option<String>,
+    pub arguments: Vec<String>,
+    pub environment: BTreeMap<String, Option<String>>,
+    pub session_identity: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAcquisition {
+    pub schema: u32,
+    pub changed: bool,
+    pub profile: String,
+    pub vision: bool,
+    pub runtime: String,
+    pub server: PathBuf,
+    pub server_sha256: String,
+    pub runtime_build_sha256: Option<String>,
+    pub session_identity: String,
+    pub profile_sha256: String,
+    pub session_config_sha256: String,
+    pub arguments: Vec<String>,
+    pub environment: BTreeMap<String, Option<String>>,
+    pub fallback: Option<String>,
+    pub prior: SessionSnapshot,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReleaseSessionOptions {
+    pub install_root: PathBuf,
+    pub acquisition: SessionAcquisition,
+    pub keep_server: bool,
+    pub lock_timeout: Duration,
+    pub startup_timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReleaseSessionReport {
+    pub changed: bool,
+    pub kept: bool,
+    pub restored: String,
+    pub status: SessionStatus,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionState {
     #[serde(default = "legacy_state_schema")]
@@ -125,6 +185,8 @@ struct SessionState {
     runtime_build_sha256: Option<String>,
     #[serde(default)]
     profile_sha256: Option<String>,
+    #[serde(default)]
+    session_config_sha256: Option<String>,
     #[serde(default)]
     arguments: Vec<String>,
     #[serde(default)]
@@ -168,6 +230,7 @@ impl Default for SessionState {
             server_sha256: None,
             runtime_build_sha256: None,
             profile_sha256: None,
+            session_config_sha256: None,
             arguments: Vec::new(),
             environment: BTreeMap::new(),
             cleanup_paused: false,
@@ -371,10 +434,7 @@ fn tensor_override(through_block: u32) -> Result<String, String> {
 }
 
 pub fn start(options: &StartSessionOptions) -> Result<StartSessionReport, String> {
-    const MAX_STARTUP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-    if options.startup_timeout > MAX_STARTUP_TIMEOUT {
-        return Err("startup timeout may not exceed 30 minutes".to_owned());
-    }
+    validate_startup_timeout(options.startup_timeout)?;
     let resolved = config::resolve(&options.install_root, options.profile.as_deref(), true)?;
     let capacity_path = resolved.install_root.join("logs/inference.lease");
     let _capacity = InterprocessLock::acquire(&capacity_path, options.lock_timeout)
@@ -427,10 +487,6 @@ fn start_locked_with<P: SessionPlatform>(
         options.vision,
         options.force_fallback,
     )?;
-    let profile_path = resolved
-        .install_root
-        .join("profiles")
-        .join(format!("{}.json", resolved.profile_name));
     let build_manifest = resolved
         .server
         .parent()
@@ -454,7 +510,8 @@ fn start_locked_with<P: SessionPlatform>(
             .filter(|path| path.is_file())
             .map(|path| sha256_file(&path))
             .transpose()?,
-        profile_sha256: Some(sha256_file(&profile_path)?),
+        profile_sha256: Some(resolved.profile_sha256.clone()),
+        session_config_sha256: Some(resolved.session_config_sha256.clone()),
         arguments: initial_plan.arguments.clone(),
         environment: initial_plan.environment.clone(),
         cleanup_paused: false,
@@ -653,8 +710,28 @@ fn verify_spawn_inputs_unchanged(
         .join("profiles")
         .join(format!("{}.json", resolved.profile_name));
     let profile_hash = sha256_file(&profile_path)?;
-    if state.profile_sha256.as_deref() != Some(&profile_hash) {
+    if profile_hash != resolved.profile_sha256
+        || state.profile_sha256.as_deref() != Some(&resolved.profile_sha256)
+    {
         return Err("Profile changed between argument planning and process start".to_owned());
+    }
+    let session_hash = sha256_file(&resolved.session_config_path)?;
+    if session_hash != resolved.session_config_sha256
+        || state.session_config_sha256.as_deref() != Some(&resolved.session_config_sha256)
+    {
+        return Err("Session Config changed between resolution and process start".to_owned());
+    }
+    let manifest = resolved
+        .server
+        .parent()
+        .ok_or_else(|| "runtime path has no parent".to_owned())?
+        .join("build-manifest.json");
+    let observed_manifest = manifest
+        .is_file()
+        .then(|| sha256_file(&manifest))
+        .transpose()?;
+    if observed_manifest != state.runtime_build_sha256 {
+        return Err("runtime build identity changed between capture and process start".to_owned());
     }
     Ok(())
 }
@@ -746,6 +823,576 @@ fn stop_locked_with<P: SessionPlatform>(
         stopped_pid,
         status,
     })
+}
+
+pub fn acquire(options: &AcquireSessionOptions) -> Result<SessionAcquisition, String> {
+    validate_startup_timeout(options.startup_timeout)?;
+    let resolved = config::resolve(&options.install_root, options.profile.as_deref(), true)?;
+    let capacity_path = resolved.install_root.join("logs/inference.lease");
+    let _capacity = InterprocessLock::acquire(&capacity_path, options.lock_timeout)
+        .map_err(|error| format!("inference capacity is unavailable: {error}"))?;
+    let session_lock_path = lock_path(&resolved.state_file, ".session.lock");
+    let _session_lock = InterprocessLock::acquire(&session_lock_path, options.lock_timeout)?;
+    acquire_locked_with(&resolved, options, &SystemPlatform)
+}
+
+fn acquire_locked_with<P: SessionPlatform>(
+    resolved: &ResolvedSession,
+    options: &AcquireSessionOptions,
+    platform: &P,
+) -> Result<SessionAcquisition, String> {
+    let current = status_locked_with(resolved, options.lock_timeout, platform)?;
+    if current.foreign {
+        return Err("inference session is owned by a foreign listener".to_owned());
+    }
+    let prior = capture_snapshot(resolved, options.lock_timeout, platform)?;
+    let mut action = resolve_action(&current, &resolved.profile_name, options.vision);
+    if action == SessionAction::Reuse
+        && options.force_fallback
+        && current.fallback.as_deref() != Some("mtp-only")
+    {
+        action = SessionAction::Replace;
+    }
+    if action == SessionAction::Reuse
+        && current.identity_strength == ProcessIdentityStrength::LegacyCompatible
+    {
+        if options.allow_legacy_identity {
+            action = SessionAction::Replace;
+        } else {
+            return Err(
+                "the matching session is PowerShell-authored; explicit legacy-identity authorization is required for its one-time Rust migration"
+                    .to_owned(),
+            );
+        }
+    }
+    if action == SessionAction::Refuse {
+        return Err("inference session is owned by a foreign listener".to_owned());
+    }
+    if action == SessionAction::Replace
+        && current.identity_strength == ProcessIdentityStrength::LegacyCompatible
+        && !options.allow_legacy_identity
+    {
+        return Err(
+            "replacing the active PowerShell-authored session requires explicit legacy-identity authorization"
+                .to_owned(),
+        );
+    }
+    let changed = matches!(action, SessionAction::Start | SessionAction::Replace);
+    if changed {
+        ensure_snapshot_restorable(&resolved.install_root, &prior)?;
+        cleanup_config(&resolved.session)?;
+        let transition = (|| {
+            if action == SessionAction::Replace {
+                stop_locked_with(
+                    resolved,
+                    &StopSessionOptions {
+                        install_root: resolved.install_root.clone(),
+                        lock_timeout: options.lock_timeout,
+                        allow_legacy_identity: options.allow_legacy_identity,
+                    },
+                    platform,
+                )?;
+            }
+            start_locked_with(
+                resolved,
+                &StartSessionOptions {
+                    install_root: resolved.install_root.clone(),
+                    profile: Some(resolved.profile_name.clone()),
+                    vision: options.vision,
+                    force_fallback: options.force_fallback,
+                    lock_timeout: options.lock_timeout,
+                    startup_timeout: options.startup_timeout,
+                },
+                platform,
+            )?;
+            Ok::<(), String>(())
+        })();
+        if let Err(error) = transition {
+            let rollback = rollback_transition(resolved, &prior, options, platform);
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "inference session transition failed: {error} Rollback failed: {rollback_error}"
+                )),
+            };
+        }
+    }
+    let finalized = (|| {
+        let after = status_locked_with(resolved, options.lock_timeout, platform)?;
+        if !after.active
+            || !after.healthy
+            || after.profile != resolved.profile_name
+            || after.vision != options.vision
+        {
+            return Err(if changed {
+                "requested inference session did not pass post-transition verification".to_owned()
+            } else {
+                "reused inference session did not pass verification".to_owned()
+            });
+        }
+        build_acquisition(
+            resolved,
+            &after,
+            prior.clone(),
+            changed,
+            options.lock_timeout,
+        )
+    })();
+    match finalized {
+        Ok(acquisition) => Ok(acquisition),
+        Err(error) if changed => {
+            let rollback = rollback_transition(resolved, &prior, options, platform);
+            match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!("{error} Rollback failed: {rollback_error}")),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn release(options: &ReleaseSessionOptions) -> Result<ReleaseSessionReport, String> {
+    validate_startup_timeout(options.startup_timeout)?;
+    validate_acquisition(&options.acquisition)?;
+    if options.keep_server || !options.acquisition.changed {
+        let status = status(&options.install_root, options.lock_timeout)?;
+        return Ok(ReleaseSessionReport {
+            changed: options.acquisition.changed,
+            kept: options.keep_server,
+            restored: "unchanged".to_owned(),
+            status,
+        });
+    }
+
+    let resolved = config::resolve(
+        &options.install_root,
+        Some(&options.acquisition.profile),
+        true,
+    )?;
+    ensure_snapshot_restorable(&resolved.install_root, &options.acquisition.prior)?;
+    let capacity_path = resolved.install_root.join("logs/inference.lease");
+    let _capacity = InterprocessLock::acquire(&capacity_path, options.lock_timeout)
+        .map_err(|error| format!("inference capacity is unavailable: {error}"))?;
+    let session_lock_path = lock_path(&resolved.state_file, ".session.lock");
+    let _session_lock = InterprocessLock::acquire(&session_lock_path, options.lock_timeout)?;
+    release_locked_with(&resolved, options, &SystemPlatform)
+}
+
+fn release_locked_with<P: SessionPlatform>(
+    resolved: &ResolvedSession,
+    options: &ReleaseSessionOptions,
+    platform: &P,
+) -> Result<ReleaseSessionReport, String> {
+    ensure_snapshot_restorable(&resolved.install_root, &options.acquisition.prior)?;
+    ensure_acquisition_inputs_unchanged(resolved, &options.acquisition)?;
+    cleanup_config(&resolved.session)?;
+    let current = status_locked_with(resolved, options.lock_timeout, platform)?;
+    if current.foreign {
+        return Err(
+            "cannot restore the prior session because the port has a foreign listener".to_owned(),
+        );
+    }
+    let state = read_state(&resolved.state_file, options.lock_timeout)?.ok_or_else(|| {
+        "cannot restore from a stale acquisition because session state is absent".to_owned()
+    })?;
+    verify_acquired_state(&options.acquisition, &state)?;
+
+    let restoration = (|| {
+        stop_locked_with(
+            resolved,
+            &StopSessionOptions {
+                install_root: resolved.install_root.clone(),
+                lock_timeout: options.lock_timeout,
+                allow_legacy_identity: false,
+            },
+            platform,
+        )?;
+        restore_snapshot(
+            &resolved.install_root,
+            &options.acquisition.prior,
+            options.lock_timeout,
+            options.startup_timeout,
+            platform,
+        )
+    })();
+    if let Err(error) = restoration {
+        let recovery = restore_acquired(resolved, &options.acquisition, options, platform);
+        return match recovery {
+            Ok(()) => Err(format!(
+                "prior-session restoration failed: {error} The acquired session was recovered."
+            )),
+            Err(recovery_error) => Err(format!(
+                "prior-session restoration failed: {error} Acquired-session recovery failed: {recovery_error}"
+            )),
+        };
+    }
+    let status = status_locked_with(resolved, options.lock_timeout, platform)?;
+    Ok(ReleaseSessionReport {
+        changed: true,
+        kept: false,
+        restored: if options.acquisition.prior.active {
+            "prior-session".to_owned()
+        } else {
+            "idle".to_owned()
+        },
+        status,
+    })
+}
+
+fn capture_snapshot<P: SessionPlatform>(
+    resolved: &ResolvedSession,
+    lock_timeout: Duration,
+    platform: &P,
+) -> Result<SessionSnapshot, String> {
+    let status = status_locked_with(resolved, lock_timeout, platform)?;
+    if status.foreign {
+        return Err("cannot snapshot a foreign inference listener".to_owned());
+    }
+    let state = read_state(&resolved.state_file, lock_timeout)?;
+    Ok(SessionSnapshot {
+        active: status.active,
+        healthy: status.healthy,
+        profile: status.profile,
+        vision: status.vision,
+        runtime: status.runtime,
+        fallback: status.fallback,
+        arguments: state
+            .as_ref()
+            .map(|state| state.arguments.clone())
+            .unwrap_or_default(),
+        environment: state
+            .as_ref()
+            .map(|state| state.environment.clone())
+            .unwrap_or_default(),
+        session_identity: state.and_then(|state| state.transaction_id),
+    })
+}
+
+fn ensure_snapshot_restorable(
+    install_root: &Path,
+    snapshot: &SessionSnapshot,
+) -> Result<(), String> {
+    if !snapshot.active {
+        return Ok(());
+    }
+    if !snapshot.healthy {
+        return Err("active prior session is unhealthy and cannot be proven restorable".to_owned());
+    }
+    if snapshot.fallback.is_some() && snapshot.fallback.as_deref() != Some("mtp-only") {
+        return Err("prior session uses an unsupported fallback identity".to_owned());
+    }
+    let resolved = config::resolve(install_root, Some(&snapshot.profile), true)?;
+    if resolved.runtime_name != snapshot.runtime {
+        return Err("prior session runtime no longer matches its Profile".to_owned());
+    }
+    let plan = build_arguments(
+        &resolved.session,
+        &resolved.profile,
+        snapshot.vision,
+        snapshot.fallback.as_deref() == Some("mtp-only"),
+    )?;
+    if plan.arguments != snapshot.arguments || plan.environment != snapshot.environment {
+        return Err("prior session configuration is no longer exactly replayable".to_owned());
+    }
+    Ok(())
+}
+
+fn rollback_transition<P: SessionPlatform>(
+    resolved: &ResolvedSession,
+    prior: &SessionSnapshot,
+    options: &AcquireSessionOptions,
+    platform: &P,
+) -> Result<(), String> {
+    let current = status_locked_with(resolved, options.lock_timeout, platform)?;
+    if current.foreign {
+        return Err("rollback found a foreign listener".to_owned());
+    }
+    stop_locked_with(
+        resolved,
+        &StopSessionOptions {
+            install_root: resolved.install_root.clone(),
+            lock_timeout: options.lock_timeout,
+            allow_legacy_identity: true,
+        },
+        platform,
+    )?;
+    restore_snapshot(
+        &resolved.install_root,
+        prior,
+        options.lock_timeout,
+        options.startup_timeout,
+        platform,
+    )
+}
+
+fn restore_snapshot<P: SessionPlatform>(
+    install_root: &Path,
+    snapshot: &SessionSnapshot,
+    lock_timeout: Duration,
+    startup_timeout: Duration,
+    platform: &P,
+) -> Result<(), String> {
+    if !snapshot.active {
+        let resolved = config::resolve(install_root, None, false)?;
+        let status = status_locked_with(&resolved, lock_timeout, platform)?;
+        if status.active || status.foreign {
+            return Err("pre-transaction idle state was not restored".to_owned());
+        }
+        return Ok(());
+    }
+    ensure_snapshot_restorable(install_root, snapshot)?;
+    let resolved = config::resolve(install_root, Some(&snapshot.profile), true)?;
+    start_locked_with(
+        &resolved,
+        &StartSessionOptions {
+            install_root: install_root.to_path_buf(),
+            profile: Some(snapshot.profile.clone()),
+            vision: snapshot.vision,
+            force_fallback: snapshot.fallback.as_deref() == Some("mtp-only"),
+            lock_timeout,
+            startup_timeout,
+        },
+        platform,
+    )?;
+    verify_restored_snapshot(&resolved, snapshot, lock_timeout, platform)
+}
+
+fn verify_restored_snapshot<P: SessionPlatform>(
+    resolved: &ResolvedSession,
+    snapshot: &SessionSnapshot,
+    lock_timeout: Duration,
+    platform: &P,
+) -> Result<(), String> {
+    let status = status_locked_with(resolved, lock_timeout, platform)?;
+    let state = read_state(&resolved.state_file, lock_timeout)?
+        .ok_or_else(|| "restored session state is absent".to_owned())?;
+    if !status.active
+        || !status.healthy
+        || status.profile != snapshot.profile
+        || status.vision != snapshot.vision
+        || status.runtime != snapshot.runtime
+        || status.fallback != snapshot.fallback
+        || state.arguments != snapshot.arguments
+        || state.environment != snapshot.environment
+    {
+        return Err("restored session does not exactly match the prior snapshot".to_owned());
+    }
+    Ok(())
+}
+
+fn build_acquisition(
+    resolved: &ResolvedSession,
+    status: &SessionStatus,
+    prior: SessionSnapshot,
+    changed: bool,
+    lock_timeout: Duration,
+) -> Result<SessionAcquisition, String> {
+    let state = read_state(&resolved.state_file, lock_timeout)?
+        .ok_or_else(|| "acquired session state is absent".to_owned())?;
+    Ok(SessionAcquisition {
+        schema: 1,
+        changed,
+        profile: status.profile.clone(),
+        vision: status.vision,
+        runtime: status.runtime.clone(),
+        server: status.expected_path.clone(),
+        server_sha256: required_state_string(state.server_sha256, "server_sha256")?,
+        runtime_build_sha256: state.runtime_build_sha256,
+        session_identity: required_state_string(state.transaction_id, "transaction_id")?,
+        profile_sha256: required_state_string(state.profile_sha256, "profile_sha256")?,
+        session_config_sha256: required_state_string(
+            state.session_config_sha256,
+            "session_config_sha256",
+        )?,
+        arguments: state.arguments,
+        environment: state.environment,
+        fallback: state.fallback,
+        prior,
+    })
+}
+
+fn required_state_string(value: Option<String>, name: &str) -> Result<String, String> {
+    value
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("acquired session state has no {name}"))
+}
+
+fn validate_acquisition(acquisition: &SessionAcquisition) -> Result<(), String> {
+    if acquisition.schema != 1 {
+        return Err(format!(
+            "unsupported session acquisition schema {}; expected 1",
+            acquisition.schema
+        ));
+    }
+    for (name, value) in [
+        ("profile", acquisition.profile.as_str()),
+        ("runtime", acquisition.runtime.as_str()),
+        ("server_sha256", acquisition.server_sha256.as_str()),
+        ("session_identity", acquisition.session_identity.as_str()),
+        ("profile_sha256", acquisition.profile_sha256.as_str()),
+        (
+            "session_config_sha256",
+            acquisition.session_config_sha256.as_str(),
+        ),
+    ] {
+        if value.is_empty() {
+            return Err(format!("session acquisition has no {name}"));
+        }
+    }
+    for (name, value) in [
+        ("server_sha256", acquisition.server_sha256.as_str()),
+        ("profile_sha256", acquisition.profile_sha256.as_str()),
+        (
+            "session_config_sha256",
+            acquisition.session_config_sha256.as_str(),
+        ),
+    ] {
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!(
+                "session acquisition {name} is not a SHA-256 identity"
+            ));
+        }
+    }
+    if acquisition
+        .runtime_build_sha256
+        .as_deref()
+        .is_some_and(|value| {
+            value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(
+            "session acquisition runtime_build_sha256 is not a SHA-256 identity".to_owned(),
+        );
+    }
+    if !acquisition.server.is_absolute() || acquisition.arguments.is_empty() {
+        return Err("session acquisition lacks an absolute server or argument identity".to_owned());
+    }
+    if acquisition.fallback.is_some() && acquisition.fallback.as_deref() != Some("mtp-only") {
+        return Err("session acquisition has an unsupported fallback identity".to_owned());
+    }
+    Ok(())
+}
+
+fn verify_acquired_state(
+    acquisition: &SessionAcquisition,
+    state: &SessionState,
+) -> Result<(), String> {
+    let matches = state.transaction_id.as_deref() == Some(&acquisition.session_identity)
+        && state.profile.as_deref() == Some(&acquisition.profile)
+        && state.runtime.as_deref() == Some(&acquisition.runtime)
+        && state.server.as_deref() == Some(acquisition.server.as_path())
+        && state.server_sha256.as_deref() == Some(&acquisition.server_sha256)
+        && state.runtime_build_sha256 == acquisition.runtime_build_sha256
+        && state.profile_sha256.as_deref() == Some(&acquisition.profile_sha256)
+        && state.session_config_sha256.as_deref() == Some(&acquisition.session_config_sha256)
+        && state.vision == acquisition.vision
+        && state.fallback == acquisition.fallback
+        && state.arguments == acquisition.arguments
+        && state.environment == acquisition.environment;
+    if matches {
+        Ok(())
+    } else {
+        Err(
+            "cannot restore from a stale acquisition because active session identity changed"
+                .to_owned(),
+        )
+    }
+}
+
+fn ensure_acquisition_inputs_unchanged(
+    resolved: &ResolvedSession,
+    acquisition: &SessionAcquisition,
+) -> Result<(), String> {
+    if resolved.profile_sha256 != acquisition.profile_sha256
+        || resolved.session_config_sha256 != acquisition.session_config_sha256
+        || !paths_equal(&resolved.server, &acquisition.server)
+        || sha256_file(&resolved.server)? != acquisition.server_sha256
+    {
+        return Err(
+            "acquired session inputs changed after acquisition; refusing restoration mutation"
+                .to_owned(),
+        );
+    }
+    let manifest = resolved
+        .server
+        .parent()
+        .ok_or_else(|| "runtime path has no parent".to_owned())?
+        .join("build-manifest.json");
+    match (
+        acquisition.runtime_build_sha256.as_deref(),
+        manifest.is_file(),
+    ) {
+        (Some(expected), true) if sha256_file(&manifest)? == expected => {}
+        (None, false) => {}
+        _ => return Err("runtime build identity changed after acquisition".to_owned()),
+    }
+    let replay = build_arguments(
+        &resolved.session,
+        &resolved.profile,
+        acquisition.vision,
+        acquisition.fallback.as_deref() == Some("mtp-only"),
+    )?;
+    if replay.arguments != acquisition.arguments || replay.environment != acquisition.environment {
+        return Err("acquired session is no longer exactly replayable".to_owned());
+    }
+    Ok(())
+}
+
+fn restore_acquired<P: SessionPlatform>(
+    resolved: &ResolvedSession,
+    acquisition: &SessionAcquisition,
+    options: &ReleaseSessionOptions,
+    platform: &P,
+) -> Result<(), String> {
+    ensure_acquisition_inputs_unchanged(resolved, acquisition)?;
+    let current = status_locked_with(resolved, options.lock_timeout, platform)?;
+    if current.foreign {
+        return Err("acquired-session recovery found a foreign listener".to_owned());
+    }
+    stop_locked_with(
+        resolved,
+        &StopSessionOptions {
+            install_root: resolved.install_root.clone(),
+            lock_timeout: options.lock_timeout,
+            allow_legacy_identity: true,
+        },
+        platform,
+    )?;
+    let replay = build_arguments(
+        &resolved.session,
+        &resolved.profile,
+        acquisition.vision,
+        acquisition.fallback.as_deref() == Some("mtp-only"),
+    )?;
+    if replay.arguments != acquisition.arguments || replay.environment != acquisition.environment {
+        return Err("acquired session configuration is no longer exactly replayable".to_owned());
+    }
+    start_locked_with(
+        resolved,
+        &StartSessionOptions {
+            install_root: resolved.install_root.clone(),
+            profile: Some(acquisition.profile.clone()),
+            vision: acquisition.vision,
+            force_fallback: acquisition.fallback.as_deref() == Some("mtp-only"),
+            lock_timeout: options.lock_timeout,
+            startup_timeout: options.startup_timeout,
+        },
+        platform,
+    )?;
+    let status = status_locked_with(resolved, options.lock_timeout, platform)?;
+    if !status.active || !status.healthy || status.profile != acquisition.profile {
+        return Err("acquired-session recovery verification failed".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_startup_timeout(timeout: Duration) -> Result<(), String> {
+    const MAX_STARTUP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+    if timeout > MAX_STARTUP_TIMEOUT {
+        Err("startup timeout may not exceed 30 minutes".to_owned())
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_start_artifacts(resolved: &ResolvedSession, vision: bool) -> Result<(), String> {
@@ -1539,6 +2186,8 @@ mod tests {
         spawns: Vec<Vec<String>>,
         next_pid: u32,
         cleanup_runs: u32,
+        fail_next_spawns: u32,
+        unhealthy_pids: BTreeSet<u32>,
     }
 
     struct FakePlatform {
@@ -1571,6 +2220,10 @@ mod tests {
         fn add_cleanup_listener(&self) {
             let (port, executable) = self.cleanup.as_ref().expect("cleanup fixture");
             self.add_process(*port, executable.clone(), 90);
+        }
+
+        fn fail_next_spawns(&self, count: u32) {
+            self.state.borrow_mut().fail_next_spawns = count;
         }
 
         fn add_process(&self, port: u16, executable: PathBuf, pid: u32) {
@@ -1625,7 +2278,9 @@ mod tests {
                     .arguments
                     .iter()
                     .any(|argument| argument == "draft-mtp,ngram-mod");
-                return !(self.unhealthy_all || self.unhealthy_ngram && optimized);
+                return !(self.unhealthy_all
+                    || state.unhealthy_pids.contains(&process.pid)
+                    || self.unhealthy_ngram && optimized);
             }
             self.cleanup.as_ref().is_some_and(|(port, _)| {
                 url.contains(&format!(":{port}/")) && state.listeners.contains_key(port)
@@ -1653,6 +2308,10 @@ mod tests {
                 start_epoch_secs: 1_000 + u64::from(state.next_pid),
             };
             state.spawns.push(arguments.to_vec());
+            if state.fail_next_spawns > 0 {
+                state.fail_next_spawns -= 1;
+                state.unhealthy_pids.insert(process.pid);
+            }
             state.listeners.insert(port, process.clone());
             state.processes.insert(process.pid, process.clone());
             Ok(process)
@@ -1668,6 +2327,7 @@ mod tests {
             }
             state.processes.remove(&pid);
             state.listeners.retain(|_, process| process.pid != pid);
+            state.unhealthy_pids.remove(&pid);
             Ok(())
         }
 
@@ -2055,7 +2715,8 @@ mod tests {
         let profile_path = directory.path().join("profiles/turbo-16k.json");
         let state = SessionState {
             server_sha256: Some(sha256_file(&resolved.server).unwrap()),
-            profile_sha256: Some(sha256_file(&profile_path).unwrap()),
+            profile_sha256: Some(resolved.profile_sha256.clone()),
+            session_config_sha256: Some(resolved.session_config_sha256.clone()),
             ..SessionState::default()
         };
         verify_spawn_inputs_unchanged(&resolved, &state).unwrap();
@@ -2065,6 +2726,231 @@ mod tests {
                 .unwrap_err()
                 .contains("Profile changed")
         );
+    }
+
+    #[test]
+    fn transaction_acquires_from_idle_and_releases_back_to_idle() {
+        let directory = tempfile::tempdir().unwrap();
+        write_lifecycle_fixture(directory.path(), false);
+        let resolved = config::resolve(directory.path(), Some("turbo-16k"), true).unwrap();
+        let platform = FakePlatform::new(8123, None, false, false);
+        let options = acquire_options(directory.path(), "turbo-16k", false);
+        let acquisition = acquire_locked_with(&resolved, &options, &platform).unwrap();
+        assert!(acquisition.changed);
+        assert!(!acquisition.prior.active);
+        assert_eq!(acquisition.profile, "turbo-16k");
+        let round_trip: SessionAcquisition =
+            serde_json::from_slice(&serde_json::to_vec(&acquisition).unwrap()).unwrap();
+        assert_eq!(round_trip, acquisition);
+
+        let report = release_locked_with(
+            &resolved,
+            &ReleaseSessionOptions {
+                install_root: directory.path().to_path_buf(),
+                acquisition,
+                keep_server: false,
+                lock_timeout: Duration::from_secs(1),
+                startup_timeout: Duration::ZERO,
+            },
+            &platform,
+        )
+        .unwrap();
+        assert_eq!(report.restored, "idle");
+        assert!(!report.status.active);
+    }
+
+    #[test]
+    fn transaction_reuses_an_exact_healthy_session_without_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        write_lifecycle_fixture(directory.path(), false);
+        let resolved = config::resolve(directory.path(), Some("turbo-16k"), true).unwrap();
+        let platform = FakePlatform::new(8123, None, false, false);
+        start_locked_with(
+            &resolved,
+            &StartSessionOptions {
+                install_root: directory.path().to_path_buf(),
+                profile: Some("turbo-16k".to_owned()),
+                vision: false,
+                force_fallback: false,
+                lock_timeout: Duration::from_secs(1),
+                startup_timeout: Duration::ZERO,
+            },
+            &platform,
+        )
+        .unwrap();
+        let acquisition = acquire_locked_with(
+            &resolved,
+            &acquire_options(directory.path(), "turbo-16k", false),
+            &platform,
+        )
+        .unwrap();
+        assert!(!acquisition.changed);
+        assert_eq!(platform.state.borrow().spawns.len(), 1);
+    }
+
+    #[test]
+    fn transaction_replace_and_release_restore_exact_prior_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        write_lifecycle_fixture(directory.path(), false);
+        let turbo = config::resolve(directory.path(), Some("turbo-16k"), true).unwrap();
+        let stable = config::resolve(directory.path(), Some("stable-16k"), true).unwrap();
+        let platform = FakePlatform::new(8123, None, false, false);
+        start_locked_with(
+            &turbo,
+            &StartSessionOptions {
+                install_root: directory.path().to_path_buf(),
+                profile: Some("turbo-16k".to_owned()),
+                vision: false,
+                force_fallback: true,
+                lock_timeout: Duration::from_secs(1),
+                startup_timeout: Duration::ZERO,
+            },
+            &platform,
+        )
+        .unwrap();
+        let prior_state = read_state(&turbo.state_file, Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        let acquisition = acquire_locked_with(
+            &stable,
+            &acquire_options(directory.path(), "stable-16k", false),
+            &platform,
+        )
+        .unwrap();
+        assert!(acquisition.changed);
+        assert_eq!(acquisition.prior.profile, "turbo-16k");
+        assert_eq!(acquisition.prior.fallback.as_deref(), Some("mtp-only"));
+
+        let report = release_locked_with(
+            &stable,
+            &ReleaseSessionOptions {
+                install_root: directory.path().to_path_buf(),
+                acquisition,
+                keep_server: false,
+                lock_timeout: Duration::from_secs(1),
+                startup_timeout: Duration::ZERO,
+            },
+            &platform,
+        )
+        .unwrap();
+        assert_eq!(report.restored, "prior-session");
+        assert_eq!(report.status.profile, "turbo-16k");
+        assert_eq!(report.status.fallback.as_deref(), Some("mtp-only"));
+        let restored = read_state(&turbo.state_file, Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.arguments, prior_state.arguments);
+        assert_eq!(restored.environment, prior_state.environment);
+    }
+
+    #[test]
+    fn failed_replacement_rolls_back_to_the_exact_prior_session() {
+        let directory = tempfile::tempdir().unwrap();
+        write_lifecycle_fixture(directory.path(), false);
+        let turbo = config::resolve(directory.path(), Some("turbo-16k"), true).unwrap();
+        let stable = config::resolve(directory.path(), Some("stable-16k"), true).unwrap();
+        let platform = FakePlatform::new(8123, None, false, false);
+        start_locked_with(
+            &turbo,
+            &StartSessionOptions {
+                install_root: directory.path().to_path_buf(),
+                profile: Some("turbo-16k".to_owned()),
+                vision: false,
+                force_fallback: true,
+                lock_timeout: Duration::from_secs(1),
+                startup_timeout: Duration::ZERO,
+            },
+            &platform,
+        )
+        .unwrap();
+        platform.fail_next_spawns(1);
+        let mut options = acquire_options(directory.path(), "stable-16k", false);
+        options.force_fallback = true;
+        let error = acquire_locked_with(&stable, &options, &platform).unwrap_err();
+        assert!(error.contains("MTP-only"));
+        assert!(!error.contains("Rollback failed"));
+        let status = status_locked_with(&turbo, Duration::from_secs(1), &platform).unwrap();
+        assert!(status.active && status.healthy);
+        assert_eq!(status.profile, "turbo-16k");
+        assert_eq!(status.fallback.as_deref(), Some("mtp-only"));
+    }
+
+    #[test]
+    fn stale_release_is_refused_without_stopping_the_acquired_session() {
+        let directory = tempfile::tempdir().unwrap();
+        write_lifecycle_fixture(directory.path(), false);
+        let resolved = config::resolve(directory.path(), Some("turbo-16k"), true).unwrap();
+        let platform = FakePlatform::new(8123, None, false, false);
+        let acquisition = acquire_locked_with(
+            &resolved,
+            &acquire_options(directory.path(), "turbo-16k", false),
+            &platform,
+        )
+        .unwrap();
+        let mut state = read_state(&resolved.state_file, Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        state.transaction_id = Some("changed-by-another-launch".to_owned());
+        save_state(&resolved.state_file, &state, Duration::from_secs(1)).unwrap();
+        let error = release_locked_with(
+            &resolved,
+            &ReleaseSessionOptions {
+                install_root: directory.path().to_path_buf(),
+                acquisition,
+                keep_server: false,
+                lock_timeout: Duration::from_secs(1),
+                startup_timeout: Duration::ZERO,
+            },
+            &platform,
+        )
+        .unwrap_err();
+        assert!(error.contains("stale acquisition"));
+        assert!(platform.state.borrow().listeners.contains_key(&8123));
+    }
+
+    #[test]
+    fn failed_prior_restore_recovers_the_acquired_session() {
+        let directory = tempfile::tempdir().unwrap();
+        write_lifecycle_fixture(directory.path(), false);
+        let turbo = config::resolve(directory.path(), Some("turbo-16k"), true).unwrap();
+        let stable = config::resolve(directory.path(), Some("stable-16k"), true).unwrap();
+        let platform = FakePlatform::new(8123, None, false, false);
+        start_locked_with(
+            &turbo,
+            &StartSessionOptions {
+                install_root: directory.path().to_path_buf(),
+                profile: Some("turbo-16k".to_owned()),
+                vision: false,
+                force_fallback: true,
+                lock_timeout: Duration::from_secs(1),
+                startup_timeout: Duration::ZERO,
+            },
+            &platform,
+        )
+        .unwrap();
+        let acquisition = acquire_locked_with(
+            &stable,
+            &acquire_options(directory.path(), "stable-16k", false),
+            &platform,
+        )
+        .unwrap();
+        platform.fail_next_spawns(1);
+        let error = release_locked_with(
+            &stable,
+            &ReleaseSessionOptions {
+                install_root: directory.path().to_path_buf(),
+                acquisition,
+                keep_server: false,
+                lock_timeout: Duration::from_secs(1),
+                startup_timeout: Duration::ZERO,
+            },
+            &platform,
+        )
+        .unwrap_err();
+        assert!(error.contains("acquired session was recovered"));
+        let status = status_locked_with(&stable, Duration::from_secs(1), &platform).unwrap();
+        assert!(status.active && status.healthy);
+        assert_eq!(status.profile, "stable-16k");
     }
 
     #[test]
@@ -2134,6 +3020,19 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        std::fs::write(
+            root.join("profiles/stable-16k.json"),
+            serde_json::to_vec(&json!({
+                "name": "stable-16k", "status": "production", "runtime": "custom",
+                "context": 8192, "output": 2048, "parallel": 1, "threads": 16,
+                "batch_size": 2048, "ubatch_size": 768, "kv_cache": "q8_0",
+                "tensor_cpu_through_block": 43, "mtp_depth": 3, "ngram_mod": false,
+                "ngram_reset_on_begin": false, "external_skills": false,
+                "skill_tool": false, "vision_fit": true, "fit_target_mib": 512
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let cleanup = if cleanup_enabled {
             json!({
                 "enabled": true, "port": 8090, "exe": cleanup_exe,
@@ -2155,5 +3054,17 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    fn acquire_options(root: &Path, profile: &str, vision: bool) -> AcquireSessionOptions {
+        AcquireSessionOptions {
+            install_root: root.to_path_buf(),
+            profile: Some(profile.to_owned()),
+            vision,
+            force_fallback: false,
+            allow_legacy_identity: false,
+            lock_timeout: Duration::from_secs(1),
+            startup_timeout: Duration::ZERO,
+        }
     }
 }
