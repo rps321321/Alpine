@@ -1,5 +1,5 @@
 use alpine_control_plane::{
-    AcquireSessionOptions, Alpine, CleanRestartStabilityOptions, EvidencePhase,
+    AcquireSessionOptions, Alpine, CleanRestartStabilityOptions, EvaluationOptions, EvidencePhase,
     ExternalEvidenceKind, GoldenAgentOptions, MicrobenchmarkOptions, NearLimitContextOptions,
     OpenCodeOptions, OperatorReviewOptions, ReleaseSessionOptions, RollbackProofOptions,
     RunQualificationOptions, SameProcessStabilityOptions, SessionAcquisition, StartSessionOptions,
@@ -68,6 +68,20 @@ impl From<EvidenceKind> for ExternalEvidenceKind {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Evaluate {
+        #[arg(long, default_value = "config/evaluation-plan.json")]
+        plan: PathBuf,
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_os_t = default_result_root())]
+        result_root: PathBuf,
+        #[arg(long)]
+        allow_legacy_identity: bool,
+        #[arg(long)]
+        compact: bool,
+    },
     Benchmark {
         #[arg(long, default_value_os_t = default_repository_root())]
         repository_root: PathBuf,
@@ -297,6 +311,12 @@ enum Commands {
         #[command(subcommand)]
         command: SessionCommands,
     },
+    Hardware {
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
     Inspect {
         #[arg(long, default_value = "config/support-envelope.json")]
         envelope: PathBuf,
@@ -426,6 +446,25 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
     match cli.command {
+        Commands::Evaluate {
+            plan,
+            repository_root,
+            install_root,
+            result_root,
+            allow_legacy_identity,
+            compact,
+        } => {
+            let report = Alpine::run_evaluation(&EvaluationOptions {
+                repository_root,
+                install_root,
+                result_root,
+                plan,
+                allow_legacy_identity,
+            })?;
+            let exit_code = report.decision.exit_code();
+            write_json(&report, compact)?;
+            Ok(exit_code)
+        }
         Commands::Benchmark {
             repository_root,
             install_root,
@@ -840,6 +879,14 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
                 Ok(0)
             }
         },
+        Commands::Hardware {
+            timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::inspect_hardware(Duration::from_millis(timeout_ms))?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
         Commands::Inspect {
             envelope,
             timeout_ms,

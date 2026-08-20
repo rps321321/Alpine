@@ -2,10 +2,12 @@ mod clock;
 mod config;
 mod context;
 mod decision;
+mod evaluation;
 mod evidence;
 mod experiment;
 mod external;
 mod golden;
+mod hardware;
 mod identity;
 mod locking;
 mod opencode;
@@ -20,6 +22,10 @@ mod tuning;
 pub use config::{Profile, ProfileStatus, ResolvedSession, SessionConfig};
 pub use context::{NearLimitContextOptions, NearLimitContextReport};
 pub use decision::Decision;
+pub use evaluation::{
+    EvaluationLimits, EvaluationOptions, EvaluationPlan, EvaluationReport, MicrobenchmarkBudget,
+    ProfileMeasurement, QualificationPlan,
+};
 pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use experiment::{ExperimentReport, MicrobenchmarkOptions};
 pub use external::{
@@ -27,6 +33,7 @@ pub use external::{
     OperatorReviewOptions, RecordedExternalEvidence,
 };
 pub use golden::{GoldenAgentOptions, GoldenAgentReport};
+pub use hardware::{HardwareReport, HardwareSnapshot};
 pub use identity::runtime_bundle_sha256;
 pub use opencode::{OpenCodeOptions, OpenCodeReport};
 pub use qualification::{
@@ -59,6 +66,10 @@ pub enum AlpineError {
 pub struct Alpine;
 
 impl Alpine {
+    pub fn run_evaluation(options: &EvaluationOptions) -> Result<EvaluationReport, AlpineError> {
+        evaluation::run(options).map_err(AlpineError::InvalidInput)
+    }
+
     pub fn run_microbenchmark(
         options: &MicrobenchmarkOptions,
     ) -> Result<ExperimentReport, AlpineError> {
@@ -136,6 +147,10 @@ impl Alpine {
     pub fn inspect_support(path: &Path, timeout: Duration) -> Result<SupportReport, AlpineError> {
         let (envelope, bytes) = support::read_envelope(path).map_err(AlpineError::InvalidInput)?;
         support::inspect(&envelope, &bytes, timeout).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn inspect_hardware(timeout: Duration) -> Result<HardwareReport, AlpineError> {
+        hardware::report(timeout).map_err(AlpineError::InvalidInput)
     }
 
     pub fn qualify(path: &Path) -> Result<QualificationReport, AlpineError> {

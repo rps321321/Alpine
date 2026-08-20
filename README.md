@@ -1,10 +1,16 @@
 # Project Alpine
 
-Project Alpine is a Rust control plane for measuring, tuning, qualifying and operating local AI inference. Inference remains the responsibility of `llama.cpp` and its C++/CUDA implementation below the Inference Server boundary.
-
-Alpine is being introduced through verified vertical replacements. The existing Stable-16K path remains the rollback implementation until the Rust workflows have passed compatibility and independent qualification. Current Python, PowerShell and C# code is therefore migration evidence, not the destination architecture.
+Project Alpine is the Rust control plane for discovering, measuring, tuning, qualifying and operating local AI inference. Inference remains the responsibility of `llama.cpp` and its C++/CUDA implementation below the Inference Server boundary. Python and PowerShell implementations remain only as compatibility/research tooling; the C# executable is only a folder picker. None is authoritative or required to select, measure, qualify or operate a supported Profile.
 
 ## Current Rust interface
+
+Run the bounded end-to-end evaluation declared in `config/evaluation-plan.json`:
+
+```powershell
+cargo run --release --bin alpine -- evaluate
+```
+
+This one Rust transaction checks the Support Envelope, measures the declared baseline and candidate search space, selects without mutating Profiles, produces an independently measured and fully hashed final run, executes the required stability/context/golden-agent gates, proves rollback, and evaluates the requested lifecycle target. The checked-in plan currently compares only the 16K Stable and Turbo Profiles, consumes at most 72 microbenchmark requests, and targets production. It is expected to report `not-proven` until the separately recorded human capability review exists; it does not fabricate or bypass that gate. The complete evaluation report is published atomically under `results/evaluations/`, while raw measurements and evidence remain in SQLite and per-run artifacts.
 
 The production OpenCode workflow is a single Rust transaction. It verifies the effective 16K policy before loading the model, holds the inference-capacity lease for the complete interactive child lifetime, survives Ctrl-C long enough to restore the prior Session, and keeps an atomic crash-recovery journal:
 
@@ -50,7 +56,7 @@ cargo run --bin alpine -- runs --limit 10
 cargo run --bin alpine -- evidence 20260819T232908Z-0b18494a
 ```
 
-These commands open the legacy database read-only during migration. Missing identity dimensions are reported explicitly; old evidence is not retroactively upgraded or treated as qualification proof.
+These commands open the shared evidence database read-only. Missing identity dimensions are reported explicitly; old evidence is not retroactively upgraded or treated as qualification proof.
 
 Run the Rust-owned microbenchmark against an already healthy, exactly matching Inference Session:
 
@@ -83,7 +89,7 @@ Evaluate a final run directly from SQLite against a distinct tuning baseline:
 cargo run --release --bin alpine -- qualify <final-run-id> --tuning-run <tuning-run-id> --target candidate
 ```
 
-The qualifier recomputes quality, deterministic output hashes, sample count, decode variability and per-workload median regression from non-warmup SQLite rows. It also re-hashes the current policy, workload suite, Alpine binary, hardware manifest and runtime, recomputes material configuration identity, and checks that the fully hashed final model has not changed. Qualification outcomes are `qualified`, `unsupported`, `inconclusive`, `regressed` and `not-proven`. Validated and production targets remain `not-proven` until their inherited external evidence is independently verified.
+The qualifier recomputes quality, deterministic output hashes, sample count, decode variability and per-workload median regression from non-warmup SQLite rows. It also re-hashes the current policy, workload suite, Alpine binary, runtime and complete model artifact, captures the current hardware/driver identity through bounded Rust probes, and recomputes material configuration identity. Qualification outcomes are `qualified`, `unsupported`, `inconclusive`, `regressed` and `not-proven`. Validated and production targets remain `not-proven` until their inherited external evidence is independently verified.
 
 Run the Rust-owned same-process stability gate against the exact passed final run. It alternates 50 distinct contaminating prompts with 50 identical greedy target requests, records every raw token id, verifies one target token hash and restores the prior Session transaction:
 
@@ -123,17 +129,18 @@ Run the canonical repository verification:
 .\scripts\verify.ps1
 ```
 
-During migration this runs Rust formatting, clippy and tests plus the complete legacy compatibility suite.
+This runs Rust formatting, clippy and tests plus the retained legacy compatibility suite. It is the repository/CI verifier; `alpine evaluate` is the executable product-claim verifier.
 
 ## Repository boundaries
 
 - `src/`: Rust control-plane Modules and the `alpine` CLI.
 - `config/support-envelope.json`: versioned capability envelope; current-machine observations do not belong here.
-- `config/profiles/` and `config/artifacts.json`: versioned legacy production inputs retained during migration.
+- `config/evaluation-plan.json`: versioned search space, resource budget and requested qualification target.
+- `config/profiles/` and `config/artifacts.json`: versioned Profile and artifact contracts consumed by Rust.
 - `%USERPROFILE%\local-models`: default generated machine-local installation containing large artifacts, runtime bundles, local credentials and logs. The install root remains configurable; it is not source code and must not be committed.
 - `results/`: local identity-bound evidence, intentionally ignored by Git unless an explicit redacted publication artifact is prepared.
 
-Architecture and migration rules are recorded in [ADR 0019](docs/adr/0019-rust-control-plane-boundary.md).
+Architecture and replacement rules are recorded in [ADR 0019](docs/adr/0019-rust-control-plane-boundary.md); the completed automated evaluation boundary is recorded in [ADR 0020](docs/adr/0020-rust-evaluation-and-live-identity.md).
 
 ## Publication status
 

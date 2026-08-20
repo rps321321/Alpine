@@ -60,3 +60,5 @@ Accepted. The Interface stays small while discovery, evidence, qualification and
 The current machine is evidence, not policy. A Support Envelope may initially cover only Windows x86-64 with NVIDIA discovery, but new platforms are added by versioned capability rules and independently qualified evidence rather than new global assumptions.
 
 The repository is currently private and unlicensed. Publication visibility and an open-source license require an explicit owner decision before Alpine can satisfy the public-open-source release condition.
+
+The vertical replacement completed on 2026-08-20: Rust now owns supported Session, OpenCode, measurement, tuning, qualification, automated external-gate and rollback workflows. The retained Python and PowerShell implementations are compatibility/research tools, not a second production authority. See ADR 0020 for the bounded automatic evaluation workflow and live hardware identity.

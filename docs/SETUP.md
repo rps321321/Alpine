@@ -44,7 +44,7 @@ The direct installed CLI is:
 .\alpine.exe opencode --install-root . --profile stable-16k --project C:\path\to\project
 ```
 
-Legacy migration CLI alternatives from the repository remain available while non-launch workflows are retired:
+Legacy CLI alternatives remain for compatibility and historical reproduction only. They are not required or accepted as authority for a new supported-production claim:
 
 ```powershell
 .\localmodel.ps1 profiles
@@ -58,25 +58,21 @@ The launcher refuses to steal port 8100 from a different executable. `status` ve
 
 ## Verify a restored machine
 
-Fast size/version check:
+Use Rust to resolve the installed Session/Profile contract, capture the current hardware identity, and inspect the Support Envelope:
 
 ```powershell
-.\localmodel.ps1 doctor
+cargo run --release --bin alpine -- resolve
+cargo run --release --bin alpine -- hardware
+cargo run --release --bin alpine -- inspect
 ```
 
-Full model/projector/template hash verification:
-
-```powershell
-.\localmodel.ps1 doctor --deep
-```
-
-Collect a new machine manifest after a reinstall or hardware change:
+The independent final stage of `alpine evaluate` performs a complete model SHA-256 and current runtime/configuration verification. Historical inventory collection remains available only for comparison with old evidence:
 
 ```powershell
 .\localmodel.ps1 inventory
 ```
 
-The current manifest is `inventory/hardware-5070-2026-08-19.json`. Do not compare performance runs across hardware manifests as though they were the same environment.
+The current historical manifest is `inventory/hardware-5070-2026-08-19.json`. New Rust evidence embeds a canonical live CPU/RAM/GPU/driver snapshot, and qualification captures the host again; it does not trust that historical file.
 
 ## Profiles
 
@@ -87,15 +83,26 @@ fast-32k     candidate     32K request-local n-gram profile
 long-64k     experimental  research only; failed first near-limit quality gate
 ```
 
-Apply validates the installed Profile/runtime, changes the selected default atomically under a Session Config lock, and preserves a uniquely named backup:
+Select a Profile explicitly through the Rust operation; persistent legacy `apply` state is not required:
 
 ```powershell
-.\localmodel.ps1 apply stable-16k
+cargo run --release --bin alpine -- session start --profile stable-16k
+cargo run --release --bin alpine -- opencode --profile stable-16k --project C:\path\to\project
 ```
 
 Profile status is a lifecycle claim, not a menu label. See `config/promotion-policy.json`.
 
 ## Benchmark and inspect evidence
+
+The supported automatic path is:
+
+```powershell
+cargo run --release --bin alpine -- evaluate
+```
+
+The versioned plan fixes the search space, workloads, request budget, timeouts and target. Alpine measures every declared 16K Profile, selects the best policy-eligible result without editing Profiles, produces distinct final evidence, runs the inherited automated gates, proves Stable rollback, and publishes an atomic report. A production target remains `not-proven` until the human capability review is attached.
+
+The following Python commands are retained compatibility/reporting tools, not the supported qualification path:
 
 ```powershell
 .\localmodel.ps1 benchmark --profile stable-16k --runs 5 --warmups 1
@@ -109,7 +116,7 @@ Profile status is a lifecycle claim, not a menu label. See `config/promotion-pol
 
 SQLite lives at `results/results.sqlite3`; each run keeps raw JSONL, outputs, logs, configurations and compressed long prompts under `results/runs/<run-id>`. Generated evidence is local by default. Summary reports are regeneratable.
 
-The Rust path is authoritative for new microbenchmark qualification evidence. Run a tuning baseline and a separate, freshly hashed final pass with identical material configuration, then qualify the final SQLite rows:
+For a manual Rust investigation, run a tuning baseline and a separate, freshly hashed final pass with identical material configuration, then qualify the final SQLite rows:
 
 ```powershell
 cargo run --release --bin alpine -- benchmark --profile fast-32k --phase tuning --runs 5 --warmups 1

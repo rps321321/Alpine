@@ -1,6 +1,7 @@
 use crate::clock::UtcTimestamp;
 use crate::config::{self, ResolvedSession};
 use crate::evidence::{EvidenceWriter, NewRun, SampleRecord, TerminalStatus};
+use crate::hardware::{self, INLINE_HARDWARE_MANIFEST};
 use crate::identity::{runtime_bundle_sha256, sha256_bytes, sha256_file, tree_sha256};
 use crate::locking::InterprocessLock;
 use crate::process::{resolve_executable, run_bounded};
@@ -279,7 +280,9 @@ fn prepare(options: &MicrobenchmarkOptions) -> Result<PreparedExperiment, String
             state.profile_sha256
         ));
     }
-    let (hardware_manifest, hardware_sha256) = latest_hardware_identity(&repository_root)?;
+    let hardware_snapshot = hardware::capture(Duration::from_secs(10))?;
+    let hardware_sha256 = hardware::sha256(&hardware_snapshot)?;
+    let hardware_manifest = INLINE_HARDWARE_MANIFEST.to_owned();
     let (workloads, workload_identity, workload_files) =
         load_workloads(&repository_root, &options.workloads)?;
     let policy_path = repository_root.join("config/promotion-policy.json");
@@ -345,7 +348,13 @@ fn prepare(options: &MicrobenchmarkOptions) -> Result<PreparedExperiment, String
         backend_commit: artifacts.llama_cpp.commit.clone(),
         config: json!({
             "identity": {"configuration_sha256": configuration_sha256},
-            "hardware": {"path": hardware_manifest, "sha256": hardware_sha256},
+            "hardware": {
+                "schema": 2,
+                "source": "live-rust-probes",
+                "path": hardware_manifest,
+                "sha256": hardware_sha256,
+                "snapshot": hardware_snapshot,
+            },
             "software": {"git_commit": git_commit, "alpine_binary_sha256": alpine_binary_sha256},
             "model_verification": model_verification,
             "evidence_phase": options.phase,
@@ -801,35 +810,6 @@ fn validate_active_session(
         ));
     }
     Ok(())
-}
-
-fn latest_hardware_identity(repository_root: &Path) -> Result<(String, String), String> {
-    let inventory = repository_root.join("inventory");
-    let mut candidates = std::fs::read_dir(&inventory)
-        .map_err(|error| format!("hardware inventory is unavailable: {error}"))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            let Some(name) = path.file_name().and_then(OsStr::to_str) else {
-                return false;
-            };
-            path.is_file()
-                && name.ends_with(".json")
-                && (name.starts_with("hardware-") || name.starts_with("hardware-"))
-        })
-        .collect::<Vec<_>>();
-    candidates.sort();
-    let path = candidates
-        .pop()
-        .ok_or_else(|| "no hardware inventory is available".to_owned())?;
-    let relative = path
-        .strip_prefix(repository_root)
-        .expect("inventory is below repository root")
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/");
-    Ok((relative, sha256_file(&path)?))
 }
 
 fn verify_large_artifact(

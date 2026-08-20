@@ -3,6 +3,7 @@ use crate::decision::Decision;
 use crate::evidence::{EvidenceStore, MeasuredSample, RunEvidence, StoredIdentity};
 use crate::experiment::current_microbenchmark_identity;
 use crate::external::{self, ExternalEvidenceStatus, ExternalEvidenceStatusKind};
+use crate::hardware::{self, HardwareSnapshot, INLINE_HARDWARE_MANIFEST};
 use crate::identity::{runtime_bundle_sha256, sha256_bytes, sha256_file};
 use crate::support::{self, SupportReport};
 use serde::{Deserialize, Serialize};
@@ -455,6 +456,11 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
     );
     not_proven |= !current_workloads;
 
+    let resolved = config::resolve(
+        &options.install_root,
+        Some(&final_run.evidence.summary.profile),
+        true,
+    )?;
     let full_model_hash = final_run
         .evidence
         .config
@@ -480,6 +486,20 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
         json!("full-sha256 matching the run model identity"),
     );
     not_proven |= !full_model_hash;
+
+    let current_model_sha256 = sha256_file(&resolved.model)?;
+    let current_model = claim_identity
+        .as_ref()
+        .is_some_and(|identity| identity.model == current_model_sha256)
+        && final_run.evidence.model_sha256.as_deref() == Some(current_model_sha256.as_str());
+    add_check(
+        &mut checks,
+        "current-model-digest",
+        current_model,
+        json!(current_model_sha256),
+        json!(claim_identity.as_ref().map(|identity| &identity.model)),
+    );
+    not_proven |= !current_model;
 
     let declared_configurations = std::iter::once(&final_run)
         .chain(tuning_runs.iter())
@@ -527,10 +547,10 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
             .map(|identity| identity.hardware.clone());
     add_check(
         &mut checks,
-        "current-hardware-manifest",
+        "current-live-hardware-identity",
         hardware_current,
         json!(claim_identity.as_ref().map(|identity| &identity.hardware)),
-        json!("current bytes at the run's repository-relative hardware manifest"),
+        json!("fresh Rust probes exactly match the canonical hardware snapshot identity"),
     );
     not_proven |= !hardware_current;
 
@@ -558,11 +578,6 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
     );
     not_proven |= !benchmark_contract;
 
-    let resolved = config::resolve(
-        &options.install_root,
-        Some(&final_run.evidence.summary.profile),
-        true,
-    )?;
     let launch = final_run
         .evidence
         .config
@@ -1018,6 +1033,56 @@ pub(crate) fn current_hardware_identity(
     repository_root: &Path,
     evidence: &RunEvidence,
 ) -> Result<Option<String>, String> {
+    if evidence
+        .config
+        .pointer("/hardware/schema")
+        .and_then(Value::as_u64)
+        == Some(2)
+    {
+        if evidence.hardware_manifest.as_deref() != Some(INLINE_HARDWARE_MANIFEST)
+            || evidence
+                .config
+                .pointer("/hardware/path")
+                .and_then(Value::as_str)
+                != Some(INLINE_HARDWARE_MANIFEST)
+            || evidence
+                .config
+                .pointer("/hardware/source")
+                .and_then(Value::as_str)
+                != Some("live-rust-probes")
+        {
+            return Ok(None);
+        }
+        let stored: HardwareSnapshot = serde_json::from_value(
+            evidence
+                .config
+                .pointer("/hardware/snapshot")
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "run {} live hardware snapshot is missing",
+                        evidence.summary.id
+                    )
+                })?,
+        )
+        .map_err(|error| {
+            format!(
+                "run {} live hardware snapshot is invalid: {error}",
+                evidence.summary.id
+            )
+        })?;
+        let stored_sha256 = hardware::sha256(&stored)?;
+        if evidence
+            .config
+            .pointer("/hardware/sha256")
+            .and_then(Value::as_str)
+            != Some(stored_sha256.as_str())
+        {
+            return Ok(None);
+        }
+        let current = hardware::capture(Duration::from_secs(10))?;
+        return hardware::sha256(&current).map(Some);
+    }
     let relative = evidence
         .hardware_manifest
         .as_deref()

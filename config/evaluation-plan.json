@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "local-16k-stable-vs-turbo-v1",
+  "baseline_profile": "stable-16k",
+  "candidate_profiles": ["turbo-16k"],
+  "workloads": ["prefill-4k", "novel-256", "repeat-code-256", "structured-json-128"],
+  "microbenchmark": {
+    "warmups": 1,
+    "runs": 5
+  },
+  "target": "production",
+  "qualification": {
+    "near_limit_context_ratio": 0.85,
+    "golden_task": "python-off-by-one"
+  },
+  "limits": {
+    "maximum_profiles": 2,
+    "maximum_microbenchmark_requests": 72,
+    "support_timeout_seconds": 10,
+    "lease_timeout_seconds": 15,
+    "startup_timeout_seconds": 600,
+    "request_timeout_seconds": 600
+  }
+}

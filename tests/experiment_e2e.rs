@@ -58,6 +58,17 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
     assert_eq!(evidence.summary.status, "passed");
     assert_eq!(evidence.config["evidence_phase"], "final");
     assert_eq!(
+        evidence.hardware_manifest.as_deref(),
+        Some("inline:rust-hardware-snapshot-v1")
+    );
+    assert_eq!(evidence.config["hardware"]["schema"], 2);
+    assert_eq!(evidence.config["hardware"]["source"], "live-rust-probes");
+    assert_eq!(
+        evidence.config["hardware"]["sha256"].as_str().map(str::len),
+        Some(64)
+    );
+    assert!(evidence.config["hardware"]["snapshot"].is_object());
+    assert_eq!(
         evidence.config["launch"]["session_config_sha256"]
             .as_str()
             .map(str::len),
@@ -95,6 +106,18 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
         Alpine::qualify_run(&qualify_options).expect("database-backed qualification");
     assert_eq!(qualification.decision, Decision::Qualified);
     assert!(qualification.checks.iter().all(|check| check.passed));
+    assert!(
+        qualification
+            .checks
+            .iter()
+            .any(|check| check.name == "current-model-digest" && check.passed)
+    );
+    assert!(
+        qualification
+            .checks
+            .iter()
+            .any(|check| { check.name == "current-live-hardware-identity" && check.passed })
+    );
 
     let mut validated_options = qualify_options.clone();
     validated_options.target = QualificationTarget::Validated;
@@ -143,8 +166,45 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
         Decision::Qualified
     );
 
-    rusqlite::Connection::open(&database)
-        .unwrap()
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let original_config: String = connection
+        .query_row(
+            "SELECT config_json FROM runs WHERE id=?1",
+            [&report.run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut altered_config: serde_json::Value = serde_json::from_str(&original_config).unwrap();
+    let memory = altered_config["hardware"]["snapshot"]["physical_memory_bytes"]
+        .as_u64()
+        .unwrap();
+    altered_config["hardware"]["snapshot"]["physical_memory_bytes"] = json!(memory + 1);
+    connection
+        .execute(
+            "UPDATE runs SET config_json=?1 WHERE id=?2",
+            rusqlite::params![
+                serde_json::to_string(&altered_config).unwrap(),
+                report.run_id
+            ],
+        )
+        .unwrap();
+    let stale_hardware =
+        Alpine::qualify_run(&qualify_options).expect("tampered hardware identity report");
+    assert_eq!(stale_hardware.decision, Decision::NotProven);
+    assert!(
+        stale_hardware
+            .checks
+            .iter()
+            .any(|check| { check.name == "current-live-hardware-identity" && !check.passed })
+    );
+    connection
+        .execute(
+            "UPDATE runs SET config_json=?1 WHERE id=?2",
+            rusqlite::params![original_config, report.run_id],
+        )
+        .unwrap();
+
+    connection
         .execute(
             "UPDATE samples SET quality_pass=0 WHERE run_id=?1 AND warmup=0",
             [&report.run_id],

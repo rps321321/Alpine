@@ -9,13 +9,13 @@
   ],
   "required_probes": [
     "nvidia-smi",
-    "power-shell"
+    "open-code"
   ],
   "optional_probes": [
     "cargo",
     "cmake",
     "git",
+    "power-shell",
     "python"
   ]
 }
-

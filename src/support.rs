@@ -31,6 +31,7 @@ pub enum ProbeId {
     Cmake,
     Git,
     NvidiaSmi,
+    OpenCode,
     PowerShell,
     Python,
 }
@@ -152,6 +153,7 @@ fn probe(id: ProbeId, required: bool, timeout: Duration) -> ProbeResult {
                 OsStr::new("--format=csv,noheader,nounits"),
             ],
         ),
+        ProbeId::OpenCode => ("opencode", &[OsStr::new("--version")]),
         ProbeId::PowerShell => (
             "powershell.exe",
             &[

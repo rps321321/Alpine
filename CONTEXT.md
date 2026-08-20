@@ -14,7 +14,7 @@ The model is an untrusted worker.
 
 This repository is the versioned control plane. `%USERPROFILE%\local-models` is the generated machine-local installation containing large artifacts, runtime bundles, secrets and logs. Run `setup.ps1` to reconstruct it; do not treat the generated install as the source of truth.
 
-Alpine is replacing the existing Python, PowerShell and C# authority one complete workflow at a time. Stable-16K and the legacy implementation remain the rollback path until Rust compatibility and independent qualification pass. The canonical verification command is `.\scripts\verify.ps1`; during migration it verifies both Rust and legacy behavior.
+Rust is the sole control-plane authority for supported discovery, selection, measurement, tuning, qualification, Session and OpenCode workflows. Stable-16K remains the rollback Profile, but Rust owns its operation and proof. Python/PowerShell code is compatibility and research tooling; C# is a folder-picker Adapter. `.\scripts\verify.ps1` verifies the repository and retained compatibility surface. `alpine evaluate` is the single executable path that generates and independently verifies bounded product claims.
 
 The production profile is `stable-16k`. `turbo-16k` and `fast-32k` are measured candidates using the request-local n-gram patch. `long-64k` is experimental and failed its first 55.7K-token retrieval gate. See `docs/AUDIT-2026-08-19.md` for evidence and run IDs.
 
@@ -29,6 +29,10 @@ _Avoid_: Rust wrapper, llama.cpp replacement, benchmark script collection
 **Support Envelope**:
 A versioned, capability-based statement of environments Alpine can evaluate. It is not a list of assumptions about the current PC, and eligibility is not qualification.
 _Avoid_: supported hardware list (when evidence is incomplete), current machine config
+
+**Evaluation Plan**:
+A versioned, bounded search space plus workload, request budget and qualification target. It may describe a deployment-specific experiment, but it is not a permanent hardware policy and cannot weaken Promotion Policy gates.
+_Avoid_: unbounded autotuning, global optimum claim, hidden benchmark matrix
 
 **Evidence Identity**:
 The hardware, software, model, runtime, workload, configuration and policy identities to which evidence applies. A material identity change makes prior evidence stale for the changed claim.
