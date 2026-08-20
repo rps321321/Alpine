@@ -196,6 +196,56 @@ internal static class FakeAlpine
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def build_fake_opencode(self, install: Path) -> Path:
+        fixture_bin = install / "fixture-bin"
+        fixture_bin.mkdir(parents=True, exist_ok=True)
+        source = fixture_bin / "FakeOpenCode.cs"
+        source.write_text(
+            r'''
+using System;
+
+internal static class FakeOpenCode
+{
+    public static int Main(string[] args)
+    {
+        foreach (string arg in args)
+        {
+            if (arg == "--version")
+            {
+                Console.WriteLine("1.18.18");
+                return 0;
+            }
+        }
+        for (int i = 0; i + 1 < args.Length; i++)
+        {
+            if (args[i] == "debug" && args[i + 1] == "config")
+            {
+                Console.Write(Environment.GetEnvironmentVariable("OPENCODE_CONFIG_CONTENT") ?? "{}");
+                return 0;
+            }
+        }
+        return 64;
+    }
+}
+''',
+            encoding="utf-8",
+        )
+        output = fixture_bin / "opencode.exe"
+        expression = (
+            f"Add-Type -TypeDefinition (Get-Content -Raw -LiteralPath '{source}') "
+            f"-Language CSharp -ReferencedAssemblies @('System.dll') "
+            f"-OutputAssembly '{output}' -OutputType ConsoleApplication"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", expression],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return fixture_bin
+
     def write_rust_check_fixture(self, install: Path) -> None:
         (install / "config").mkdir(parents=True, exist_ok=True)
         (install / "profiles").mkdir(parents=True, exist_ok=True)
@@ -258,8 +308,10 @@ internal static class FakeAlpine
             install = Path(directory) / "install"
             launcher = self.build_fixture_launcher(install, rust_owned=True)
             self.write_rust_check_fixture(install)
+            fixture_bin = self.build_fake_opencode(install)
             environment = os.environ.copy()
             environment["LOCALMODEL_LAUNCHER_NO_DIALOG"] = "1"
+            environment["PATH"] = str(fixture_bin) + os.pathsep + environment.get("PATH", "")
 
             result = subprocess.run(
                 [str(launcher), "--check", "--profile", "stable-16k"],
