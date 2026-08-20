@@ -3,6 +3,7 @@ mod config;
 mod decision;
 mod evidence;
 mod experiment;
+mod external;
 mod identity;
 mod locking;
 mod process;
@@ -15,6 +16,10 @@ pub use config::{Profile, ProfileStatus, ResolvedSession, SessionConfig};
 pub use decision::Decision;
 pub use evidence::{RunEvidence, RunSummary, StoredIdentity};
 pub use experiment::{ExperimentReport, MicrobenchmarkOptions};
+pub use external::{
+    ExternalEvidenceKind, ExternalEvidenceStatus, ExternalEvidenceStatusKind,
+    RecordExternalEvidenceOptions, RecordedExternalEvidence,
+};
 pub use qualification::{
     EvidencePhase, QualificationCheck, QualificationReport, QualificationRequest,
     QualificationTarget, RunQualificationOptions, RunQualificationReport,
@@ -132,5 +137,11 @@ impl Alpine {
 
     pub fn tune(options: &TuningOptions) -> Result<TuningReport, AlpineError> {
         tuning::tune(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn record_external_evidence(
+        options: &RecordExternalEvidenceOptions,
+    ) -> Result<RecordedExternalEvidence, AlpineError> {
+        external::record(options).map_err(AlpineError::InvalidInput)
     }
 }

@@ -1,4 +1,4 @@
-use crate::identity::sha256_bytes;
+use crate::identity::{sha256_bytes, sha256_file};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
@@ -88,6 +88,14 @@ pub struct RunEvidence {
     pub identity: StoredIdentity,
     pub identity_complete: bool,
     pub missing_identity_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StoredArtifact {
+    pub run_id: String,
+    pub kind: String,
+    pub path: PathBuf,
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -299,6 +307,29 @@ impl EvidenceStore {
             .map_err(|error| self.database_error(error))
     }
 
+    pub(crate) fn artifacts(&self, id: &str) -> Result<Vec<StoredArtifact>, String> {
+        validate_token("run id", id)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT run_id, kind, path, sha256 FROM artifacts
+                 WHERE run_id=?1 ORDER BY kind, path",
+            )
+            .map_err(|error| self.database_error(error))?;
+        let rows = statement
+            .query_map(params![id], |row| {
+                Ok(StoredArtifact {
+                    run_id: row.get(0)?,
+                    kind: row.get(1)?,
+                    path: PathBuf::from(row.get::<_, String>(2)?),
+                    sha256: row.get(3)?,
+                })
+            })
+            .map_err(|error| self.database_error(error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| self.database_error(error))
+    }
+
     fn database_error(&self, error: rusqlite::Error) -> String {
         format!("evidence database {}: {error}", self.path.display())
     }
@@ -477,6 +508,96 @@ impl EvidenceWriter {
                 "run {run_id} is missing or has already left the running state"
             ));
         }
+        transaction
+            .commit()
+            .map_err(|error| self.database_error(error))
+    }
+
+    pub(crate) fn attach_artifact(
+        &mut self,
+        run_id: &str,
+        kind: &str,
+        path: &Path,
+        sha256: &str,
+    ) -> Result<(), String> {
+        validate_token("run id", run_id)?;
+        validate_token("artifact kind", kind)?;
+        validate_sha256("artifact", sha256)?;
+        let path = std::fs::canonicalize(path).map_err(|error| {
+            format!(
+                "failed to resolve evidence artifact {}: {error}",
+                path.display()
+            )
+        })?;
+        if !path.is_file() {
+            return Err(format!(
+                "evidence artifact is not a file: {}",
+                path.display()
+            ));
+        }
+        let observed_sha256 = sha256_file(&path)?;
+        if observed_sha256 != sha256 {
+            return Err(format!(
+                "evidence artifact digest mismatch: declared {sha256}, observed {observed_sha256}"
+            ));
+        }
+        let database_path = self.path.clone();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| database_error_at(&database_path, error))?;
+        let finished = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM runs
+                    WHERE id=?1 AND status!='running' AND finished_at IS NOT NULL
+                )",
+                params![run_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| database_error_at(&database_path, error))?;
+        if !finished {
+            return Err(format!(
+                "run {run_id} is missing or has not reached a terminal state"
+            ));
+        }
+        let existing = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT path, sha256 FROM artifacts
+                     WHERE run_id=?1 AND kind=?2 ORDER BY path",
+                )
+                .map_err(|error| database_error_at(&database_path, error))?;
+            let rows = statement
+                .query_map(params![run_id, kind], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .map_err(|error| database_error_at(&database_path, error))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| database_error_at(&database_path, error))?
+        };
+        if existing.len() > 1 {
+            return Err(format!(
+                "run {run_id} already has multiple conflicting {kind} artifacts"
+            ));
+        }
+        if let Some((existing_path, existing_sha256)) = existing.first() {
+            if Path::new(existing_path) == path && existing_sha256.as_deref() == Some(sha256) {
+                return transaction
+                    .commit()
+                    .map_err(|error| database_error_at(&database_path, error));
+            }
+            return Err(format!(
+                "run {run_id} already has an immutable {kind} artifact"
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO artifacts(run_id, kind, path, sha256)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![run_id, kind, path.to_string_lossy(), sha256],
+            )
+            .map_err(|error| database_error_at(&database_path, error))?;
         transaction
             .commit()
             .map_err(|error| self.database_error(error))

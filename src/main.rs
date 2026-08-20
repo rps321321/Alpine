@@ -1,7 +1,7 @@
 use alpine_control_plane::{
-    AcquireSessionOptions, Alpine, EvidencePhase, MicrobenchmarkOptions, ReleaseSessionOptions,
-    RunQualificationOptions, SessionAcquisition, StartSessionOptions, StopSessionOptions,
-    TuningDisposition, TuningOptions,
+    AcquireSessionOptions, Alpine, EvidencePhase, ExternalEvidenceKind, MicrobenchmarkOptions,
+    RecordExternalEvidenceOptions, ReleaseSessionOptions, RunQualificationOptions,
+    SessionAcquisition, StartSessionOptions, StopSessionOptions, TuningDisposition, TuningOptions,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
@@ -44,6 +44,33 @@ impl From<QualificationStage> for alpine_control_plane::QualificationTarget {
             QualificationStage::Candidate => Self::Candidate,
             QualificationStage::Validated => Self::Validated,
             QualificationStage::Production => Self::Production,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum EvidenceKind {
+    SameProcess50RequestGreedyStability,
+    TenCleanRestartGreedyStability,
+    NearLimitContextStress,
+    GoldenAgentTaskPass,
+    OperatorReviewedCapabilityReport,
+    RollbackProfileAvailable,
+}
+
+impl From<EvidenceKind> for ExternalEvidenceKind {
+    fn from(value: EvidenceKind) -> Self {
+        match value {
+            EvidenceKind::SameProcess50RequestGreedyStability => {
+                Self::SameProcess50RequestGreedyStability
+            }
+            EvidenceKind::TenCleanRestartGreedyStability => Self::TenCleanRestartGreedyStability,
+            EvidenceKind::NearLimitContextStress => Self::NearLimitContextStress,
+            EvidenceKind::GoldenAgentTaskPass => Self::GoldenAgentTaskPass,
+            EvidenceKind::OperatorReviewedCapabilityReport => {
+                Self::OperatorReviewedCapabilityReport
+            }
+            EvidenceKind::RollbackProfileAvailable => Self::RollbackProfileAvailable,
         }
     }
 }
@@ -98,6 +125,23 @@ enum Commands {
         candidate_runs: Vec<String>,
         #[arg(long, default_value_os_t = default_repository_root())]
         repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_database())]
+        database: PathBuf,
+        #[arg(long)]
+        compact: bool,
+    },
+    RecordEvidence {
+        anchor_run_id: String,
+        #[arg(long, value_enum)]
+        kind: EvidenceKind,
+        #[arg(long)]
+        evidence: PathBuf,
+        #[arg(long)]
+        reviewed_by: Option<String>,
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_result_root())]
+        result_root: PathBuf,
         #[arg(long, default_value_os_t = default_database())]
         database: PathBuf,
         #[arg(long)]
@@ -312,6 +356,33 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
             };
             write_json(&report, compact)?;
             Ok(code)
+        }
+        Commands::RecordEvidence {
+            anchor_run_id,
+            kind,
+            evidence,
+            reviewed_by,
+            repository_root,
+            result_root,
+            database,
+            compact,
+        } => {
+            let metadata = std::fs::metadata(&evidence)?;
+            if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+                return Err("evidence details must be a JSON file no larger than 1 MiB".into());
+            }
+            let details = serde_json::from_slice(&std::fs::read(&evidence)?)?;
+            let report = Alpine::record_external_evidence(&RecordExternalEvidenceOptions {
+                repository_root,
+                database,
+                result_root,
+                anchor_run_id,
+                kind: kind.into(),
+                evidence: details,
+                reviewed_by,
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
         }
         Commands::Resolve {
             install_root,

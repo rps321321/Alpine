@@ -2,6 +2,7 @@ use crate::config;
 use crate::decision::Decision;
 use crate::evidence::{EvidenceStore, MeasuredSample, RunEvidence, StoredIdentity};
 use crate::experiment::current_microbenchmark_identity;
+use crate::external::{self, ExternalEvidenceStatus, ExternalEvidenceStatusKind};
 use crate::identity::{sha256_bytes, sha256_file};
 use crate::support::{self, SupportReport};
 use serde::{Deserialize, Serialize};
@@ -121,6 +122,7 @@ pub struct RunQualificationReport {
     pub identity: Option<EvidenceIdentity>,
     pub support: SupportReport,
     pub checks: Vec<QualificationCheck>,
+    pub external_evidence: Vec<ExternalEvidenceStatus>,
     pub missing_external_evidence: Vec<String>,
     pub reasons: Vec<String>,
 }
@@ -804,7 +806,37 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
         }
     }
 
-    let missing_external_evidence = gate.requires_external_evidence.clone();
+    let external_evidence = if let Some(identity) = claim_identity.as_ref() {
+        let database_path = std::fs::canonicalize(&options.database).map_err(|error| {
+            format!(
+                "failed to resolve evidence database {}: {error}",
+                options.database.display()
+            )
+        })?;
+        let result_root = database_path
+            .parent()
+            .ok_or_else(|| "evidence database has no result-root parent".to_owned())?;
+        external::inspect_required(
+            &store,
+            &options.final_run_id,
+            identity,
+            &gate.requires_external_evidence,
+            &repository_root,
+            result_root,
+            &current_binary_sha256,
+        )?
+    } else {
+        Vec::new()
+    };
+    let missing_external_evidence = if claim_identity.is_some() {
+        external_evidence
+            .iter()
+            .filter(|evidence| evidence.status != ExternalEvidenceStatusKind::Satisfied)
+            .map(|evidence| evidence.name.clone())
+            .collect::<Vec<_>>()
+    } else {
+        gate.requires_external_evidence.clone()
+    };
     add_check(
         &mut checks,
         "external-evidence",
@@ -857,6 +889,7 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
         identity: claim_identity,
         support,
         checks,
+        external_evidence,
         missing_external_evidence,
         reasons: vec![reason.to_owned()],
     })
@@ -1060,6 +1093,7 @@ fn inherited_gate(
                 .to_owned(),
         );
     }
+    validate_policy_graph(policy)?;
     let target = target.as_str();
     if !policy.lifecycle.iter().any(|stage| stage == target) {
         return Err(format!(
@@ -1170,6 +1204,71 @@ fn inherited_gate(
         return Err("external-evidence names must not be empty".to_owned());
     }
     Ok(merged)
+}
+
+fn validate_policy_graph(policy: &PromotionPolicy) -> Result<(), String> {
+    let expected = ["candidate", "production", "validated"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let observed = policy
+        .gates
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if observed != expected {
+        return Err(
+            "promotion policy must define exactly candidate, validated, and production gates"
+                .to_owned(),
+        );
+    }
+    for (name, gate) in &policy.gates {
+        if gate
+            .required_workloads
+            .as_ref()
+            .is_some_and(|values| values.iter().collect::<BTreeSet<_>>().len() != values.len())
+        {
+            return Err(format!(
+                "promotion policy gate {name} contains duplicate workload names"
+            ));
+        }
+        if gate
+            .requires_external_evidence
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != gate.requires_external_evidence.len()
+        {
+            return Err(format!(
+                "promotion policy gate {name} contains duplicate external-evidence names"
+            ));
+        }
+        for evidence in &gate.requires_external_evidence {
+            external::parse_kind(evidence)?;
+        }
+        if let Some(parent) = &gate.inherits {
+            if !policy.gates.contains_key(parent) {
+                return Err(format!(
+                    "promotion policy gate {name} inherits missing gate {parent}"
+                ));
+            }
+        }
+    }
+    for start in policy.gates.keys() {
+        let mut current = Some(start.as_str());
+        let mut seen = BTreeSet::new();
+        while let Some(name) = current {
+            if !seen.insert(name) {
+                return Err(format!(
+                    "promotion policy inheritance cycle includes gate {name}"
+                ));
+            }
+            current = policy
+                .gates
+                .get(name)
+                .and_then(|gate| gate.inherits.as_deref());
+        }
+    }
+    Ok(())
 }
 
 fn group_samples(samples: &[MeasuredSample]) -> BTreeMap<&str, Vec<&MeasuredSample>> {
@@ -1425,6 +1524,36 @@ mod tests {
             }
         }));
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn policy_rejects_ambiguous_external_evidence_and_invalid_graphs() {
+        let mut duplicate = promotion_policy();
+        duplicate
+            .gates
+            .get_mut("validated")
+            .unwrap()
+            .requires_external_evidence = vec![
+            "near-limit-context-stress".to_owned(),
+            "near-limit-context-stress".to_owned(),
+        ];
+        assert!(inherited_gate(&duplicate, QualificationTarget::Validated).is_err());
+
+        let mut unknown = promotion_policy();
+        unknown
+            .gates
+            .get_mut("validated")
+            .unwrap()
+            .requires_external_evidence = vec!["unversioned-manual-claim".to_owned()];
+        assert!(inherited_gate(&unknown, QualificationTarget::Validated).is_err());
+
+        let mut missing_parent = promotion_policy();
+        missing_parent.gates.get_mut("production").unwrap().inherits = Some("missing".to_owned());
+        assert!(inherited_gate(&missing_parent, QualificationTarget::Candidate).is_err());
+
+        let mut cycle = promotion_policy();
+        cycle.gates.get_mut("candidate").unwrap().inherits = Some("production".to_owned());
+        assert!(inherited_gate(&cycle, QualificationTarget::Candidate).is_err());
     }
 
     #[test]

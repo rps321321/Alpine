@@ -1,5 +1,6 @@
 use alpine_control_plane::{
-    Alpine, Decision, EvidencePhase, MicrobenchmarkOptions, QualificationTarget,
+    Alpine, Decision, EvidencePhase, ExternalEvidenceKind, ExternalEvidenceStatusKind,
+    MicrobenchmarkOptions, QualificationTarget, RecordExternalEvidenceOptions,
     RunQualificationOptions, TuningDisposition, TuningOptions,
 };
 use serde_json::json;
@@ -101,7 +102,49 @@ fn rust_microbenchmark_writes_complete_identity_bound_evidence() {
     assert_eq!(validated.decision, Decision::NotProven);
     assert_eq!(
         validated.missing_external_evidence,
-        vec!["fixture-external"]
+        vec!["same-process-50-request-greedy-stability"]
+    );
+
+    let evidence_options = RecordExternalEvidenceOptions {
+        repository_root: qualify_options.repository_root.clone(),
+        database: database.clone(),
+        result_root: results.clone(),
+        anchor_run_id: report.run_id.clone(),
+        kind: ExternalEvidenceKind::SameProcess50RequestGreedyStability,
+        evidence: json!({
+            "target_requests": 50,
+            "contaminating_requests": 50,
+            "unique_output_hashes": 1,
+            "verified_session": true
+        }),
+        reviewed_by: None,
+    };
+    let recorded = Alpine::record_external_evidence(&evidence_options)
+        .expect("record immutable external evidence");
+    let retried = Alpine::record_external_evidence(&evidence_options)
+        .expect("retry identical external evidence");
+    assert_eq!(retried, recorded);
+    let mut conflicting = evidence_options.clone();
+    conflicting.evidence["contaminating_requests"] = json!(51);
+    assert!(Alpine::record_external_evidence(&conflicting).is_err());
+
+    let validated = Alpine::qualify_run(&validated_options).expect("satisfied validated gate");
+    assert_eq!(validated.decision, Decision::Qualified);
+
+    let original_artifact = std::fs::read(&recorded.path).unwrap();
+    std::fs::write(&recorded.path, b"tampered").unwrap();
+    let stale = Alpine::qualify_run(&validated_options).expect("tampered external evidence report");
+    assert_eq!(stale.decision, Decision::NotProven);
+    assert_eq!(
+        stale.external_evidence[0].status,
+        ExternalEvidenceStatusKind::Stale
+    );
+    std::fs::write(&recorded.path, original_artifact).unwrap();
+    assert_eq!(
+        Alpine::qualify_run(&validated_options)
+            .expect("restored external evidence")
+            .decision,
+        Decision::Qualified
     );
 
     rusqlite::Connection::open(&database)
@@ -153,7 +196,9 @@ fn write_repository(root: &Path) {
                 },
                 "validated": {
                     "inherits": "candidate",
-                    "requires_external_evidence": ["fixture-external"]
+                    "requires_external_evidence": [
+                        "same-process-50-request-greedy-stability"
+                    ]
                 },
                 "production": {"inherits": "validated"}
             }

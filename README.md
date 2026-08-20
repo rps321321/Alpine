@@ -77,6 +77,15 @@ cargo run --release --bin alpine -- qualify <final-run-id> --tuning-run <tuning-
 
 The qualifier recomputes quality, deterministic output hashes, sample count, decode variability and per-workload median regression from non-warmup SQLite rows. It also re-hashes the current policy, workload suite, Alpine binary, hardware manifest and runtime, recomputes material configuration identity, and checks that the fully hashed final model has not changed. Qualification outcomes are `qualified`, `unsupported`, `inconclusive`, `regressed` and `not-proven`. Validated and production targets remain `not-proven` until their inherited external evidence is independently verified.
 
+Attach independently produced evidence to the exact passed final run:
+
+```powershell
+cargo run --release --bin alpine -- record-evidence <final-run-id> --kind same-process-50-request-greedy-stability --evidence C:\path\to\stability-details.json
+cargo run --release --bin alpine -- record-evidence <final-run-id> --kind operator-reviewed-capability-report --evidence C:\path\to\review-details.json --reviewed-by "operator name"
+```
+
+The input file contains only the kind-specific evidence details. Alpine constructs the versioned envelope, copies the final run's seven-dimensional identity, binds it to the current Alpine executable, publishes it immutably, hashes it, and attaches that digest to SQLite. Repeating an identical interrupted operation is idempotent; conflicting or tampered artifacts fail closed. A human reviewer remains mandatory for the operator capability gate.
+
 The old caller-assembled request evaluator remains available only as a migration compatibility command:
 
 ```powershell

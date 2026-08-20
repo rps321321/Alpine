@@ -118,14 +118,14 @@ If a harness is interrupted after producing evidence:
 
 This classifies preserved evidence; it does not delete or invent samples.
 
-Validated/production qualification can correlate context and agent runs with the exact Profile, model, runtime, Profile-file hash, and benchmark identity. Record non-benchmark evidence as a hashed JSON artifact:
+Validated/production qualification accepts non-benchmark evidence only when it is attached to the exact passed final run. Provide a JSON file containing the kind-specific details; Rust constructs and validates the identity-bound envelope before storing its immutable digest in SQLite:
 
 ```powershell
-.\localmodel.ps1 record-evidence <run-id> --kind same-process-50-request-greedy-stability --path C:\path\to\evidence.json
-.\localmodel.ps1 record-evidence <run-id> --kind operator-reviewed-capability-report --path C:\path\to\review.json --reviewed-by "operator name"
+cargo run --release --bin alpine -- record-evidence <final-run-id> --kind same-process-50-request-greedy-stability --evidence C:\path\to\stability-details.json
+cargo run --release --bin alpine -- record-evidence <final-run-id> --kind operator-reviewed-capability-report --evidence C:\path\to\review-details.json --reviewed-by "operator name"
 ```
 
-Each artifact must contain its `kind`, `decision: "pass"`, and the matching run identity. Capability evidence also needs the same explicit `reviewed_by` value; an automated benchmark cannot silently supply the human gate.
+The current Alpine executable must match the final run's software identity. Exact retries recover safely after interruption, while changed content, stale binaries, digest mismatches, duplicate kinds, and invalid kind-specific claims fail closed. Capability evidence requires an explicit human reviewer; an automated benchmark cannot silently supply that gate.
 
 ## OpenCode context and permissions
 
