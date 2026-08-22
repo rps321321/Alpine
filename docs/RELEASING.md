@@ -34,8 +34,8 @@ Binary packaging, signing, installers, update UX, a complete binary-closure lice
 
 Before tagging, work from a public-safe mirror of the rewritten history and verify:
 
-```powershell
-.\scripts\verify.ps1
+```console
+cargo run --locked --bin alpine-verify
 git status --short
 git ls-files
 git log --all --format='%H%x09%an%x09%ae%x09%aI%x09%cI'

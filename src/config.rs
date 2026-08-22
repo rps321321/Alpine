@@ -23,6 +23,25 @@ pub struct SessionConfig {
     pub cleanup: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CleanupConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub executable: Option<PathBuf>,
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    #[serde(default)]
+    pub stdout: Option<PathBuf>,
+    #[serde(default)]
+    pub stderr: Option<PathBuf>,
+    #[serde(default)]
+    pub health: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
@@ -148,9 +167,9 @@ fn validate_session(
     path: &Path,
     install_root: &Path,
 ) -> Result<(), String> {
-    if !matches!(session.schema, 3 | 4) {
+    if !matches!(session.schema, 3..=5) {
         return Err(format!(
-            "Unsupported Session Config schema '{}' in {}; expected 3 or 4.",
+            "Unsupported Session Config schema '{}' in {}; expected 3, 4 or 5.",
             session.schema,
             path.display()
         ));
@@ -194,16 +213,52 @@ fn validate_session(
                 path.display()
             ));
         }
-        (4, None) => {}
-        (4, Some(_)) => {
+        (4 | 5, None) => {}
+        (4 | 5, Some(_)) => {
             return Err(format!(
-                "{}: schema 4 stores deployment roles in append-only deployment history, not active_profile",
-                path.display()
+                "{}: schema {} stores deployment roles in append-only deployment history, not active_profile",
+                path.display(),
+                session.schema
             ));
         }
         _ => unreachable!(),
     }
+    cleanup_config(session)?;
     Ok(())
+}
+
+pub(crate) fn cleanup_config(session: &SessionConfig) -> Result<Option<CleanupConfig>, String> {
+    if session.schema < 5 {
+        let enabled = match &session.cleanup {
+            serde_json::Value::Null => false,
+            serde_json::Value::Object(cleanup) => match cleanup.get("enabled") {
+                None => false,
+                Some(serde_json::Value::Bool(enabled)) => *enabled,
+                Some(_) => {
+                    return Err(format!(
+                        "Session Config schema {} cleanup.enabled must be a Boolean",
+                        session.schema
+                    ));
+                }
+            },
+            _ => {
+                return Err(format!(
+                    "Session Config schema {} cleanup must be an object or null",
+                    session.schema
+                ));
+            }
+        };
+        if enabled {
+            return Err(format!(
+                "Session Config schema {} uses the retired cleanup start_script contract; migrate it to schema 5 with executable, arguments, stdout and stderr before starting or stopping inference",
+                session.schema
+            ));
+        }
+        return Ok(None);
+    }
+    let cleanup: CleanupConfig = serde_json::from_value(session.cleanup.clone())
+        .map_err(|error| format!("invalid schema 5 cleanup configuration: {error}"))?;
+    Ok(cleanup.enabled.then_some(cleanup))
 }
 
 fn validate_profile(profile: &Profile, selected: &str, path: &Path) -> Result<(), String> {
@@ -372,6 +427,68 @@ mod tests {
         assert_eq!(resolved.base_url, "http://127.0.0.1:8123");
         assert!(resolved.server.is_file());
         assert!(!resolved.install_root.to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    #[test]
+    fn schema_five_uses_deployment_selection_and_rejects_legacy_active_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        write_fixture(directory.path());
+        let path = directory.path().join("config/session.json");
+        let mut session: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        session["schema"] = json!(5);
+        session.as_object_mut().unwrap().remove("active_profile");
+        std::fs::write(&path, serde_json::to_vec(&session).unwrap()).unwrap();
+        let resolved = resolve(directory.path(), Some("stable-16k"), true).unwrap();
+        assert_eq!(resolved.session.schema, 5);
+
+        session["active_profile"] = json!("stable-16k");
+        std::fs::write(&path, serde_json::to_vec(&session).unwrap()).unwrap();
+        let error = resolve(directory.path(), Some("stable-16k"), true).unwrap_err();
+        assert!(error.contains("schema 5"));
+        assert!(error.contains("deployment history"));
+    }
+
+    #[test]
+    fn enabled_cleanup_requires_explicit_schema_five_launch_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        write_fixture(directory.path());
+        let path = directory.path().join("config/session.json");
+        let mut session: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        session["cleanup"] = json!({
+            "enabled": true,
+            "port": 8090,
+            "exe": directory.path().join("cleanup/cleanup.exe"),
+            "start_script": directory.path().join("cleanup/start.ps1"),
+            "health": "http://127.0.0.1:8090/health"
+        });
+        std::fs::write(&path, serde_json::to_vec(&session).unwrap()).unwrap();
+        let error = resolve(directory.path(), Some("stable-16k"), true).unwrap_err();
+        assert!(error.contains("retired cleanup start_script contract"));
+        assert!(error.contains("migrate it to schema 5"));
+
+        session["schema"] = json!(5);
+        session.as_object_mut().unwrap().remove("active_profile");
+        session["cleanup"] = json!({
+            "enabled": true,
+            "port": 8090,
+            "executable": directory.path().join("cleanup/cleanup.exe"),
+            "arguments": ["--host", "127.0.0.1", "--port", "8090"],
+            "stdout": directory.path().join("cleanup/logs/stdout.log"),
+            "stderr": directory.path().join("cleanup/logs/stderr.log"),
+            "health": "http://127.0.0.1:8090/health"
+        });
+        std::fs::write(&path, serde_json::to_vec(&session).unwrap()).unwrap();
+        assert!(resolve(directory.path(), Some("stable-16k"), true).is_ok());
+
+        session["cleanup"]["start_script"] = json!(directory.path().join("cleanup/start.ps1"));
+        std::fs::write(&path, serde_json::to_vec(&session).unwrap()).unwrap();
+        assert!(
+            resolve(directory.path(), Some("stable-16k"), true)
+                .unwrap_err()
+                .contains("unknown field `start_script`")
+        );
     }
 
     #[test]

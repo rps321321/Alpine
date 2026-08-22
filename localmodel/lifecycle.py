@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from .config import powershell, read_json
+from .config import read_json
 from .io import write_json_atomic
 from .locking import FileLease, LeaseBusyError
 from .stats import describe
@@ -34,11 +34,6 @@ def _run_with_file_backed_output(command: list[str], timeout: int = 900) -> subp
         return subprocess.CompletedProcess(command, result.returncode, stdout.read(), stderr.read())
 
 
-def run_powershell(script: Path, *arguments: str, timeout: int = 900) -> subprocess.CompletedProcess[str]:
-    command = [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), *arguments]
-    return _run_with_file_backed_output(command, timeout)
-
-
 def write_json(path: Path, value: dict[str, Any]) -> None:
     write_json_atomic(path, value)
 
@@ -49,20 +44,15 @@ class SessionAdapter(Protocol):
     def release(self, acquisition: dict[str, Any], keep_server: bool = False) -> None: ...
 
 
-class PowerShellSessionAdapter:
+class AlpineSessionAdapter:
     def __init__(self, install_root: Path):
         self.install_root = install_root.resolve()
-        self.module = self.install_root / "scripts" / "inference-session.ps1"
+        self.executable = self.install_root / "alpine.exe"
 
-    @staticmethod
-    def _quote(value: str) -> str:
-        return "'" + value.replace("'", "''") + "'"
-
-    def _invoke_json(self, expression: str) -> dict[str, Any]:
-        command = f". {self._quote(str(self.module))}; {expression}"
-        result = _run_with_file_backed_output(
-            [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]
-        )
+    def _invoke_json(self, arguments: list[str]) -> dict[str, Any]:
+        if not self.executable.is_file():
+            raise RuntimeError(f"Alpine executable is missing: {self.executable}")
+        result = _run_with_file_backed_output([str(self.executable), *arguments])
         if result.returncode:
             raise RuntimeError((result.stderr or result.stdout).strip())
         lines = [line for line in result.stdout.splitlines() if line.strip()]
@@ -71,12 +61,17 @@ class PowerShellSessionAdapter:
         return json.loads(lines[-1])
 
     def acquire(self, profile: str) -> dict[str, Any]:
-        selected = self._quote(profile)
-        expression = (
-            f"Enter-InferenceSession -InstallRoot {self._quote(str(self.install_root))} "
-            f"-Profile {selected} 6>$null | ConvertTo-Json -Depth 8 -Compress"
+        acquisition = self._invoke_json(
+            [
+                "session",
+                "acquire",
+                "--install-root",
+                str(self.install_root),
+                "--profile",
+                profile,
+                "--compact",
+            ]
         )
-        acquisition = self._invoke_json(expression)
         if acquisition.get("profile") != profile:
             raise RuntimeError(f"running Profile is {acquisition.get('profile')}, requested {profile}")
         return acquisition
@@ -84,14 +79,23 @@ class PowerShellSessionAdapter:
     def release(self, acquisition: dict[str, Any], keep_server: bool = False) -> None:
         if keep_server or not acquisition.get("changed"):
             return
-        encoded = self._quote(json.dumps(acquisition, separators=(",", ":")))
-        expression = f"""
-        $acquisition = {encoded} | ConvertFrom-Json
-        Exit-InferenceSession -InstallRoot {self._quote(str(self.install_root))} -Acquisition $acquisition 6>$null
-        $after = Get-InferenceSessionStatus -InstallRoot {self._quote(str(self.install_root))}
-        [pscustomobject]@{{ active=$after.Active; healthy=$after.Healthy; profile=$after.Profile; vision=$after.Vision }} | ConvertTo-Json -Compress
-        """
-        result = self._invoke_json(expression)
+        with tempfile.TemporaryDirectory(prefix="alpine-acquisition-") as directory:
+            path = Path(directory) / "acquisition.json"
+            write_json(path, acquisition)
+            self._invoke_json(
+                [
+                    "session",
+                    "release",
+                    "--install-root",
+                    str(self.install_root),
+                    "--acquisition",
+                    str(path),
+                    "--compact",
+                ]
+            )
+        result = self._invoke_json(
+            ["session", "status", "--install-root", str(self.install_root), "--compact"]
+        )
         prior = acquisition.get("prior") or {}
         if prior.get("active") and (
             not result.get("healthy")

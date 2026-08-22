@@ -7,9 +7,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import ConfigError, REPO_ROOT, artifact_manifest, powershell, profiles, read_json, resolve_session, select_active_profile, sha256
+from .config import ConfigError, REPO_ROOT, artifact_manifest, profiles, read_json, resolve_session, select_active_profile, sha256
 from .controlplane import verify_control_plane
-from .agentbench import run_agentbenchmark
 from .contextbench import run_contextbenchmark
 from .lifecycle import reconcile_run
 from .microbench import run_microbenchmark
@@ -105,9 +104,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_inventory(args: argparse.Namespace) -> int:
     output = args.output or REPO_ROOT / "inventory" / f"hardware-{datetime.now(timezone.utc).date().isoformat()}.json"
     command = [
-        powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-        str(REPO_ROOT / "scripts" / "collect-hardware.ps1"),
-        "-InstallRoot", str(args.install_root), "-Output", str(output),
+        str(installed_alpine(args.install_root)),
+        "hardware",
+        "--output",
+        str(output),
     ]
     return run(command, check=False).returncode
 
@@ -131,15 +131,6 @@ def cmd_context_stress(args: argparse.Namespace) -> int:
     print(f"run_id={run_id}")
     print(json.dumps(summary, indent=2))
     return 0 if summary["all_quality_pass"] else 2
-
-
-def cmd_agent_benchmark(args: argparse.Namespace) -> int:
-    run_id, summary = run_agentbenchmark(
-        args.install_root, args.profile, args.task, keep_server=args.keep_server, notes=args.notes,
-    )
-    print(f"run_id={run_id}")
-    print(json.dumps(summary, indent=2))
-    return 0 if summary["success"] else 2
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
@@ -207,10 +198,10 @@ def cmd_record_evidence(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    return run([
-        powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-        str(installed_script(args.install_root, "show-status.ps1")),
-    ], check=False).returncode
+    return run(
+        [str(installed_alpine(args.install_root)), "session", "status", "--install-root", str(args.install_root)],
+        check=False,
+    ).returncode
 
 
 def cmd_reconcile(args: argparse.Namespace) -> int:
@@ -228,15 +219,21 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return 0
 
 
-def installed_script(root: Path, name: str) -> Path:
-    path = root / "scripts" / name
+def installed_alpine(root: Path) -> Path:
+    path = root.resolve() / "alpine.exe"
     if not path.is_file():
-        raise SystemExit(f"installed script missing: {path}")
+        raise SystemExit(f"installed Alpine executable missing: {path}")
     return path
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    command = [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installed_script(args.install_root, "start-session.ps1"))]
+    command = [
+        str(installed_alpine(args.install_root)),
+        "session",
+        "start",
+        "--install-root",
+        str(args.install_root),
+    ]
     if args.profile:
         command += ["-Profile", args.profile]
     if args.vision:
@@ -245,21 +242,29 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    return run([powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installed_script(args.install_root, "stop-session.ps1"))], check=False).returncode
+    return run(
+        [str(installed_alpine(args.install_root)), "session", "stop", "--install-root", str(args.install_root)],
+        check=False,
+    ).returncode
 
 
 def cmd_opencode(args: argparse.Namespace) -> int:
     command = [
-        powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-        str(installed_script(args.install_root, "open-local-opencode.ps1")),
-        "-Project", str(args.project.resolve()), "-Profile", args.profile,
+        str(installed_alpine(args.install_root)),
+        "opencode",
+        "--install-root",
+        str(args.install_root),
+        "--project",
+        str(args.project.resolve()),
+        "--profile",
+        args.profile,
     ]
     if args.vision:
-        command.append("-WithVision")
+        command.append("--vision")
     if args.full_prompt:
-        command.append("-FullPrompt")
+        command.append("--full-prompt")
     if args.keep_server:
-        command.append("-KeepServer")
+        command.append("--keep-server")
     return run(command, check=False).returncode
 
 
@@ -291,12 +296,6 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--keep-server", action="store_true")
     context.add_argument("--notes")
     context.set_defaults(func=cmd_context_stress)
-    agent_benchmark = sub.add_parser("agent-benchmark")
-    agent_benchmark.add_argument("--profile", required=True, choices=sorted(profiles()))
-    agent_benchmark.add_argument("--task", default="python-off-by-one")
-    agent_benchmark.add_argument("--keep-server", action="store_true")
-    agent_benchmark.add_argument("--notes")
-    agent_benchmark.set_defaults(func=cmd_agent_benchmark)
     compare = sub.add_parser("compare")
     compare.add_argument("profiles", nargs="+", choices=sorted(profiles()))
     compare.set_defaults(func=cmd_compare)

@@ -10,6 +10,9 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -22,19 +25,6 @@ jobs:
           rustup toolchain install 1.85.0 --profile minimal --component clippy,rustfmt
       - name: Verify DCO sign-offs for pull-request commits
         if: github.event_name == 'pull_request'
-        shell: powershell
-        run: |
-          $range = '${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}'
-          $missing = @()
-          foreach ($commit in @(git rev-list $range)) {
-            $message = git show -s --format=%B $commit
-            if (($message -join "`n") -notmatch '(?m)^Signed-off-by: .+ <[^>]+>$') {
-              $missing += $commit
-            }
-          }
-          if ($missing.Count -gt 0) {
-            throw "DCO Signed-off-by trailer missing from: $($missing -join ', ')"
-          }
+        run: cargo run --locked --bin alpine-verify -- dco "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
       - name: Verify
-        shell: powershell
-        run: .\scripts\verify.ps1
+        run: cargo run --locked --bin alpine-verify

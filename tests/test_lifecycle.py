@@ -14,10 +14,10 @@ from unittest.mock import patch
 
 from localmodel.lifecycle import (
     ActiveRunError,
+    AlpineSessionAdapter,
     BenchmarkLifecycle,
     FileLease,
     LeaseBusyError,
-    PowerShellSessionAdapter,
     reconcile_run,
     write_json,
 )
@@ -84,13 +84,11 @@ def sample(iteration: int) -> dict[str, object]:
 
 
 class BenchmarkLifecycleTests(unittest.TestCase):
-    def test_powershell_adapter_uses_file_backed_output_instead_of_pipes(self) -> None:
+    def test_alpine_adapter_uses_file_backed_output_instead_of_pipes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            module = root / "scripts" / "inference-session.ps1"
-            module.parent.mkdir(parents=True)
-            module.write_text("", encoding="utf-8")
-            adapter = PowerShellSessionAdapter(root)
+            (root / "alpine.exe").write_bytes(b"fixture")
+            adapter = AlpineSessionAdapter(root)
 
             def complete(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
                 self.assertNotEqual(options.get("stdout"), subprocess.PIPE)
@@ -103,20 +101,19 @@ class BenchmarkLifecycleTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0)
 
             with patch("localmodel.lifecycle.subprocess.run", side_effect=complete):
-                result = adapter._invoke_json("[pscustomobject]@{ ok = $true } | ConvertTo-Json -Compress")
+                result = adapter._invoke_json(["session", "status", "--compact"])
 
             self.assertEqual(result, {"ok": True})
 
     def test_workload_modules_use_only_shared_operational_seams(self) -> None:
         package = Path(__file__).resolve().parents[1] / "localmodel"
-        for name in ("microbench.py", "contextbench.py", "agentbench.py"):
+        for name in ("microbench.py", "contextbench.py"):
             source = (package / name).read_text(encoding="utf-8")
             self.assertIn("BenchmarkLifecycle", source, name)
             self.assertNotIn("ResultStore(", source, name)
             self.assertNotIn("Start-InferenceSession", source, name)
             self.assertNotIn("Stop-InferenceSession", source, name)
         self.assertNotIn("from .microbench import", (package / "contextbench.py").read_text(encoding="utf-8"))
-        self.assertNotIn("from .microbench import", (package / "agentbench.py").read_text(encoding="utf-8"))
 
     def test_success_owns_complete_evidence_and_releases_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -455,69 +452,6 @@ class ResultStoreConcurrencyTests(unittest.TestCase):
             finally:
                 for store in stores:
                     store.close()
-
-    def test_python_inference_lease_blocks_powershell_harness_probe(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "inference.lease"
-            lib = Path(__file__).resolve().parents[1] / "runtime" / "scripts" / "lib.ps1"
-            command = (
-                f". '{lib}'; $lock = Enter-InterprocessLock '{path}' 100; "
-                "try { 'acquired' } finally { Exit-InterprocessLock $lock }"
-            )
-            lease = FileLease(path, {"kind": "test"}).acquire()
-            try:
-                blocked = subprocess.run(
-                    ["powershell.exe", "-NoProfile", "-Command", command],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertNotEqual(blocked.returncode, 0)
-            finally:
-                lease.release()
-            available = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-Command", command],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(available.returncode, 0, available.stderr)
-
-    def test_lease_owner_token_allows_only_the_governing_agent_request(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            lease_path = root / "logs" / "inference.lease"
-            module = Path(__file__).resolve().parents[1] / "runtime" / "scripts" / "inference-session.ps1"
-            command = (
-                f". '{module}'; function Get-SessionConfig {{ [pscustomobject]@{{root='{root}'}} }}; "
-                "Assert-InferenceCapacityAvailable -TimeoutMilliseconds 100"
-            )
-            lease = FileLease(lease_path, {"kind": "inference-capacity"}).acquire()
-            try:
-                owner_environment = os.environ.copy()
-                owner_environment["LOCALMODEL_INFERENCE_LEASE_ID"] = str(lease.owner["lease_id"])
-                owner = subprocess.run(
-                    ["powershell.exe", "-NoProfile", "-Command", command],
-                    env=owner_environment,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertEqual(owner.returncode, 0, owner.stderr)
-                competitor_environment = os.environ.copy()
-                competitor_environment["LOCALMODEL_INFERENCE_LEASE_ID"] = "different-lease"
-                competitor = subprocess.run(
-                    ["powershell.exe", "-NoProfile", "-Command", command],
-                    env=competitor_environment,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertNotEqual(competitor.returncode, 0)
-                self.assertIn("leased by a measured benchmark", competitor.stderr)
-            finally:
-                lease.release()
-
 
 if __name__ == "__main__":
     unittest.main()

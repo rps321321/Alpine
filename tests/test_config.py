@@ -46,7 +46,6 @@ def write_fixture(root: Path, *, schema: int = 3, profile: str = "stable-16k", r
         "root": str(root),
         "host": "127.0.0.1",
         "port": 8123,
-        "active_profile": profile,
         "runtimes": {"official": str(server), "custom": None},
         "llama_server": str(server),
         "model": str(root / "models" / "model.gguf"),
@@ -57,54 +56,24 @@ def write_fixture(root: Path, *, schema: int = 3, profile: str = "stable-16k", r
         "state_file": str(root / "logs" / "session-state.json"),
         "cleanup": {"enabled": False},
     }
+    if schema == 3:
+        session["active_profile"] = profile
     (root / "config" / "session.json").write_text(json.dumps(session), encoding="utf-8")
 
 
 class SessionConfigTests(unittest.TestCase):
-    def invoke_powershell(self, root: Path, profile: str | None = None) -> subprocess.CompletedProcess[str]:
-        selected = f" -Name '{profile}'" if profile else ""
-        command = (
-            f". '{REPO_ROOT / 'runtime' / 'scripts' / 'lib.ps1'}'; "
-            f"Get-ResolvedSession -InstallRoot '{root}'{selected} -RequireRuntime | Out-Null"
-        )
-        return subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", command],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-    def test_python_and_powershell_resolve_the_same_domain_values(self) -> None:
+    def test_python_resolves_the_complete_domain_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_fixture(root)
             resolved = resolve_session(root, require_runtime=True)
 
-            command = (
-                f". '{REPO_ROOT / 'runtime' / 'scripts' / 'lib.ps1'}'; "
-                f"Get-ResolvedSession -InstallRoot '{root}' | ConvertTo-Json -Depth 8 -Compress"
-            )
-            result = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-Command", command],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            powershell = json.loads(result.stdout)
-            self.assertEqual(powershell["Session"], resolved.session)
-            self.assertEqual(powershell["ProfileName"], resolved.profile_name)
-            self.assertEqual(Path(powershell["InstallRoot"]), resolved.install_root)
-            self.assertEqual(Path(powershell["ServerPath"]), resolved.server)
-            self.assertEqual(powershell["BaseUrl"], resolved.base_url)
-            self.assertEqual(powershell["Profile"], resolved.profile)
-            self.assertEqual(powershell["RuntimeName"], resolved.runtime_name)
-            self.assertEqual(Path(powershell["Model"]), resolved.model)
-            self.assertEqual(Path(powershell["Mmproj"]), resolved.mmproj)
-            self.assertEqual(Path(powershell["ChatTemplate"]), resolved.chat_template)
-            self.assertEqual(Path(powershell["ApiKeyFile"]), resolved.api_key_file)
-            self.assertEqual(Path(powershell["BaseUrlFile"]), resolved.base_url_file)
-            self.assertEqual(Path(powershell["StateFile"]), resolved.state_file)
+            self.assertEqual(resolved.session["schema"], 3)
+            self.assertEqual(resolved.profile_name, "stable-16k")
+            self.assertEqual(resolved.install_root, root.resolve())
+            self.assertEqual(resolved.runtime_name, "official")
+            self.assertEqual(resolved.server, (root / "runtime" / "llama-server.exe").resolve())
+            self.assertEqual(resolved.base_url, "http://127.0.0.1:8123")
 
     def test_every_registered_profile_resolves_through_the_complete_shared_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -125,21 +94,8 @@ class SessionConfigTests(unittest.TestCase):
             for source in registered:
                 with self.subTest(profile=source.stem):
                     resolved = resolve_session(root, source.stem, require_runtime=True)
-                    command = (
-                        f". '{REPO_ROOT / 'runtime' / 'scripts' / 'lib.ps1'}'; "
-                        f"Get-ResolvedSession -InstallRoot '{root}' -Name '{source.stem}' "
-                        "-RequireRuntime | ConvertTo-Json -Depth 8 -Compress"
-                    )
-                    result = subprocess.run(
-                        ["powershell.exe", "-NoProfile", "-Command", command],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    powershell = json.loads(result.stdout)
-                    self.assertEqual(powershell["Profile"], resolved.profile)
-                    self.assertEqual(Path(powershell["Model"]), resolved.model)
+                    self.assertEqual(resolved.profile_name, source.stem)
+                    self.assertEqual(resolved.model, (root / "models" / "model.gguf").resolve())
 
     def test_rejects_unsupported_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -147,6 +103,14 @@ class SessionConfigTests(unittest.TestCase):
             write_fixture(root, schema=2)
             with self.assertRaisesRegex(ConfigError, "unsupported Session Config schema"):
                 resolve_session(root)
+
+    def test_schema_five_resolves_with_an_explicit_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture(root, schema=5)
+
+            resolved = resolve_session(root, "stable-16k", require_runtime=True)
+            self.assertEqual(resolved.profile_name, "stable-16k")
 
     def test_rejects_missing_selected_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -162,9 +126,9 @@ class SessionConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "Runtime 'custom' is unavailable"):
                 resolve_session(root, require_runtime=True)
 
-    def test_both_adapters_reject_invalid_fixtures_actionably(self) -> None:
+    def test_python_adapter_rejects_invalid_fixtures_actionably(self) -> None:
         cases = (
-            ("schema", lambda root: write_fixture(root, schema=2), None, "Unsupported Session Config schema"),
+            ("schema", lambda root: write_fixture(root, schema=2), None, "unsupported Session Config schema"),
             ("profile", write_fixture, "does-not-exist", "Profile missing"),
             ("runtime", lambda root: write_fixture(root, runtime="custom"), None, "Runtime 'custom'"),
         )
@@ -172,9 +136,8 @@ class SessionConfigTests(unittest.TestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 arrange(root)
-                result = self.invoke_powershell(root, selected)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(message, result.stderr)
+                with self.assertRaisesRegex(ConfigError, message):
+                    resolve_session(root, selected, require_runtime=True)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -185,7 +148,6 @@ class SessionConfigTests(unittest.TestCase):
             session_path.write_text(json.dumps(session), encoding="utf-8")
             with self.assertRaisesRegex(ConfigError, "port"):
                 resolve_session(root)
-            self.assertIn("port must be between", self.invoke_powershell(root).stderr)
 
         for malformed in (True, 16.5):
             with self.subTest(profile_context=malformed), tempfile.TemporaryDirectory() as directory:
@@ -197,20 +159,14 @@ class SessionConfigTests(unittest.TestCase):
                 profile_path.write_text(json.dumps(profile), encoding="utf-8")
                 with self.assertRaisesRegex(ConfigError, "positive integer"):
                     resolve_session(root)
-                result = self.invoke_powershell(root)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("positive integer", result.stderr)
 
-    def test_incomplete_setup_publication_blocks_both_adapters(self) -> None:
+    def test_incomplete_setup_publication_blocks_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_fixture(root)
             (root / ".setup-publishing.json").write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(ConfigError, "Setup publication is incomplete"):
                 resolve_session(root)
-            result = self.invoke_powershell(root)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Setup publication is incomplete", result.stderr)
 
     def test_active_profile_selection_is_validated_atomic_and_recoverable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

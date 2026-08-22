@@ -46,17 +46,7 @@ The direct installed CLI is:
 .\alpine.exe opencode --install-root . --project C:\path\to\project
 ```
 
-Legacy CLI alternatives remain for compatibility and historical reproduction only. They are not required or accepted as authority for a new supported-production claim:
-
-```powershell
-.\localmodel.ps1 profiles
-.\localmodel.ps1 status
-.\localmodel.ps1 start --profile stable-16k
-.\localmodel.ps1 opencode --profile stable-16k --project C:\path\to\project
-.\localmodel.ps1 stop
-```
-
-The launcher refuses to steal port 8100 from a different executable. `status` verifies process ownership rather than treating any healthy HTTP listener as the configured model.
+The launcher refuses to steal port 8100 from a different executable. `alpine session status` verifies process ownership rather than treating any healthy HTTP listener as the configured model.
 
 ## Verify a restored machine
 
@@ -68,13 +58,17 @@ cargo run --release --bin alpine -- hardware
 cargo run --release --bin alpine -- inspect
 ```
 
-The independent final stage of `alpine evaluate` performs a complete model SHA-256 and current runtime/configuration verification. Historical inventory collection remains available only for comparison with old evidence:
+The independent final stage of `alpine evaluate` performs a complete model SHA-256 and current runtime/configuration verification. Historical machine inventories are private, machine-local evidence and are not part of the public source tree. New Rust evidence embeds a canonical live CPU/RAM/GPU/driver snapshot, and qualification captures the host again; it does not trust an inventory file.
+
+The same Rust CLI owns the supported maintenance tools. It can write the canonical hardware identity atomically, rebuild the thin Windows launcher without PowerShell, and package the pinned custom runtime with a per-file hash manifest:
 
 ```powershell
-.\localmodel.ps1 inventory
+cargo run --release --bin alpine -- hardware --output C:\path\to\hardware.json
+cargo run --release --bin alpine -- build-launcher --root runtime --output "C:\path\to\Open Local Qwen.exe" --no-shortcut
+cargo run --release --bin alpine -- package-runtime --built-runtime C:\path\to\llama-build\bin --output C:\path\to\runtime-custom
 ```
 
-Historical machine inventories are private, machine-local evidence and are not part of the public source tree. New Rust evidence embeds a canonical live CPU/RAM/GPU/driver snapshot, and qualification captures the host again; it does not trust an inventory file.
+Omit `--no-shortcut` when building the installed launcher to refresh its desktop shortcuts. `package-runtime` validates the pinned llama.cpp commit, copies the required CUDA runtime DLLs, and writes `build-manifest.json`; its input and output directories must be distinct.
 
 ## Profiles
 
@@ -104,18 +98,6 @@ cargo run --release --bin alpine -- evaluate
 
 The versioned plan fixes the search space, workloads, request budget, timeouts and target. Alpine measures every declared 16K Profile, selects the best policy-eligible result without editing Profiles, produces distinct final evidence, runs the inherited automated gates, proves Stable rollback, and publishes an atomic report. A production target remains `not-proven` until the human capability review is attached.
 
-The following Python commands are retained compatibility/reporting tools, not the supported qualification path:
-
-```powershell
-.\localmodel.ps1 benchmark --profile stable-16k --runs 5 --warmups 1
-.\localmodel.ps1 context-stress --profile fast-32k --ratio 0.85 --runs 2
-.\localmodel.ps1 agent-benchmark --profile stable-16k --task python-off-by-one
-.\localmodel.ps1 runs --limit 20
-.\localmodel.ps1 compare stable-16k turbo-16k fast-32k
-.\localmodel.ps1 qualify <run-id> --target candidate
-.\localmodel.ps1 report stable-16k turbo-16k fast-32k
-```
-
 SQLite lives at `results/results.sqlite3`; each run keeps raw JSONL, outputs, logs, configurations and compressed long prompts under `results/runs/<run-id>`. Generated evidence is local by default. Summary reports are regeneratable.
 
 For a manual Rust investigation, run a tuning baseline and a separate, freshly hashed final pass with identical material configuration, then qualify the final SQLite rows:
@@ -127,17 +109,9 @@ cargo run --release --bin alpine -- tune --baseline-run <baseline-tuning-run-id>
 cargo run --release --bin alpine -- qualify <final-run-id> --tuning-run <tuning-run-id> --target candidate
 ```
 
-The tuner is read-only: it recommends a measured configuration or retains the baseline and never edits the installed Profile. The legacy `localmodel.ps1 qualify` command remains migration evidence; it is not sufficient for a new Alpine qualification claim.
+The tuner is read-only: it recommends a measured configuration or retains the baseline and never edits the installed Profile.
 
 Measured runs hold an inference-capacity lease tied to their exact Inference Session identity. A second benchmark or unrelated interactive launcher receives a visible busy refusal instead of silently queueing and contaminating timings. The agent benchmark's own launcher carries the governing lease token.
-
-If a harness is interrupted after producing evidence:
-
-```powershell
-.\localmodel.ps1 reconcile <run-id>
-```
-
-This classifies preserved evidence; it does not delete or invent samples.
 
 Validated/production automated evidence is generated by Rust-owned harnesses against the exact passed final run. The same-process gate records raw token ids for 50 contaminant/target pairs and restores the prior Session:
 

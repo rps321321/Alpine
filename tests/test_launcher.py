@@ -11,7 +11,6 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SUPERVISOR = REPO_ROOT / "runtime" / "scripts" / "launcher-supervisor.ps1"
 
 
 class LauncherTests(unittest.TestCase):
@@ -41,52 +40,28 @@ class LauncherTests(unittest.TestCase):
     ) -> Path:
         shutil.copytree(REPO_ROOT / "runtime" / "scripts", install / "scripts")
         shutil.copytree(REPO_ROOT / "runtime" / "launcher", install / "launcher")
-        fake_script = r"""
-param(
-    [string]$Project,
-    [string]$Profile,
-    [switch]$WithVision,
-    [switch]$Lean,
-    [switch]$FullPrompt,
-    [switch]$WithPlugins,
-    [switch]$WithSkills,
-    [string]$LaunchId,
-    [switch]$Supervised
-)
-Start-Sleep -Milliseconds 600
-if ($env:LOCALMODEL_LAUNCHER_FIXTURE_MODE -eq 'fail') {
-    throw "fixture PowerShell failure for $Profile; token=fixture-inline-secret"
-}
-$logs = Join-Path (Split-Path $PSScriptRoot -Parent) 'logs'
-New-Item -ItemType Directory -Force -Path $logs | Out-Null
-[ordered]@{
-    project=$Project
-    profile=$Profile
-    vision=[bool]$WithVision
-    lean=[bool]$Lean
-    full_prompt=[bool]$FullPrompt
-    plugins=[bool]$WithPlugins
-    skills=[bool]$WithSkills
-} | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $logs 'launcher-args.json') -Encoding UTF8
-exit 0
-"""
-        if not real_entrypoint:
-            (install / "scripts" / "open-local-opencode.ps1").write_text(
-                fake_script,
-                encoding="utf-8",
+        alpine = REPO_ROOT / "target" / "debug" / "alpine.exe"
+        if not alpine.is_file():
+            build = subprocess.run(
+                ["cargo", "build", "--bin", "alpine"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=180,
             )
+            self.assertEqual(build.returncode, 0, build.stderr)
         launcher = install / "Open Local Qwen.exe"
         result = subprocess.run(
             [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(install / "scripts" / "build-launcher.ps1"),
-                "-Output",
+                str(alpine),
+                "build-launcher",
+                "--root",
+                str(install),
+                "--output",
                 str(launcher),
-                "-NoShortcut",
+                "--no-shortcut",
+                "--compact",
             ],
             capture_output=True,
             text=True,
@@ -95,17 +70,6 @@ exit 0
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         if rust_owned or real_entrypoint:
-            alpine = REPO_ROOT / "target" / "debug" / "alpine.exe"
-            if not alpine.is_file():
-                build = subprocess.run(
-                    ["cargo", "build", "--bin", "alpine"],
-                    cwd=REPO_ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=180,
-                )
-                self.assertEqual(build.returncode, 0, build.stderr)
             shutil.copy2(alpine, install / "alpine.exe")
         else:
             self.build_fake_alpine(install)
@@ -347,63 +311,6 @@ internal static class FakeOpenCode
             self.assertNotEqual(result.returncode, 0)
             observed = (install / "logs" / "launcher-last-error.log").read_text(encoding="utf-8")
             self.assertIn("Deterministic installed launcher diagnostic failure", observed)
-
-    def test_failure_log_preserves_the_error_and_redacts_secret_values(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            install = Path(directory) / "install"
-            project = Path(directory) / "project"
-            shutil.copytree(REPO_ROOT / "runtime" / "scripts", install / "scripts")
-            project.mkdir()
-            launch_id = "0123456789abcdef0123456789abcdef"
-            invocation_log = install / "logs" / "launcher-errors" / f"{launch_id}.log"
-            failure_log = install / "logs" / "launcher-last-error.log"
-            failure_log.parent.mkdir(parents=True)
-            failure_log.write_text("stale failure\n", encoding="utf-8")
-            environment = os.environ.copy()
-            environment["LOCALMODEL_TEST_TOKEN"] = "environment-secret-value"
-            environment["LOCALMODEL_SHORT_SECRET"] = "zz"
-            environment["LOCALMODEL_LAUNCHER_NO_DIALOG"] = "1"
-            failure = "PowerShell startup failed; token=inline-secret Authorization: Bearer bearer-secret short=zz database=postgresql://alice:db-password@localhost/app"
-            result = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(install / "scripts" / SUPERVISOR.name),
-                    "-Project",
-                    str(project),
-                    "-Profile",
-                    "stable-16k",
-                    "-LaunchId",
-                    launch_id,
-                    "-DiagnosticFailure",
-                    "-DiagnosticFailureMessage",
-                    failure,
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=environment,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertNotIn("could not publish", result.stderr)
-            observed = failure_log.read_text(encoding="utf-8")
-            self.assertIn("PowerShell startup failed", observed)
-            self.assertIn("<REDACTED>", observed)
-            self.assertNotIn("environment-secret-value", observed)
-            self.assertNotIn("inline-secret", observed)
-            self.assertNotIn("bearer-secret", observed)
-            self.assertNotIn("short=zz", observed)
-            self.assertNotIn("alice", observed)
-            self.assertNotIn("db-password", observed)
-            self.assertTrue(invocation_log.is_file())
-            self.assertEqual(
-                invocation_log.read_text(encoding="utf-8"),
-                observed,
-            )
-            self.assertIn(f"project={project}", observed)
 
     def test_executable_waits_for_handoff_and_preserves_shortcut_options(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

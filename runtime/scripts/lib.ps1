@@ -71,8 +71,8 @@ function Get-SessionConfig {
     try { $session = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json }
     catch { throw "Malformed Session Config $path`: $($_.Exception.Message)" }
     $schema = [int](Get-PropertyValue $session 'schema' 0)
-    if ($schema -notin @(3, 4)) {
-        throw "Unsupported Session Config schema '$((Get-PropertyValue $session 'schema' $null))' in $path; expected 3 or 4."
+    if ($schema -notin @(3, 4, 5)) {
+        throw "Unsupported Session Config schema '$((Get-PropertyValue $session 'schema' $null))' in $path; expected 3, 4 or 5."
     }
     $configuredRoot = [IO.Path]::GetFullPath((Get-RequiredString $session 'root' $path))
     if ($configuredRoot.TrimEnd('\') -ine ([IO.Path]::GetFullPath($root)).TrimEnd('\')) {
@@ -84,8 +84,8 @@ function Get-SessionConfig {
         throw "Session Config port must be between 1 and 65535: $path"
     }
     if ($schema -eq 3) { Get-RequiredString $session 'active_profile' $path | Out-Null }
-    if ($schema -eq 4 -and (Get-PropertyValue $session 'active_profile' $null)) {
-        throw "Schema 4 stores deployment roles outside Session Config; remove active_profile from $path."
+    if ($schema -in @(4, 5) -and (Get-PropertyValue $session 'active_profile' $null)) {
+        throw "Schema $schema stores deployment roles outside Session Config; remove active_profile from $path."
     }
     foreach ($name in @('model', 'mmproj', 'chat_template', 'api_key_file', 'base_url_file', 'state_file')) {
         Get-RequiredString $session $name $path | Out-Null
@@ -106,7 +106,7 @@ function Get-ProfileConfig {
     } else {
         $alpine = Join-Path ([string]$Session.root) 'alpine.exe'
         if (-not (Test-Path -LiteralPath $alpine -PathType Leaf)) {
-            throw 'Schema 4 default selection is Rust-owned and requires the installed alpine.exe.'
+            throw "Schema $($Session.schema) default selection is Rust-owned and requires the installed alpine.exe."
         }
         $raw = & $alpine deployment-status --install-root ([string]$Session.root) --compact
         if ($LASTEXITCODE -ne 0) { throw 'Alpine could not derive the deployment daily_default.' }

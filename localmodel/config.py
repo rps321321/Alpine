@@ -15,7 +15,7 @@ from .locking import FileLease
 from .io import write_json_atomic
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SESSION_SCHEMAS = {3, 4}
+SESSION_SCHEMAS = {3, 4, 5}
 
 
 class ConfigError(ValueError):
@@ -110,7 +110,7 @@ def resolve_session(
     if schema not in SESSION_SCHEMAS:
         raise ConfigError(
             f"{session_path}: unsupported Session Config schema {session.get('schema')!r}; "
-            "expected 3 or 4"
+            "expected 3, 4 or 5"
         )
     configured_root = Path(_required_string(session, "root", session_path)).expanduser().resolve()
     if configured_root != root:
@@ -127,7 +127,7 @@ def resolve_session(
         alpine = root / "alpine.exe"
         if not alpine.is_file():
             raise ConfigError(
-                "schema 4 default selection is Rust-owned and requires the installed alpine.exe"
+                f"schema {schema} default selection is Rust-owned and requires the installed alpine.exe"
             )
         result = subprocess.run(
             [str(alpine), "deployment-status", "--install-root", str(root), "--compact"],
@@ -208,9 +208,10 @@ def install_profile(install_root: Path, name: str) -> dict[str, Any]:
 def select_active_profile(install_root: Path, name: str) -> Path:
     """Validate and atomically select an installed Profile, returning the backup path."""
     root = install_root.expanduser().resolve()
-    if read_json(root / "config" / "session.json").get("schema") == 4:
+    schema = read_json(root / "config" / "session.json").get("schema")
+    if schema in {4, 5}:
         raise ConfigError(
-            "schema 4 has no active_profile; use Alpine Promotion or a one-session --profile override"
+            f"schema {schema} has no active_profile; use Alpine Promotion or a one-session --profile override"
         )
     resolve_session(root, name, require_runtime=True)
     path = root / "config" / "session.json"
@@ -267,7 +268,3 @@ def git_commit() -> str | None:
         check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else None
-
-
-def powershell() -> str:
-    return "powershell.exe"

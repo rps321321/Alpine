@@ -16,7 +16,7 @@ from .config import (
     tree_sha256,
 )
 from .inference import stream_completion
-from .lifecycle import BenchmarkLifecycle, PowerShellSessionAdapter, summarize_samples, utc_now
+from .lifecycle import AlpineSessionAdapter, BenchmarkLifecycle, summarize_samples, utc_now
 from .telemetry import GpuTelemetry, process_memory
 
 
@@ -110,7 +110,7 @@ def run_microbenchmark(
     if build_manifest.is_file():
         record["config"]["runtime_build"] = read_json(build_manifest)
     samples: list[dict[str, Any]] = []
-    adapter = PowerShellSessionAdapter(install_root)
+    adapter = AlpineSessionAdapter(install_root)
     with BenchmarkLifecycle(
         result_root,
         record,

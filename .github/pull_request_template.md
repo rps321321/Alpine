@@ -6,7 +6,7 @@
 
 <!-- List the exact checks run and their results. -->
 
-- [ ] `./scripts/verify.ps1` passes, or the failure is explained below.
+- [ ] `cargo run --locked --bin alpine-verify` passes, or the failure is explained below.
 - [ ] No model weights, runtime bundles, generated installations, secrets, machine-local state, raw/private evidence, or personal filesystem paths are included.
 - [ ] I have reviewed provenance and third-party license obligations.
 - [ ] Every commit includes the DCO `Signed-off-by` trailer.

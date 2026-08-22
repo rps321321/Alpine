@@ -10,8 +10,8 @@ from localmodel.controlplane import verify_control_plane, write_control_plane_id
 
 def make_control_plane(root: Path) -> None:
     files = {
-        "runtime/scripts/start-session.ps1": "start-v1",
-        "runtime/scripts/lib.ps1": "lib-v1",
+        "runtime/scripts/setup-transaction.ps1": "setup-v1",
+        "runtime/scripts/build-launcher.ps1": "builder-v1",
         "runtime/launcher/OpenLocalQwen.cs": "launcher-v1",
         "config/profiles/stable-16k.json": '{"name":"stable-16k"}',
         "config/artifacts.json": '{"schema":1}',
@@ -61,16 +61,16 @@ class ControlPlaneIdentityTests(unittest.TestCase):
             copy_control_plane(repo, install)
             write_control_plane_identity(repo, install)
 
-            (install / "scripts" / "start-session.ps1").unlink()
-            (install / "scripts" / "lib.ps1").write_text("locally-modified", encoding="utf-8")
+            (install / "scripts" / "setup-transaction.ps1").unlink()
+            (install / "scripts" / "build-launcher.ps1").write_text("locally-modified", encoding="utf-8")
             updated = '{"name":"stable-16k","status":"production"}'
             (repo / "config" / "profiles" / "stable-16k.json").write_text(updated, encoding="utf-8")
             (install / "profiles" / "stable-16k.json").write_text(updated, encoding="utf-8")
 
             result = verify_control_plane(repo, install)
 
-            self.assertEqual(result["missing"], ["scripts/start-session.ps1"])
-            self.assertEqual(result["modified"], ["scripts/lib.ps1"])
+            self.assertEqual(result["missing"], ["scripts/setup-transaction.ps1"])
+            self.assertEqual(result["modified"], ["scripts/build-launcher.ps1"])
             self.assertEqual(result["stale"], ["profiles/stable-16k.json"])
             self.assertFalse(result["exact_match"])
 

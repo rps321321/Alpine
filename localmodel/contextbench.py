@@ -10,7 +10,7 @@ from typing import Any
 
 from .config import REPO_ROOT, artifact_manifest, git_commit, hardware_manifest_identity, read_json, resolve_session, sha256
 from .inference import stream_completion
-from .lifecycle import BenchmarkLifecycle, PowerShellSessionAdapter, summarize_samples, utc_now
+from .lifecycle import AlpineSessionAdapter, BenchmarkLifecycle, summarize_samples, utc_now
 from .telemetry import GpuTelemetry, process_memory
 
 
@@ -110,7 +110,7 @@ def run_contextbenchmark(
         "notes": notes,
     }
     samples: list[dict[str, Any]] = []
-    adapter = PowerShellSessionAdapter(install_root)
+    adapter = AlpineSessionAdapter(install_root)
     with BenchmarkLifecycle(
         result_root,
         record,

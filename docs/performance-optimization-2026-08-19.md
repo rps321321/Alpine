@@ -142,14 +142,6 @@ No NVFP4 model should replace the current Q4_K_M default without beating it on s
 
 ## Reproducibility
 
-The benchmark scripts are in `scripts/`:
-
-- `benchmark-inference.ps1`
-- `benchmark-server-matrix.ps1`
-- `benchmark-fit-matrix.ps1`
-- `benchmark-thread-matrix.ps1`
-- `benchmark-kv-matrix.ps1`
-- `benchmark-tensor-placement.ps1`
-- `benchmark-pr27173.ps1`
+The historical PowerShell matrix runners were retired after their measured conclusions were captured here. Current reproducible measurements use Alpine's versioned Rust evaluation, benchmark, tuning, and evidence commands.
 
 Raw server logs are machine-local under the generated installation's `logs` directory and are not public evidence.

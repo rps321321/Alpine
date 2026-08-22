@@ -65,14 +65,14 @@ class SetupTransactionTests(unittest.TestCase):
             result = invoke(expression)
             self.assertEqual(result.returncode, 0, result.stderr)
             config = json.loads(result.stdout)
-            self.assertEqual(config["schema"], 4)
+            self.assertEqual(config["schema"], 5)
             self.assertNotIn("active_profile", config)
             self.assertNotIn("llama_server", config)
             self.assertEqual(Path(config["api_key_file"]), install / "config" / "api-key.txt")
             self.assertEqual(Path(config["base_url_file"]), install / "config" / "base-url.txt")
             self.assertNotIn(str(stage), result.stdout)
 
-    def test_setup_preserves_a_disabled_cleanup_handoff(self) -> None:
+    def test_setup_drops_retired_fields_from_a_disabled_cleanup_handoff(self) -> None:
         result = invoke(
             "$cleanup=Get-PreservedCleanupConfig ([pscustomobject]@{enabled=$false;port=9191;"
             "exe='cleanup.exe';start_script='start.ps1';health='http://cleanup/health'});"
@@ -80,8 +80,32 @@ class SetupTransactionTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         cleanup = json.loads(result.stdout)
-        self.assertFalse(cleanup["enabled"])
-        self.assertEqual(cleanup["port"], 9191)
+        self.assertEqual(cleanup, {"enabled": False})
+
+    def test_setup_preserves_typed_cleanup_launch_data_without_a_script(self) -> None:
+        result = invoke(
+            "$cleanup=Get-PreservedCleanupConfig ([pscustomobject]@{enabled=$true;port=9191;"
+            "executable='C:\\fixture\\llama-server.exe';arguments=@('--host','127.0.0.1','--port','9191');"
+            "stdout='C:\\fixture\\logs\\cleanup-out.log';stderr='C:\\fixture\\logs\\cleanup-err.log';"
+            "health='http://127.0.0.1:9191/v1/models'});$cleanup | ConvertTo-Json -Depth 5 -Compress"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cleanup = json.loads(result.stdout)
+        self.assertEqual(cleanup["executable"], r"C:\fixture\llama-server.exe")
+        self.assertEqual(cleanup["arguments"], ["--host", "127.0.0.1", "--port", "9191"])
+        self.assertEqual(cleanup["stdout"], r"C:\fixture\logs\cleanup-out.log")
+        self.assertEqual(cleanup["stderr"], r"C:\fixture\logs\cleanup-err.log")
+        self.assertNotIn("exe", cleanup)
+        self.assertNotIn("start_script", cleanup)
+
+    def test_setup_rejects_enabled_legacy_cleanup_without_guessing_argv(self) -> None:
+        result = invoke(
+            "$cleanup=Get-PreservedCleanupConfig ([pscustomobject]@{enabled=$true;port=9191;"
+            "exe='C:\\fixture\\cleanup.exe';start_script='C:\\fixture\\start.ps1';"
+            "health='http://127.0.0.1:9191/health'})"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("retired exe/start_script contract", result.stderr)
 
     def test_interrupted_download_remains_resumable_and_is_not_published_early(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

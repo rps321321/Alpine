@@ -35,11 +35,11 @@ The migration is replacement by vertical workflow, not a mechanical translation:
 
 The canonical repository verification command is:
 
-```powershell
-.\scripts\verify.ps1
+```console
+cargo run --locked --bin alpine-verify
 ```
 
-During migration it runs both Rust verification and the complete legacy compatibility suite. Required tests may not be weakened solely to make migration pass.
+The Rust-native verifier runs the public-tree audit, Rust formatting, strict Clippy, all Rust tests and the complete legacy Python compatibility suite without a shell-specific orchestration layer. Required tests may not be weakened solely to make migration pass.
 
 ## Alternatives considered
 

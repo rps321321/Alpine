@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from localmodel import agentbench, contextbench
+from localmodel import contextbench
 from localmodel.store import ResultStore
 from tests.test_config import write_fixture
 from tests.test_lifecycle import FakeSessionAdapter, FailingSessionAdapter
@@ -68,7 +66,7 @@ class WorkloadLifecycleIntegrationTests(unittest.TestCase):
         }
         with (
             patch.object(contextbench, "REPO_ROOT", lab_root),
-            patch.object(contextbench, "PowerShellSessionAdapter", return_value=adapter),
+            patch.object(contextbench, "AlpineSessionAdapter", return_value=adapter),
             patch.object(contextbench, "artifact_manifest", return_value=artifact_identity()),
             patch.object(contextbench, "hardware_manifest_identity", return_value={"path": "hardware.json", "sha256": "hardware"}),
             patch.object(contextbench, "git_commit", return_value="commit"),
@@ -106,61 +104,6 @@ class WorkloadLifecycleIntegrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, message):
                     self.run_context(lab, install, adapter, quality=True)
                 self.assertEqual(last_status(lab / "results"), "error")
-
-    def prepare_agent_lab(self, root: Path) -> tuple[Path, Path]:
-        install, lab = root / "install", root / "lab"
-        prepare_install(install)
-        task_root = lab / "benchmarks" / "golden" / "fixture-task"
-        (task_root / "fixture").mkdir(parents=True)
-        (task_root / "fixture" / "input.txt").write_text("protected", encoding="utf-8")
-        task = {
-            "schema": 1,
-            "prompt": "perform the fixture task",
-            "test_command": [sys.executable, "-c", "import sys; sys.exit(0)"],
-            "protected_paths": ["input.txt"],
-            "allowed_changed_paths": [],
-            "timeout_seconds": 30,
-        }
-        (task_root / "task.json").write_text(json.dumps(task), encoding="utf-8")
-        return install, lab
-
-    def run_agent(self, lab: Path, install: Path, adapter: FakeSessionAdapter, *, agent_exit: int) -> str:
-        agent = subprocess.CompletedProcess(
-            ["opencode"],
-            agent_exit,
-            json.dumps({"type": "step_finish", "part": {"tokens": {"total": 12}}}) + "\n",
-            "fixture stderr" if agent_exit else "",
-        )
-        with (
-            patch.object(agentbench, "REPO_ROOT", lab),
-            patch.object(agentbench, "PowerShellSessionAdapter", return_value=adapter),
-            patch.object(agentbench, "artifact_manifest", return_value=artifact_identity()),
-            patch.object(agentbench, "hardware_manifest_identity", return_value={"path": "hardware.json", "sha256": "hardware"}),
-            patch.object(agentbench, "git_commit", return_value="commit"),
-            patch.object(agentbench, "run_powershell", return_value=agent),
-        ):
-            agentbench.run_agentbenchmark(install, "stable-16k", "fixture-task")
-        return last_status(lab / "results")
-
-    def test_agent_success_and_workload_failure_use_shared_finalization(self) -> None:
-        for exit_code, expected in ((0, "passed"), (1, "failed-quality")):
-            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
-                install, lab = self.prepare_agent_lab(Path(directory))
-                adapter = FakeSessionAdapter()
-                self.assertEqual(self.run_agent(lab, install, adapter, agent_exit=exit_code), expected)
-                self.assertEqual(adapter.released, 1)
-
-    def test_agent_wrong_profile_and_startup_failure_are_persisted(self) -> None:
-        for adapter, message in (
-            (WrongProfileAdapter(), "wrong-profile"),
-            (FailingSessionAdapter(), "startup failed"),
-        ):
-            with self.subTest(message=message), tempfile.TemporaryDirectory() as directory:
-                install, lab = self.prepare_agent_lab(Path(directory))
-                with self.assertRaisesRegex(RuntimeError, message):
-                    self.run_agent(lab, install, adapter, agent_exit=0)
-                self.assertEqual(last_status(lab / "results"), "error")
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,7 +73,7 @@ function New-SessionConfigDocument {
         [Parameter(Mandatory = $true)]$Cleanup
     )
     return [ordered]@{
-        schema = 4
+        schema = 5
         root = $InstallRoot
         host = '127.0.0.1'
         port = 8100
@@ -90,12 +90,35 @@ function New-SessionConfigDocument {
 
 function Get-PreservedCleanupConfig($ExistingCleanup) {
     if ($null -eq $ExistingCleanup) { return [ordered]@{ enabled = $false } }
+    $enabled = [bool](Get-PropertyValue $ExistingCleanup 'enabled' $false)
+    if (-not $enabled) { return [ordered]@{ enabled = $false } }
+
+    $executable = [string](Get-PropertyValue $ExistingCleanup 'executable' '')
+    $arguments = @(Get-PropertyValue $ExistingCleanup 'arguments' @())
+    $stdout = [string](Get-PropertyValue $ExistingCleanup 'stdout' '')
+    $stderr = [string](Get-PropertyValue $ExistingCleanup 'stderr' '')
+    $port = Get-PropertyValue $ExistingCleanup 'port' 0
+    $health = [string](Get-PropertyValue $ExistingCleanup 'health' '')
+    $legacyExecutable = [string](Get-PropertyValue $ExistingCleanup 'exe' '')
+    $legacyStartScript = [string](Get-PropertyValue $ExistingCleanup 'start_script' '')
+
+    if ($legacyExecutable -or $legacyStartScript) {
+        throw 'Enabled cleanup configuration uses the retired exe/start_script contract. Replace it with schema 5 executable, arguments, stdout and stderr values before setup.'
+    }
+    if (-not $executable -or $arguments.Count -eq 0 -or -not $stdout -or -not $stderr -or -not $health) {
+        throw 'Enabled cleanup configuration requires executable, arguments, stdout, stderr and health values.'
+    }
+    if (-not (Test-RequiredInteger $port 1 65535)) {
+        throw 'Enabled cleanup configuration requires a port between 1 and 65535.'
+    }
     return [ordered]@{
-        enabled = [bool](Get-PropertyValue $ExistingCleanup 'enabled' $false)
-        port = Get-PropertyValue $ExistingCleanup 'port' 0
-        exe = Get-PropertyValue $ExistingCleanup 'exe' ''
-        start_script = Get-PropertyValue $ExistingCleanup 'start_script' ''
-        health = Get-PropertyValue $ExistingCleanup 'health' ''
+        enabled = $true
+        port = [int]$port
+        executable = $executable
+        arguments = @($arguments | ForEach-Object { [string]$_ })
+        stdout = $stdout
+        stderr = $stderr
+        health = $health
     }
 }
 

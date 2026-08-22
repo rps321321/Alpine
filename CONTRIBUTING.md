@@ -16,7 +16,7 @@ Create it with `git commit -s`. The sign-off certifies the repository's [DCO](DC
 
 1. Keep changes focused and preserve the architecture and evidence contracts in `CONTEXT.md` and `docs/adr/`.
 2. Add or update tests for changed behavior.
-3. Run `./scripts/verify.ps1` on Windows.
+3. Run `cargo run --locked --bin alpine-verify` on any supported development platform.
 4. Open a pull request against `main`, complete the template, and resolve review conversations.
 5. Do not commit model weights, runtime bundles, generated installations, credentials, machine-local state, raw/private evidence, or personal filesystem paths.
 

@@ -1,5 +1,5 @@
 use crate::clock::UtcTimestamp;
-use crate::config::{self, Profile, ResolvedSession, SessionConfig};
+use crate::config::{self, CleanupConfig, Profile, ResolvedSession, SessionConfig};
 use crate::identity::{runtime_bundle_sha256, sha256_file};
 use crate::locking::InterprocessLock;
 use crate::process::{resolve_executable, run_bounded};
@@ -244,20 +244,6 @@ impl Default for SessionState {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct CleanupConfig {
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    exe: Option<PathBuf>,
-    #[serde(default)]
-    start_script: Option<PathBuf>,
-    #[serde(default)]
-    health: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 struct ObservedProcess {
     pid: u32,
@@ -279,7 +265,13 @@ trait SessionPlatform {
         stderr: &Path,
     ) -> Result<ObservedProcess, String>;
     fn terminate(&self, pid: u32, expected_start_epoch_secs: u64) -> Result<(), String>;
-    fn run_cleanup_script(&self, script: &Path, timeout: Duration) -> Result<(), String>;
+    fn spawn_cleanup(
+        &self,
+        executable: &Path,
+        arguments: &[String],
+        stdout: &Path,
+        stderr: &Path,
+    ) -> Result<(), String>;
     fn sleep(&self, duration: Duration);
     fn utc_now(&self) -> Result<UtcTimestamp, String>;
 }
@@ -1534,31 +1526,33 @@ fn validate_start_artifacts(resolved: &ResolvedSession, vision: bool) -> Result<
 }
 
 fn cleanup_config(session: &SessionConfig) -> Result<Option<CleanupConfig>, String> {
-    if session.cleanup.is_null() {
+    let Some(cleanup) = config::cleanup_config(session)? else {
         return Ok(None);
-    }
-    let cleanup: CleanupConfig = serde_json::from_value(session.cleanup.clone())
-        .map_err(|error| format!("invalid cleanup configuration: {error}"))?;
-    if !cleanup.enabled {
-        return Ok(None);
-    }
+    };
     let port = cleanup
         .port
         .filter(|port| *port > 0)
         .ok_or_else(|| "enabled cleanup configuration requires a valid port".to_owned())?;
     let executable = cleanup
-        .exe
+        .executable
         .as_deref()
         .filter(|path| path.is_absolute())
         .ok_or_else(|| {
             "enabled cleanup configuration requires an absolute executable path".to_owned()
         })?;
-    let script = cleanup
-        .start_script
+    let stdout = cleanup
+        .stdout
         .as_deref()
         .filter(|path| path.is_absolute())
         .ok_or_else(|| {
-            "enabled cleanup configuration requires an absolute start script".to_owned()
+            "enabled cleanup configuration requires an absolute stdout path".to_owned()
+        })?;
+    let stderr = cleanup
+        .stderr
+        .as_deref()
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            "enabled cleanup configuration requires an absolute stderr path".to_owned()
         })?;
     if !executable.is_file() {
         return Err(format!(
@@ -1566,10 +1560,12 @@ fn cleanup_config(session: &SessionConfig) -> Result<Option<CleanupConfig>, Stri
             executable.display()
         ));
     }
-    if !script.is_file() {
+    if paths_equal(stdout, stderr) {
+        return Err("cleanup stdout and stderr paths must be different".to_owned());
+    }
+    if !command_line_has_port(&cleanup.arguments, port) {
         return Err(format!(
-            "cleanup start script is unavailable: {}",
-            script.display()
+            "cleanup arguments must contain the configured --port {port}"
         ));
     }
     let health = cleanup
@@ -1627,9 +1623,14 @@ fn restore_cleanup<P: SessionPlatform>(
     let port = cleanup.port.expect("validated cleanup port");
     let mut process = platform.listener(port, Duration::from_secs(10))?;
     if process.is_none() {
-        platform.run_cleanup_script(
-            cleanup.start_script.as_deref().expect("validated script"),
-            Duration::from_secs(120),
+        platform.spawn_cleanup(
+            cleanup
+                .executable
+                .as_deref()
+                .expect("validated cleanup executable"),
+            &cleanup.arguments,
+            cleanup.stdout.as_deref().expect("validated cleanup stdout"),
+            cleanup.stderr.as_deref().expect("validated cleanup stderr"),
         )?;
         if !wait_health(
             cleanup.health.as_deref().expect("validated health"),
@@ -1659,8 +1660,10 @@ fn cleanup_process_owned(cleanup: &CleanupConfig, process: &ObservedProcess) -> 
     let Some(path) = process.path.as_deref() else {
         return false;
     };
-    paths_equal(cleanup.exe.as_deref().expect("validated executable"), path)
-        && command_line_has_port(&process.arguments, cleanup.port.expect("validated port"))
+    paths_equal(
+        cleanup.executable.as_deref().expect("validated executable"),
+        path,
+    ) && command_line_has_port(&process.arguments, cleanup.port.expect("validated port"))
 }
 
 fn wait_started_healthy<P: SessionPlatform>(
@@ -2213,37 +2216,28 @@ impl SessionPlatform for SystemPlatform {
         }
     }
 
-    fn run_cleanup_script(&self, script: &Path, timeout: Duration) -> Result<(), String> {
-        let executable = system_powershell()?;
-        let output = run_bounded(
-            &executable,
-            &[
-                OsStr::new("-NoProfile"),
-                OsStr::new("-ExecutionPolicy"),
-                OsStr::new("Bypass"),
-                OsStr::new("-File"),
-                script.as_os_str(),
-            ],
-            timeout,
-        )
-        .map_err(|error| format!("failed to run cleanup start script: {error}"))?;
-        if output.timed_out {
-            return Err(format!(
-                "cleanup start script timed out after {} seconds",
-                timeout.as_secs()
-            ));
-        }
-        if !output.status.success() {
-            return Err(format!(
-                "cleanup start script failed with exit code {}",
-                output
-                    .status
-                    .code()
-                    .map(|code| code.to_string())
-                    .unwrap_or_else(|| "unavailable".to_owned())
-            ));
-        }
-        Ok(())
+    fn spawn_cleanup(
+        &self,
+        executable: &Path,
+        arguments: &[String],
+        stdout: &Path,
+        stderr: &Path,
+    ) -> Result<(), String> {
+        let stdout_file = create_log(stdout)?;
+        let stderr_file = create_log(stderr)?;
+        let mut command = Command::new(executable);
+        command
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file));
+        hide_process_window(&mut command);
+        command.spawn().map(|_| ()).map_err(|error| {
+            format!(
+                "failed to start cleanup process {} directly: {error}",
+                executable.display()
+            )
+        })
     }
 
     fn sleep(&self, duration: Duration) {
@@ -2282,26 +2276,6 @@ fn hide_process_window(command: &mut Command) {
 #[cfg(not(windows))]
 fn hide_process_window(_command: &mut Command) {}
 
-fn system_powershell() -> Result<PathBuf, String> {
-    if cfg!(windows) {
-        let system_root = std::env::var_os("SystemRoot").ok_or_else(|| {
-            "SystemRoot is unavailable; cannot locate system Windows PowerShell".to_owned()
-        })?;
-        let executable =
-            PathBuf::from(system_root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
-        if executable.is_file() {
-            return Ok(executable);
-        }
-        return Err(format!(
-            "system Windows PowerShell is unavailable at {}",
-            executable.display()
-        ));
-    }
-    resolve_executable("pwsh")
-        .or_else(|| resolve_executable("powershell"))
-        .ok_or_else(|| "PowerShell is required by the configured cleanup hook".to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2316,6 +2290,7 @@ mod tests {
         spawns: Vec<Vec<String>>,
         next_pid: u32,
         cleanup_runs: u32,
+        cleanup_spawns: Vec<(PathBuf, Vec<String>, PathBuf, PathBuf)>,
         fail_next_spawns: u32,
         unhealthy_pids: BTreeSet<u32>,
     }
@@ -2461,19 +2436,35 @@ mod tests {
             Ok(())
         }
 
-        fn run_cleanup_script(&self, _script: &Path, _timeout: Duration) -> Result<(), String> {
-            let (port, executable) = self.cleanup.as_ref().expect("cleanup fixture");
+        fn spawn_cleanup(
+            &self,
+            executable: &Path,
+            arguments: &[String],
+            stdout: &Path,
+            stderr: &Path,
+        ) -> Result<(), String> {
+            let (port, expected_executable) = self.cleanup.as_ref().expect("cleanup fixture");
+            if executable != expected_executable {
+                return Err("fixture cleanup executable mismatch".to_owned());
+            }
+            if Self::port_from_arguments(arguments) != Some(*port) {
+                return Err("fixture cleanup arguments have the wrong port".to_owned());
+            }
             let mut state = self.state.borrow_mut();
             state.cleanup_runs += 1;
+            state.cleanup_spawns.push((
+                executable.to_path_buf(),
+                arguments.to_vec(),
+                stdout.to_path_buf(),
+                stderr.to_path_buf(),
+            ));
             state.next_pid += 1;
             let process = ObservedProcess {
                 pid: state.next_pid,
-                path: Some(executable.clone()),
-                arguments: vec![
-                    executable.to_string_lossy().into_owned(),
-                    "--port".to_owned(),
-                    port.to_string(),
-                ],
+                path: Some(executable.to_path_buf()),
+                arguments: std::iter::once(executable.to_string_lossy().into_owned())
+                    .chain(arguments.iter().cloned())
+                    .collect(),
                 start_epoch_secs: 1_000 + u64::from(state.next_pid),
             };
             state.listeners.insert(*port, process.clone());
@@ -2740,12 +2731,85 @@ mod tests {
         assert_eq!(stopped.status.phase.as_deref(), Some("stopped"));
         assert!(platform.state.borrow().listeners.contains_key(&8090));
         assert_eq!(platform.state.borrow().cleanup_runs, 1);
+        let state = platform.state.borrow();
+        let cleanup_spawn = state.cleanup_spawns.first().unwrap();
+        assert_eq!(
+            cleanup_spawn.0,
+            directory.path().join("cleanup/cleanup.exe")
+        );
+        assert_eq!(
+            cleanup_spawn.1,
+            ["--host", "127.0.0.1", "--port", "8090", "--no-webui"]
+        );
+        assert_eq!(
+            cleanup_spawn.2,
+            directory.path().join("cleanup/logs/stdout.log")
+        );
+        assert_eq!(
+            cleanup_spawn.3,
+            directory.path().join("cleanup/logs/stderr.log")
+        );
+        drop(state);
         let state = read_state(&resolved.state_file, Duration::from_secs(1))
             .unwrap()
             .unwrap();
         assert_eq!(state.schema, 2);
         assert!(!state.cleanup_paused);
         assert!(state.cleanup_restore_failed.is_none());
+    }
+
+    #[test]
+    fn enabled_legacy_cleanup_contract_requires_schema_five_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        write_lifecycle_fixture(directory.path(), false);
+        let mut session = config::resolve(directory.path(), Some("turbo-16k"), true)
+            .unwrap()
+            .session;
+        session.schema = 4;
+        session.cleanup = json!({
+            "enabled": true,
+            "port": 8090,
+            "exe": directory.path().join("cleanup/cleanup.exe"),
+            "start_script": directory.path().join("cleanup/start.ps1"),
+            "health": "http://127.0.0.1:8090/health"
+        });
+        let error = cleanup_config(&session).unwrap_err();
+        assert!(error.contains("schema 4"));
+        assert!(error.contains("migrate it to schema 5"));
+        assert!(error.contains("executable, arguments, stdout and stderr"));
+    }
+
+    #[test]
+    fn schema_five_cleanup_contract_is_strict_and_port_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        write_lifecycle_fixture(directory.path(), false);
+        let mut session = config::resolve(directory.path(), Some("turbo-16k"), true)
+            .unwrap()
+            .session;
+        session.schema = 5;
+        session.active_profile = None;
+        session.cleanup = json!({
+            "enabled": true,
+            "port": 8090,
+            "executable": directory.path().join("cleanup/cleanup.exe"),
+            "arguments": ["--port", "8091"],
+            "stdout": directory.path().join("cleanup/logs/stdout.log"),
+            "stderr": directory.path().join("cleanup/logs/stderr.log"),
+            "health": "http://127.0.0.1:8090/health"
+        });
+        assert!(
+            cleanup_config(&session)
+                .unwrap_err()
+                .contains("configured --port 8090")
+        );
+
+        session.cleanup["arguments"] = json!(["--port", "8090"]);
+        session.cleanup["start_script"] = json!(directory.path().join("cleanup/start.ps1"));
+        assert!(
+            cleanup_config(&session)
+                .unwrap_err()
+                .contains("unknown field `start_script`")
+        );
     }
 
     #[test]
@@ -3126,15 +3190,7 @@ mod tests {
         let mmproj = root.join("models/mmproj.gguf");
         let template = root.join("config/chat.jinja");
         let cleanup_exe = root.join("cleanup/cleanup.exe");
-        let cleanup_script = root.join("cleanup/start.ps1");
-        for path in [
-            &server,
-            &model,
-            &mmproj,
-            &template,
-            &cleanup_exe,
-            &cleanup_script,
-        ] {
+        for path in [&server, &model, &mmproj, &template, &cleanup_exe] {
             std::fs::write(path, b"fixture").unwrap();
         }
         std::fs::write(
@@ -3165,23 +3221,32 @@ mod tests {
         .unwrap();
         let cleanup = if cleanup_enabled {
             json!({
-                "enabled": true, "port": 8090, "exe": cleanup_exe,
-                "start_script": cleanup_script, "health": "http://127.0.0.1:8090/health"
+                "enabled": true,
+                "port": 8090,
+                "executable": cleanup_exe,
+                "arguments": ["--host", "127.0.0.1", "--port", "8090", "--no-webui"],
+                "stdout": root.join("cleanup/logs/stdout.log"),
+                "stderr": root.join("cleanup/logs/stderr.log"),
+                "health": "http://127.0.0.1:8090/health"
             })
         } else {
             json!({"enabled": false})
         };
+        let mut session = json!({
+            "schema": if cleanup_enabled { 5 } else { 3 },
+            "root": root, "host": "127.0.0.1", "port": 8123,
+            "runtimes": {"custom": server},
+            "model": model, "mmproj": mmproj, "chat_template": template,
+            "api_key_file": root.join("config/api-key.txt"),
+            "base_url_file": root.join("config/base-url.txt"),
+            "state_file": root.join("logs/session-state.json"), "cleanup": cleanup
+        });
+        if !cleanup_enabled {
+            session["active_profile"] = json!("turbo-16k");
+        }
         std::fs::write(
             root.join("config/session.json"),
-            serde_json::to_vec(&json!({
-                "schema": 3, "root": root, "host": "127.0.0.1", "port": 8123,
-                "active_profile": "turbo-16k", "runtimes": {"custom": server},
-                "model": model, "mmproj": mmproj, "chat_template": template,
-                "api_key_file": root.join("config/api-key.txt"),
-                "base_url_file": root.join("config/base-url.txt"),
-                "state_file": root.join("logs/session-state.json"), "cleanup": cleanup
-            }))
-            .unwrap(),
+            serde_json::to_vec(&session).unwrap(),
         )
         .unwrap();
     }

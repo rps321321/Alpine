@@ -1,11 +1,12 @@
 use alpine_control_plane::{
-    AcquireSessionOptions, Alpine, BootstrapDeploymentOptions, CleanRestartStabilityOptions,
-    EvaluationOptions, EvidencePhase, ExternalEvidenceKind, GoldenAgentOptions,
-    MicrobenchmarkOptions, NearLimitContextOptions, OpenCodeOptions, OperatorReviewOptions,
-    PromoteOptions, PublicEvidenceOptions, RecordIncidentOptions, ReleaseSessionOptions,
-    ResolveIncidentOptions, RollbackDeploymentOptions, RollbackDisposition, RollbackProofOptions,
-    RunQualificationOptions, SameProcessStabilityOptions, SessionAcquisition, StartSessionOptions,
-    StopSessionOptions, TuningDisposition, TuningOptions,
+    AcquireSessionOptions, Alpine, BootstrapDeploymentOptions, BuildLauncherOptions,
+    CleanRestartStabilityOptions, EvaluationOptions, EvidencePhase, ExternalEvidenceKind,
+    GoldenAgentOptions, HarnessBenchmarkOptions, MicrobenchmarkOptions, NearLimitContextOptions,
+    OpenCodeOptions, OperatorReviewOptions, PackageRuntimeOptions, PromoteOptions,
+    PublicEvidenceOptions, RecordIncidentOptions, ReleaseSessionOptions, ResolveIncidentOptions,
+    RollbackDeploymentOptions, RollbackDisposition, RollbackProofOptions, RunQualificationOptions,
+    SameProcessStabilityOptions, SessionAcquisition, SetupOptions, SetupRuntime,
+    StartSessionOptions, StopSessionOptions, TuningDisposition, TuningOptions,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
@@ -64,6 +65,21 @@ enum RollbackDispositionArgument {
     Revoked,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SetupRuntimeArgument {
+    Custom,
+    Official,
+}
+
+impl From<SetupRuntimeArgument> for SetupRuntime {
+    fn from(value: SetupRuntimeArgument) -> Self {
+        match value {
+            SetupRuntimeArgument::Custom => Self::Custom,
+            SetupRuntimeArgument::Official => Self::Official,
+        }
+    }
+}
+
 impl From<RollbackDispositionArgument> for RollbackDisposition {
     fn from(value: RollbackDispositionArgument) -> Self {
         match value {
@@ -85,6 +101,30 @@ impl From<EvidenceKind> for ExternalEvidenceKind {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Setup {
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value = "stable-16k")]
+        profile: String,
+        #[arg(long, value_enum, default_value_t = SetupRuntimeArgument::Custom)]
+        runtime: SetupRuntimeArgument,
+        #[arg(long)]
+        reuse_artifacts_from: Option<PathBuf>,
+        #[arg(long)]
+        install_prerequisites: bool,
+        #[arg(long)]
+        skip_vision: bool,
+        #[arg(long)]
+        verify_only: bool,
+        #[arg(long)]
+        no_shortcut: bool,
+        #[arg(long, default_value_t = 30_000)]
+        lock_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
     DeploymentStatus {
         #[arg(long, default_value_os_t = default_install_root())]
         install_root: PathBuf,
@@ -373,6 +413,20 @@ enum Commands {
         #[arg(long)]
         compact: bool,
     },
+    HarnessBenchmark {
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long, default_value_os_t = default_project())]
+        project: PathBuf,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, default_value_t = 3)]
+        runs: u32,
+        #[arg(long, default_value_t = 600_000)]
+        request_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
     RollbackProof {
         anchor_run_id: String,
         #[arg(long, default_value_os_t = default_repository_root())]
@@ -449,6 +503,32 @@ enum Commands {
     Hardware {
         #[arg(long, default_value_t = 10_000)]
         timeout_ms: u64,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        compact: bool,
+    },
+    BuildLauncher {
+        #[arg(long, default_value = "runtime")]
+        root: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        no_shortcut: bool,
+        #[arg(long)]
+        shortcut_only: bool,
+        #[arg(long)]
+        compact: bool,
+    },
+    PackageRuntime {
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long)]
+        built_runtime: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value_os_t = default_cuda_bin())]
+        cuda_bin: PathBuf,
         #[arg(long)]
         compact: bool,
     },
@@ -581,6 +661,34 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
     match cli.command {
+        Commands::Setup {
+            repository_root,
+            install_root,
+            profile,
+            runtime,
+            reuse_artifacts_from,
+            install_prerequisites,
+            skip_vision,
+            verify_only,
+            no_shortcut,
+            lock_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::setup(&SetupOptions {
+                repository_root,
+                install_root,
+                profile,
+                runtime: runtime.into(),
+                reuse_artifacts_from,
+                install_prerequisites,
+                skip_vision,
+                verify_only,
+                no_shortcut,
+                lock_timeout: Duration::from_millis(lock_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
         Commands::DeploymentStatus {
             install_root,
             compact,
@@ -954,6 +1062,36 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
             write_json(&report, compact)?;
             Ok(0)
         }
+        Commands::HarnessBenchmark {
+            install_root,
+            project,
+            profile,
+            runs,
+            request_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::run_harness_benchmark(&HarnessBenchmarkOptions {
+                install_root,
+                project,
+                profile,
+                runs,
+                request_timeout: Duration::from_millis(request_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(
+                if report.results.iter().all(|sample| {
+                    sample.exit_code == 0
+                        && !sample.timed_out
+                        && sample.expected_answer
+                        && sample.tool_calls > 0
+                        && sample.tool_failures == 0
+                }) {
+                    0
+                } else {
+                    2
+                },
+            )
+        }
         Commands::RollbackProof {
             anchor_run_id,
             repository_root,
@@ -1162,9 +1300,46 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
         },
         Commands::Hardware {
             timeout_ms,
+            output,
             compact,
         } => {
             let report = Alpine::inspect_hardware(Duration::from_millis(timeout_ms))?;
+            if let Some(path) = output {
+                write_json_file(&path, &report, compact)?;
+            } else {
+                write_json(&report, compact)?;
+            }
+            Ok(0)
+        }
+        Commands::BuildLauncher {
+            root,
+            output,
+            no_shortcut,
+            shortcut_only,
+            compact,
+        } => {
+            let report = Alpine::build_launcher(&BuildLauncherOptions {
+                root,
+                output,
+                no_shortcut,
+                shortcut_only,
+            })?;
+            write_json(&report, compact)?;
+            Ok(0)
+        }
+        Commands::PackageRuntime {
+            repository_root,
+            built_runtime,
+            output,
+            cuda_bin,
+            compact,
+        } => {
+            let report = Alpine::package_runtime(&PackageRuntimeOptions {
+                repository_root,
+                built_runtime,
+                output,
+                cuda_bin,
+            })?;
             write_json(&report, compact)?;
             Ok(0)
         }
@@ -1225,6 +1400,13 @@ fn default_database() -> PathBuf {
 
 fn default_repository_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn default_cuda_bin() -> PathBuf {
+    std::env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+        .join(r"NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\x64")
 }
 
 fn default_result_root() -> PathBuf {

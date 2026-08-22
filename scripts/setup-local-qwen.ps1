@@ -324,12 +324,16 @@ function Write-SessionConfig([string]$OfficialServer, [string]$CustomServer, [st
     $cleanup = Get-PreservedCleanupConfig $null
     $existingPath = Join-Path $InstallRoot 'config\session.json'
     if (Test-Path -LiteralPath $existingPath) {
+        $old = $null
         try {
             $old = Get-Content -Raw -LiteralPath $existingPath | ConvertFrom-Json
-            if ($old.cleanup) {
-                $cleanup = Get-PreservedCleanupConfig $old.cleanup
-            }
-        } catch { Write-Warning 'Existing session config could not be preserved; writing the canonical v4 config.' }
+        } catch { Write-Warning 'Existing session config could not be preserved; writing the canonical v5 config.' }
+        $existingCleanup = Get-PropertyValue $old 'cleanup' $null
+        if ($null -ne $existingCleanup) {
+            # Structural migration errors must stop setup. Silently disabling a
+            # live cleanup handoff would change machine lifecycle ownership.
+            $cleanup = Get-PreservedCleanupConfig $existingCleanup
+        }
     }
     $selectedProfile = Get-Content -Raw -LiteralPath $profileSource | ConvertFrom-Json
     if ($selectedProfile.runtime -eq 'custom' -and -not $CustomServer) {
@@ -358,7 +362,7 @@ function Assert-Install {
     Assert-Artifact $session.model $manifest.model
     if (-not $SkipVision) { Assert-Artifact $session.mmproj $manifest.mmproj }
     Assert-Artifact $session.chat_template $manifest.chat_template
-    foreach ($path in @($serverPath, (Join-Path $InstallRoot 'alpine.exe'), (Join-Path $InstallRoot 'Open Local Qwen.exe'), (Join-Path $InstallRoot 'scripts\start-session.ps1'))) {
+    foreach ($path in @($serverPath, (Join-Path $InstallRoot 'alpine.exe'), (Join-Path $InstallRoot 'Open Local Qwen.exe'))) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Install file missing: $path" }
     }
     & (Join-Path $InstallRoot 'alpine.exe') resolve --install-root $InstallRoot --profile ([string]$profileConfig.name) --compact | Out-Null

@@ -9,6 +9,7 @@ mod experiment;
 mod external;
 mod golden;
 mod hardware;
+mod harness_benchmark;
 mod identity;
 mod locking;
 mod opencode;
@@ -17,8 +18,10 @@ mod public_evidence;
 mod qualification;
 mod rollback;
 mod session;
+mod setup;
 mod stability;
 mod support;
+mod tooling;
 mod tuning;
 
 pub use config::{Profile, ResolvedSession, SessionConfig};
@@ -43,6 +46,7 @@ pub use external::{
 };
 pub use golden::{GoldenAgentOptions, GoldenAgentReport};
 pub use hardware::{HardwareReport, HardwareSnapshot};
+pub use harness_benchmark::{HarnessBenchmarkOptions, HarnessBenchmarkReport, HarnessSample};
 pub use identity::runtime_bundle_sha256;
 pub use opencode::{OpenCodeOptions, OpenCodeReport};
 pub use public_evidence::{
@@ -58,11 +62,15 @@ pub use session::{
     ReleaseSessionReport, SessionAcquisition, SessionAction, SessionSnapshot, SessionStatus,
     StartSessionOptions, StartSessionReport, StopSessionOptions, StopSessionReport,
 };
+pub use setup::{SetupOptions, SetupReport, SetupRuntime};
 pub use stability::{
     CleanRestartStabilityOptions, CleanRestartStabilityReport, SameProcessStabilityOptions,
     SameProcessStabilityReport,
 };
 pub use support::{SupportEnvelope, SupportReport};
+pub use tooling::{
+    BuildLauncherOptions, BuildLauncherReport, PackageRuntimeOptions, PackageRuntimeReport,
+};
 pub use tuning::{TuningDisposition, TuningOptions, TuningReport};
 
 use std::path::Path;
@@ -203,6 +211,22 @@ impl Alpine {
         hardware::report(timeout).map_err(AlpineError::InvalidInput)
     }
 
+    pub fn build_launcher(
+        options: &BuildLauncherOptions,
+    ) -> Result<BuildLauncherReport, AlpineError> {
+        tooling::build_launcher(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn package_runtime(
+        options: &PackageRuntimeOptions,
+    ) -> Result<PackageRuntimeReport, AlpineError> {
+        tooling::package_runtime(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn setup(options: &SetupOptions) -> Result<SetupReport, AlpineError> {
+        setup::run(options).map_err(AlpineError::InvalidInput)
+    }
+
     pub fn qualify(path: &Path) -> Result<QualificationReport, AlpineError> {
         let request = qualification::read_request(path).map_err(AlpineError::InvalidInput)?;
         qualification::qualify(&request).map_err(AlpineError::InvalidInput)
@@ -246,6 +270,12 @@ impl Alpine {
         options: &GoldenAgentOptions,
     ) -> Result<GoldenAgentReport, AlpineError> {
         golden::run(options).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn run_harness_benchmark(
+        options: &HarnessBenchmarkOptions,
+    ) -> Result<HarnessBenchmarkReport, AlpineError> {
+        harness_benchmark::run(options).map_err(AlpineError::InvalidInput)
     }
 
     pub fn prove_rollback(

@@ -1,6 +1,6 @@
 # Project Alpine
 
-Project Alpine is the Rust control plane for discovering, measuring, tuning, qualifying and operating local AI inference. Inference remains the responsibility of `llama.cpp` and its C++/CUDA implementation below the Inference Server boundary. Python and PowerShell implementations remain only as compatibility/research tooling; the C# executable is only a folder picker. None is authoritative or required to select, measure, qualify or operate a supported Profile.
+Project Alpine is the Rust control plane for discovering, measuring, tuning, qualifying and operating local AI inference. Inference remains the responsibility of `llama.cpp` and its C++/CUDA implementation below the Inference Server boundary. Retained setup adapters are not runtime authorities; selecting, measuring, qualifying and operating a supported Profile are Rust-owned workflows.
 
 ## Current Rust interface
 
@@ -144,11 +144,19 @@ cargo run --bin alpine -- qualify-request --request tests/fixtures/alpine/qualif
 
 Run the canonical repository verification:
 
-```powershell
-.\scripts\verify.ps1
+```console
+cargo run --locked --bin alpine-verify
 ```
 
 This runs Rust formatting, clippy and tests plus the retained legacy compatibility suite. It is the repository/CI verifier; `alpine evaluate` is the executable product-claim verifier.
+
+Rust-native maintenance commands replace the former standalone hardware, launcher-build, and runtime-packaging scripts:
+
+```powershell
+cargo run --release --bin alpine -- hardware --output hardware.json
+cargo run --release --bin alpine -- build-launcher --root runtime --no-shortcut
+cargo run --release --bin alpine -- package-runtime --built-runtime C:\path\to\build\bin --output C:\path\to\runtime-custom
+```
 
 ## Repository boundaries
 
