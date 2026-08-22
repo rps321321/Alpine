@@ -1,0 +1,10 @@
+# Alpine is currently maintained by one human owner.
+# CODEOWNERS records review responsibility; branch protection provides enforcement.
+* @rps321321
+
+/.github/ @rps321321
+/SECURITY.md @rps321321
+/CONTEXT.md @rps321321
+/docs/RELEASING.md @rps321321
+/config/ @rps321321
+/src/ @rps321321
