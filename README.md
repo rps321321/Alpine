@@ -171,7 +171,7 @@ Architecture and replacement rules are recorded in [ADR 0019](docs/adr/0019-rust
 
 ## Licensing, support, and publication status
 
-Project Alpine's own source is licensed under Apache-2.0 and contributions use DCO 1.1. Third-party artifacts retain their own license boundaries; see `LICENSE`, `THIRD_PARTY.md`, and `CONTRIBUTING.md`.
+Project Alpine's own source is licensed under Apache-2.0. Contributions do not require DCO sign-off or a CLA. Third-party artifacts retain their own license boundaries; see `LICENSE`, `THIRD_PARTY.md`, and `CONTRIBUTING.md`.
 
 The Support Envelope means an environment is eligible to evaluate, not universally production-supported. Production qualification applies only to an exact recorded deployment; see `SUPPORT.md`.
 

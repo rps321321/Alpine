@@ -23,8 +23,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), String> {
     match arguments.as_slice() {
         [] => verify_repository(&root),
         [command] if command == "audit" => audit_public_tree(&root),
-        [command, range] if command == "dco" => verify_dco(&root, range),
-        _ => Err("usage: alpine-verify [audit | dco <base..head>]".to_owned()),
+        _ => Err("usage: alpine-verify [audit]".to_owned()),
     }
 }
 
@@ -131,7 +130,6 @@ fn audit_public_tree(root: &Path) -> Result<(), String> {
     for required in [
         "LICENSE",
         "NOTICE",
-        "DCO",
         "THIRD_PARTY.md",
         "CONTRIBUTING.md",
         "SECURITY.md",
@@ -251,35 +249,6 @@ fn audit_public_tree(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_dco(root: &Path, range: &OsStr) -> Result<(), String> {
-    let commits = git_output(root, [OsStr::new("rev-list"), range])?;
-    let trailer = dco_trailer_regex()?;
-    let mut missing = Vec::new();
-    for commit in commits.lines().filter(|line| !line.trim().is_empty()) {
-        let message = git_output(
-            root,
-            [
-                OsStr::new("show"),
-                OsStr::new("-s"),
-                OsStr::new("--format=%B"),
-                OsStr::new(commit),
-            ],
-        )?;
-        if !trailer.is_match(&message) {
-            missing.push(commit.to_owned());
-        }
-    }
-    if missing.is_empty() {
-        println!("DCO verification passed.");
-        Ok(())
-    } else {
-        Err(format!(
-            "DCO Signed-off-by trailer missing from: {}",
-            missing.join(", ")
-        ))
-    }
-}
-
 fn home_path_regex() -> Result<Regex, String> {
     Regex::new(r"(?i)C:\\Users\\([^\\\r\n]+)\\")
         .map_err(|error| format!("invalid home-path audit regex: {error}"))
@@ -298,38 +267,9 @@ fn contains_disallowed_home_path(text: &str, pattern: &Regex) -> bool {
     })
 }
 
-fn dco_trailer_regex() -> Result<Regex, String> {
-    Regex::new(r"(?m)^Signed-off-by: .+ <[^>]+>\r?$")
-        .map_err(|error| format!("invalid DCO regex: {error}"))
-}
-
-fn git_output<I, S>(root: &Path, arguments: I) -> Result<String, String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let output = Command::new("git")
-        .args(arguments)
-        .current_dir(root)
-        .output()
-        .map_err(|error| format!("failed to run git: {error}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-    }
-    String::from_utf8(output.stdout).map_err(|error| format!("git output was not UTF-8: {error}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dco_check_requires_a_complete_line_trailer() {
-        let pattern = dco_trailer_regex().unwrap();
-        assert!(pattern.is_match("subject\n\nSigned-off-by: Example <example@example.com>\n"));
-        assert!(!pattern.is_match("subject Signed-off-by: Example <example@example.com>"));
-        assert!(!pattern.is_match("Signed-off-by: Example"));
-    }
 
     #[test]
     fn public_audit_allows_placeholders_but_rejects_personal_home_paths() {

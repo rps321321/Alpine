@@ -18,7 +18,7 @@ Local production qualification and public release are deliberately separate. Pas
 
 - Alpine source, tests, documentation, ADRs, configuration contracts, and patches;
 - `Cargo.lock`, `rust-toolchain.toml`, pinned GitHub Actions, and artifact hashes needed for reproducibility;
-- Apache-2.0 `LICENSE`, `NOTICE`, DCO, contribution/security/governance documents, and third-party boundaries;
+- Apache-2.0 `LICENSE`, `NOTICE`, contribution/security/governance documents, and third-party boundaries;
 - optional generated Public Evidence produced by the allowlisted schema and explicitly reviewed for publication.
 
 ## Excluded from v0.1

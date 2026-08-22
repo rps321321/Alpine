@@ -1,16 +1,10 @@
 # Contributing to Project Alpine
 
-Project Alpine accepts contributions under Apache License 2.0 using Developer Certificate of Origin 1.1 sign-off. It does not require a contributor license agreement for v0.1.
+Project Alpine accepts contributions to its own source and documentation under Apache License 2.0. It does not require a Developer Certificate of Origin sign-off or a contributor license agreement.
 
-## Contribution attestation
+## Contribution terms
 
-Every commit must carry a `Signed-off-by` trailer matching an identity the contributor is authorized to use:
-
-```text
-Signed-off-by: Your Name <you@example.com>
-```
-
-Create it with `git commit -s`. The sign-off certifies the repository's [DCO](DCO); it is not a cryptographic signature. Contributors remain responsible for the correctness, provenance, licensing, security, privacy, and verification of everything they submit, regardless of which tools assisted them.
+No special commit-message trailer is required. Contributors remain responsible for having the right to submit their changes and for the correctness, provenance, licensing, security, privacy, and verification of everything they submit, regardless of which tools assisted them. Third-Party Material keeps its original license boundary and obligations.
 
 ## Development workflow
 

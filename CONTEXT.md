@@ -106,9 +106,9 @@ _Avoid_: repository-wide relicensing, model license, dependency license
 Code, patches, models, templates, runtimes or other artifacts whose rights originate outside Project Alpine. Each item retains its own license boundary, notices, attribution and redistribution conditions.
 _Avoid_: Alpine source, bundled by implication, covered by the Project License
 
-**Contribution Attestation**:
-DCO 1.1 sign-off accompanying a proposed Contribution. No contributor license agreement is required for v0.1.
-_Avoid_: copyright assignment, CLA, informal authorship claim
+**Contribution Terms**:
+Project contributions are submitted through the ordinary pull-request workflow and distributed under the Project License. No per-commit DCO sign-off or contributor license agreement is required. Contributors remain responsible for submission rights, provenance and third-party obligations.
+_Avoid_: Signed-off-by requirement, copyright assignment, CLA, assuming repository license erases third-party terms
 
 **Agent-Generation Disclosure**:
 A concise pull-request statement required when a generative agent produced a material part of the submitted diff or autonomously planned and executed multi-step work embodied in it. It identifies that work and the human verification performed; ordinary autocomplete, writing help, explanations, research and manually reimplemented suggestions are outside this term.
