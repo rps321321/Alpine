@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "maximum_threads": 256,
+  "runtimes": {
+    "official": {
+      "kv_cache": ["f16", "q8_0"],
+      "request_local_ngram": false
+    },
+    "custom": {
+      "kv_cache": ["f16", "q8_0"],
+      "request_local_ngram": true
+    }
+  }
+}

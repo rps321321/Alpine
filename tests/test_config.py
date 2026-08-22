@@ -6,7 +6,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import localmodel.config as config_module
 from localmodel.config import ConfigError, resolve_session, select_active_profile
 from localmodel.locking import LeaseBusyError
 
@@ -22,7 +24,6 @@ def write_fixture(root: Path, *, schema: int = 3, profile: str = "stable-16k", r
     server.write_bytes(b"fixture")
     profile_data = {
         "name": profile,
-        "status": "production",
         "runtime": runtime,
         "context": 16384,
         "output": 4096,
@@ -47,7 +48,6 @@ def write_fixture(root: Path, *, schema: int = 3, profile: str = "stable-16k", r
         "host": "127.0.0.1",
         "port": 8123,
         "runtimes": {"official": str(server), "custom": None},
-        "llama_server": str(server),
         "model": str(root / "models" / "model.gguf"),
         "mmproj": str(root / "models" / "mmproj.gguf"),
         "chat_template": str(root / "config" / "chat.jinja"),
@@ -62,6 +62,23 @@ def write_fixture(root: Path, *, schema: int = 3, profile: str = "stable-16k", r
 
 
 class SessionConfigTests(unittest.TestCase):
+    def test_python_rejects_blank_capability_names_and_values(self) -> None:
+        cases = (
+            {"   ": {"kv_cache": ["f16"], "request_local_ngram": False}},
+            {"official": {"kv_cache": ["   "], "request_local_ngram": False}},
+        )
+        for runtimes in cases:
+            with self.subTest(runtimes=runtimes), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "config").mkdir()
+                (root / "config" / "profile-capabilities.json").write_text(
+                    json.dumps({"schema": 1, "maximum_threads": 256, "runtimes": runtimes}),
+                    encoding="utf-8",
+                )
+                with mock.patch.object(config_module, "REPO_ROOT", root):
+                    with self.assertRaisesRegex(ConfigError, "invalid runtime capability"):
+                        config_module._profile_capabilities()
+
     def test_python_resolves_the_complete_domain_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -108,6 +125,14 @@ class SessionConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_fixture(root, schema=5)
+
+            resolved = resolve_session(root, "stable-16k", require_runtime=True)
+            self.assertEqual(resolved.profile_name, "stable-16k")
+
+    def test_schema_four_resolves_with_an_explicit_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture(root, schema=4)
 
             resolved = resolve_session(root, "stable-16k", require_runtime=True)
             self.assertEqual(resolved.profile_name, "stable-16k")
@@ -160,6 +185,76 @@ class SessionConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigError, "positive integer"):
                     resolve_session(root)
 
+    def test_unknown_fields_and_invalid_profile_relationships_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture(root)
+            profile_path = root / "profiles" / "stable-16k.json"
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile["status"] = "production"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "status.*deployment history"):
+                resolve_session(root)
+
+        cases = (
+            ("output", 32768, "output"),
+            ("ubatch_size", 4096, "ubatch_size"),
+            ("kv_cache", "mystery", "kv_cache"),
+            ("runtime", "mystery", "runtime"),
+            ("threads", 257, "threads"),
+            ("ngram_mod", True, "runtime"),
+            ("ngram_reset_on_begin", True, "ngram_reset_on_begin"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_fixture(root)
+                profile_path = root / "profiles" / "stable-16k.json"
+                profile = json.loads(profile_path.read_text(encoding="utf-8"))
+                profile[field] = value
+                profile_path.write_text(json.dumps(profile), encoding="utf-8")
+                with self.assertRaisesRegex(ConfigError, message):
+                    resolve_session(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture(root)
+            session_path = root / "config" / "session.json"
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            session["llama_server"] = "obsolete"
+            session_path.write_text(json.dumps(session), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "unknown Session Config fields.*llama_server"):
+                resolve_session(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fixture(root, schema=5)
+            session_path = root / "config" / "session.json"
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            session["active_profile"] = "stable-16k"
+            session_path.write_text(json.dumps(session), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "schema 5.*deployment history"):
+                resolve_session(root, "stable-16k")
+
+        for mutation, message in (
+            (lambda session: session.update({"host": "203.0.113.10"}), "loopback"),
+            (
+                lambda session: session.update(
+                    {"cleanup": {"enabled": False, "start_script": "obsolete.ps1"}}
+                ),
+                "cleanup contains unknown fields",
+            ),
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_fixture(root)
+                session_path = root / "config" / "session.json"
+                session = json.loads(session_path.read_text(encoding="utf-8"))
+                mutation(session)
+                session_path.write_text(json.dumps(session), encoding="utf-8")
+                with self.assertRaisesRegex(ConfigError, message):
+                    resolve_session(root)
+
     def test_incomplete_setup_publication_blocks_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -174,7 +269,6 @@ class SessionConfigTests(unittest.TestCase):
             write_fixture(root)
             candidate = json.loads((root / "profiles" / "stable-16k.json").read_text(encoding="utf-8"))
             candidate["name"] = "candidate-16k"
-            candidate["status"] = "candidate"
             (root / "profiles" / "candidate-16k.json").write_text(json.dumps(candidate), encoding="utf-8")
 
             backup = select_active_profile(root, "candidate-16k")
@@ -188,7 +282,7 @@ class SessionConfigTests(unittest.TestCase):
             root = Path(directory)
             write_fixture(root)
             candidate = json.loads((root / "profiles" / "stable-16k.json").read_text(encoding="utf-8"))
-            candidate.update({"name": "candidate-16k", "status": "candidate"})
+            candidate.update({"name": "candidate-16k"})
             (root / "profiles" / "candidate-16k.json").write_text(json.dumps(candidate), encoding="utf-8")
             ready = root / "setup-ready"
             module = REPO_ROOT / "runtime" / "scripts" / "setup-transaction.ps1"

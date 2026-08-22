@@ -225,7 +225,6 @@ internal static class FakeOpenCode
             json.dumps(
                 {
                     "name": "stable-16k",
-                    "status": "production",
                     "runtime": "official",
                     "context": 16384,
                     "output": 4096,

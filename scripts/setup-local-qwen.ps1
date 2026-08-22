@@ -17,6 +17,7 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $repoRoot 'runtime\scripts\lib.ps1')
 . (Join-Path $repoRoot 'runtime\scripts\setup-transaction.ps1')
 $manifestPath = Join-Path $repoRoot 'config\artifacts.json'
+$profileCapabilityPath = Join-Path $repoRoot 'config\profile-capabilities.json'
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 if ($ReuseArtifactsFrom) { $ReuseArtifactsFrom = [IO.Path]::GetFullPath($ReuseArtifactsFrom) }
@@ -270,6 +271,7 @@ function Copy-ControlPlane([string]$DestinationRoot) {
         Copy-AtomicFile $source.FullName (Join-Path $DestinationRoot "profiles\$($source.Name)")
     }
     Copy-AtomicFile $manifestPath (Join-Path $DestinationRoot 'config\artifacts.json')
+    Copy-AtomicFile $profileCapabilityPath (Join-Path $DestinationRoot 'config\profile-capabilities.json')
 }
 
 function Build-AlpineControlPlane([string]$DestinationRoot) {
@@ -302,6 +304,9 @@ function Write-ControlPlaneIdentity([string]$DestinationRoot) {
     $artifactHash = Get-Sha256 $manifestPath
     if ((Get-Sha256 (Join-Path $DestinationRoot 'config\artifacts.json')) -ne $artifactHash) { throw 'Copied artifact manifest differs.' }
     $entries += [ordered]@{ path = 'config/artifacts.json'; sha256 = $artifactHash }
+    $capabilityHash = Get-Sha256 $profileCapabilityPath
+    if ((Get-Sha256 (Join-Path $DestinationRoot 'config\profile-capabilities.json')) -ne $capabilityHash) { throw 'Copied Profile capability contract differs.' }
+    $entries += [ordered]@{ path = 'config/profile-capabilities.json'; sha256 = $capabilityHash }
     $generatedLauncher = Join-Path $DestinationRoot 'Open Local Qwen.exe'
     if (Test-Path -LiteralPath $generatedLauncher -PathType Leaf) {
         $entries += [ordered]@{ path = 'Open Local Qwen.exe'; sha256 = Get-Sha256 $generatedLauncher; generated = $true }
@@ -434,6 +439,7 @@ try {
                 [pscustomobject]@{ stage='launcher'; destination='launcher' },
                 [pscustomobject]@{ stage='profiles'; destination='profiles' },
                 [pscustomobject]@{ stage='config\artifacts.json'; destination='config\artifacts.json' },
+                [pscustomobject]@{ stage='config\profile-capabilities.json'; destination='config\profile-capabilities.json' },
                 [pscustomobject]@{ stage='config\control-plane.json'; destination='config\control-plane.json' },
                 [pscustomobject]@{ stage='config\session.json'; destination='config\session.json' },
                 [pscustomobject]@{ stage='alpine.exe'; destination='alpine.exe' },

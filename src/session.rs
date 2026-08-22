@@ -3196,7 +3196,7 @@ mod tests {
         std::fs::write(
             root.join("profiles/turbo-16k.json"),
             serde_json::to_vec(&json!({
-                "name": "turbo-16k", "status": "candidate", "runtime": "custom",
+                "name": "turbo-16k", "runtime": "custom",
                 "context": 16384, "output": 4096, "parallel": 1, "threads": 16,
                 "batch_size": 2048, "ubatch_size": 768, "kv_cache": "q8_0",
                 "tensor_cpu_through_block": 43, "mtp_depth": 3, "ngram_mod": true,
@@ -3209,7 +3209,7 @@ mod tests {
         std::fs::write(
             root.join("profiles/stable-16k.json"),
             serde_json::to_vec(&json!({
-                "name": "stable-16k", "status": "production", "runtime": "custom",
+                "name": "stable-16k", "runtime": "custom",
                 "context": 8192, "output": 2048, "parallel": 1, "threads": 16,
                 "batch_size": 2048, "ubatch_size": 768, "kv_cache": "q8_0",
                 "tensor_cpu_through_block": 43, "mtp_depth": 3, "ngram_mod": false,

@@ -11,7 +11,7 @@
   "target": "production",
   "qualification": {
     "near_limit_context_ratio": 0.85,
-    "golden_task": "python-off-by-one"
+    "golden_task": "public-v1"
   },
   "limits": {
     "maximum_profiles": 2,

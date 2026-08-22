@@ -58,7 +58,7 @@ fn write_fixture(root: &Path, port: u16) {
     std::fs::write(
         root.join("profiles/fixture.json"),
         serde_json::to_vec(&json!({
-            "name": "fixture", "status": "experimental", "runtime": "fixture",
+            "name": "fixture", "runtime": "official",
             "context": 128, "output": 16, "parallel": 1, "threads": 1,
             "batch_size": 32, "ubatch_size": 16, "kv_cache": "q8_0",
             "tensor_cpu_through_block": 0, "mtp_depth": 1, "ngram_mod": false,
@@ -72,7 +72,7 @@ fn write_fixture(root: &Path, port: u16) {
         root.join("config/session.json"),
         serde_json::to_vec(&json!({
             "schema": 3, "root": root, "host": "127.0.0.1", "port": port,
-            "active_profile": "fixture", "runtimes": {"fixture": runtime},
+            "active_profile": "fixture", "runtimes": {"official": runtime},
             "model": model, "mmproj": mmproj, "chat_template": template,
             "api_key_file": root.join("config/api-key.txt"),
             "base_url_file": root.join("config/base-url.txt"),

@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FOCUS_TIMER = REPO_ROOT / "config" / "harness-benchmarks" / "focus-timer.json"
+FOCUS_TIMER = REPO_ROOT / "benchmarks" / "experiments" / "focus-timer.json"
 EXPECTED_PROMPT = (
     "Use write exactly once create index.html. tiny offline Focus Timer, circular 25-min "
     "countdown, Start/Pause Reset, completed-session localStorage. HARD LIMIT 90 nonblank "
@@ -15,11 +15,14 @@ EXPECTED_PROMPT = (
 
 
 class HarnessBenchmarkContractTests(unittest.TestCase):
-    def test_focus_timer_contract_preserves_prompt_and_fail_closed_scoring(self) -> None:
+    def test_focus_timer_is_preserved_only_as_an_unimplemented_experiment(self) -> None:
         contract = json.loads(FOCUS_TIMER.read_text(encoding="utf-8"))
 
         self.assertEqual(contract["schema"], 1)
         self.assertEqual(contract["id"], "focus-timer-v1")
+        self.assertEqual(contract["status"], "unimplemented-experiment")
+        self.assertFalse(contract["qualification_evidence"])
+        self.assertFalse((REPO_ROOT / "config" / "harness-benchmarks" / "focus-timer.json").exists())
         self.assertEqual(contract["prompt"], EXPECTED_PROMPT)
         self.assertEqual(contract["workspace"]["allowed_created_files"], ["index.html"])
         self.assertEqual(contract["hard_gates"]["required_tool_calls"], {"write": 1})

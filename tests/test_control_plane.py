@@ -15,6 +15,7 @@ def make_control_plane(root: Path) -> None:
         "runtime/launcher/OpenLocalQwen.cs": "launcher-v1",
         "config/profiles/stable-16k.json": '{"name":"stable-16k"}',
         "config/artifacts.json": '{"schema":1}',
+        "config/profile-capabilities.json": '{"schema":1}',
     }
     for relative, content in files.items():
         path = root / relative
@@ -32,6 +33,10 @@ def copy_control_plane(repo: Path, install: Path) -> None:
         shutil.copytree(source, destination)
     (install / "config").mkdir()
     shutil.copy2(repo / "config" / "artifacts.json", install / "config" / "artifacts.json")
+    shutil.copy2(
+        repo / "config" / "profile-capabilities.json",
+        install / "config" / "profile-capabilities.json",
+    )
 
 
 class ControlPlaneIdentityTests(unittest.TestCase):
@@ -52,6 +57,7 @@ class ControlPlaneIdentityTests(unittest.TestCase):
             recorded = {entry["path"] for entry in identity["files"]}
             self.assertNotIn("config/api-key.txt", recorded)
             self.assertNotIn("logs/session-state.json", recorded)
+            self.assertIn("config/profile-capabilities.json", recorded)
 
     def test_reports_missing_modified_and_expected_source_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

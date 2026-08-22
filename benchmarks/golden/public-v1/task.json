@@ -1,0 +1,27 @@
+{
+  "schema": 2,
+  "id": "public-v1",
+  "visibility": "public",
+  "capabilities": [
+    "multi-file-tdd-repair",
+    "tool-error-recovery",
+    "constraint-retention"
+  ],
+  "language": "python",
+  "prompt": "Treat this as a bounded public qualification task. First, use the read tool exactly once on missing-recovery-sentinel.txt; that expected tool error must not stop the task, and you must not create the missing file. Then read CONSTRAINTS.md and repair both src/pricing.py and src/rendering.py. Preserve the early wire-format constraint through the rest of the task, do not modify tests or CONSTRAINTS.md, create no other files, run the tests, and report the result.",
+  "test_command": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+  "protected_paths": ["CONSTRAINTS.md", "tests/test_receipt.py"],
+  "allowed_changed_paths": ["src/pricing.py", "src/rendering.py"],
+  "timeout_seconds": 900,
+  "trace_gate": {
+    "minimum_tool_failures": 1,
+    "maximum_tool_failures": 3,
+    "expected_failure": {
+      "tool": "read",
+      "input_path_field": "filePath",
+      "path": "missing-recovery-sentinel.txt",
+      "exact_count": 1,
+      "require_subsequent_success": true
+    }
+  }
+}

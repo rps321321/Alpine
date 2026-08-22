@@ -32,8 +32,10 @@ pub struct TuningCandidate {
     pub runtime_sha256: Option<String>,
     pub configuration_sha256: Option<String>,
     pub eligible: bool,
-    pub score: Option<f64>,
-    pub improvement_fraction: Option<f64>,
+    pub general_score: Option<f64>,
+    pub repeated_specialization_score: Option<f64>,
+    pub general_improvement_fraction: Option<f64>,
+    pub repeated_specialization_improvement_fraction: Option<f64>,
     pub workload_medians: BTreeMap<String, f64>,
     pub reasons: Vec<String>,
 }
@@ -65,16 +67,21 @@ struct Gate {
     require_quality_pass: Option<bool>,
     require_deterministic_outputs: Option<bool>,
     performance_metric_by_workload: Option<BTreeMap<String, PerformanceMetric>>,
+    general_score_workloads: Option<Vec<String>>,
+    repeated_specialization_workloads: Option<Vec<String>>,
     maximum_performance_coefficient_of_variation: Option<f64>,
     maximum_median_performance_regression_fraction: Option<f64>,
     minimum_tuning_selection_improvement_fraction: Option<f64>,
     #[serde(default)]
     requires_external_evidence: Vec<String>,
+    golden_evidence: Option<Value>,
 }
 
 #[derive(Clone)]
 struct SelectionPolicy {
     required_workloads: Vec<String>,
+    general_score_workloads: Vec<String>,
+    repeated_specialization_workloads: Vec<String>,
     performance_metrics: BTreeMap<String, PerformanceMetric>,
     minimum_samples: usize,
     maximum_cv: f64,
@@ -85,6 +92,12 @@ struct SelectionPolicy {
 struct EvaluatedRun {
     candidate: TuningCandidate,
     identity: StoredIdentity,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelectionScores {
+    general: Option<f64>,
+    repeated_specialization: Option<f64>,
 }
 
 pub fn tune(options: &TuningOptions) -> Result<TuningReport, String> {
@@ -142,7 +155,8 @@ pub fn tune(options: &TuningOptions) -> Result<TuningReport, String> {
         )?);
     }
 
-    let baseline_score = baseline.candidate.score;
+    let baseline_score = baseline.candidate.general_score;
+    let baseline_repeated_score = baseline.candidate.repeated_specialization_score;
     let baseline_medians = baseline.candidate.workload_medians.clone();
     let baseline_comparable = baseline.candidate.eligible && baseline_score.is_some();
     for candidate in &mut candidates {
@@ -152,8 +166,17 @@ pub fn tune(options: &TuningOptions) -> Result<TuningReport, String> {
                 "identity differs outside the runtime/configuration search dimensions".to_owned(),
             );
         }
-        if let (Some(score), Some(reference)) = (candidate.candidate.score, baseline_score) {
-            candidate.candidate.improvement_fraction = Some(score / reference - 1.0);
+        if let (Some(score), Some(reference)) = (candidate.candidate.general_score, baseline_score)
+        {
+            candidate.candidate.general_improvement_fraction = Some(score / reference - 1.0);
+        }
+        if let (Some(score), Some(reference)) = (
+            candidate.candidate.repeated_specialization_score,
+            baseline_repeated_score,
+        ) {
+            candidate
+                .candidate
+                .repeated_specialization_improvement_fraction = Some(score / reference - 1.0);
         }
         for workload in &selection.required_workloads {
             let Some(reference) = baseline_medians.get(workload) else {
@@ -179,14 +202,14 @@ pub fn tune(options: &TuningOptions) -> Result<TuningReport, String> {
         .collect::<Vec<_>>();
     rendered.sort_by(|left, right| {
         right
-            .score
+            .general_score
             .unwrap_or(f64::NEG_INFINITY)
-            .total_cmp(&left.score.unwrap_or(f64::NEG_INFINITY))
+            .total_cmp(&left.general_score.unwrap_or(f64::NEG_INFINITY))
             .then_with(|| left.run_id.cmp(&right.run_id))
     });
     if !baseline_comparable {
         return Ok(TuningReport {
-            schema: 1,
+            schema: 2,
             disposition: TuningDisposition::NotProven,
             baseline_run_id: options.baseline_run_id.clone(),
             selected_run_id: None,
@@ -196,46 +219,61 @@ pub fn tune(options: &TuningOptions) -> Result<TuningReport, String> {
             ],
         });
     }
-    let winner = candidates
+    let candidate_rows = candidates
         .iter()
-        .filter(|candidate| candidate.candidate.eligible)
-        .filter(|candidate| {
-            candidate
-                .candidate
-                .improvement_fraction
-                .is_some_and(|value| value >= selection.minimum_improvement)
-        })
-        .max_by(|left, right| {
-            left.candidate
-                .score
-                .unwrap_or(f64::NEG_INFINITY)
-                .total_cmp(&right.candidate.score.unwrap_or(f64::NEG_INFINITY))
-                .then_with(|| right.candidate.run_id.cmp(&left.candidate.run_id))
-        });
-    if let Some(winner) = winner {
+        .map(|candidate| candidate.candidate.clone())
+        .collect::<Vec<_>>();
+    let (disposition, winner) = tuning_disposition(&candidate_rows, selection.minimum_improvement);
+    if disposition == TuningDisposition::SelectedCandidate {
+        let winner = winner.expect("selected disposition has a winner");
         Ok(TuningReport {
-            schema: 1,
-            disposition: TuningDisposition::SelectedCandidate,
+            schema: 2,
+            disposition,
             baseline_run_id: options.baseline_run_id.clone(),
-            selected_run_id: Some(winner.candidate.run_id.clone()),
+            selected_run_id: Some(winner.run_id.clone()),
             candidates: rendered,
             reasons: vec![format!(
-                "selected candidate exceeds the baseline by at least {:.2}% without a per-workload regression",
+                "selected candidate general score exceeds the baseline by at least {:.2}% without a per-workload regression; repeated specialization is reported separately",
                 selection.minimum_improvement * 100.0
             )],
         })
     } else {
         Ok(TuningReport {
-            schema: 1,
-            disposition: TuningDisposition::RetainBaseline,
+            schema: 2,
+            disposition,
             baseline_run_id: options.baseline_run_id.clone(),
             selected_run_id: Some(options.baseline_run_id.clone()),
             candidates: rendered,
             reasons: vec![format!(
-                "no eligible candidate improved the baseline by the required {:.2}%",
+                "no eligible candidate improved the general score by the required {:.2}%; repeated specialization cannot select the default",
                 selection.minimum_improvement * 100.0
             )],
         })
+    }
+}
+
+fn tuning_disposition(
+    candidates: &[TuningCandidate],
+    minimum_improvement: f64,
+) -> (TuningDisposition, Option<&TuningCandidate>) {
+    let winner = candidates
+        .iter()
+        .filter(|candidate| candidate.eligible)
+        .filter(|candidate| {
+            candidate
+                .general_improvement_fraction
+                .is_some_and(|value| value >= minimum_improvement)
+        })
+        .max_by(|left, right| {
+            left.general_score
+                .unwrap_or(f64::NEG_INFINITY)
+                .total_cmp(&right.general_score.unwrap_or(f64::NEG_INFINITY))
+                .then_with(|| right.run_id.cmp(&left.run_id))
+        });
+    if winner.is_some() {
+        (TuningDisposition::SelectedCandidate, winner)
+    } else {
+        (TuningDisposition::RetainBaseline, None)
     }
 }
 
@@ -286,7 +324,7 @@ fn evaluate_run(
             .config
             .pointer("/benchmark/schema")
             .and_then(Value::as_u64)
-            != Some(2)
+            != Some(3)
     {
         reasons.push("run uses a stale or non-micro workload contract".to_owned());
     }
@@ -371,18 +409,18 @@ fn evaluate_run(
         }
         medians.insert(workload.clone(), median(&values));
     }
-    let score = (medians.len() == policy.required_workloads.len())
-        .then(|| geometric_mean(medians.values().copied()))
-        .flatten();
+    let scores = selection_scores(&medians, policy);
     Ok(EvaluatedRun {
         candidate: TuningCandidate {
             run_id: evidence.summary.id,
             profile: evidence.summary.profile,
             runtime_sha256: evidence.identity.runtime.clone(),
             configuration_sha256: evidence.identity.configuration.clone(),
-            eligible: reasons.is_empty() && score.is_some(),
-            score,
-            improvement_fraction: None,
+            eligible: reasons.is_empty() && scores.general.is_some(),
+            general_score: scores.general,
+            repeated_specialization_score: scores.repeated_specialization,
+            general_improvement_fraction: None,
+            repeated_specialization_improvement_fraction: None,
             workload_medians: medians,
             reasons,
         },
@@ -391,7 +429,7 @@ fn evaluate_run(
 }
 
 fn selection_policy(policy: &Policy) -> Result<SelectionPolicy, String> {
-    if policy.schema != 3
+    if policy.schema != 4
         || policy.lifecycle != ["experimental", "candidate", "validated", "production"]
     {
         return Err("unsupported promotion policy lifecycle or schema".to_owned());
@@ -400,7 +438,10 @@ fn selection_policy(policy: &Policy) -> Result<SelectionPolicy, String> {
         .gates
         .get("candidate")
         .ok_or_else(|| "candidate promotion gate is missing".to_owned())?;
-    if gate.inherits.is_some() || !gate.requires_external_evidence.is_empty() {
+    if gate.inherits.is_some()
+        || !gate.requires_external_evidence.is_empty()
+        || gate.golden_evidence.is_some()
+    {
         return Err("candidate gate must be the root automated gate".to_owned());
     }
     let workloads = gate
@@ -427,6 +468,29 @@ fn selection_policy(policy: &Policy) -> Result<SelectionPolicy, String> {
     {
         return Err("candidate performance metric keys must match required workloads".to_owned());
     }
+    let general_score_workloads = unique_workloads(
+        gate.general_score_workloads.clone(),
+        "candidate general score workloads",
+        false,
+    )?;
+    let repeated_specialization_workloads = unique_workloads(
+        gate.repeated_specialization_workloads.clone(),
+        "candidate repeated specialization workloads",
+        true,
+    )?;
+    let general = general_score_workloads.iter().collect::<BTreeSet<_>>();
+    let repeated = repeated_specialization_workloads
+        .iter()
+        .collect::<BTreeSet<_>>();
+    let required = workloads.iter().collect::<BTreeSet<_>>();
+    if !general.is_disjoint(&repeated)
+        || general.union(&repeated).copied().collect::<BTreeSet<_>>() != required
+    {
+        return Err(
+            "general and repeated specialization workloads must be disjoint and cover required workloads"
+                .to_owned(),
+        );
+    }
     let maximum_cv = finite_fraction(
         gate.maximum_performance_coefficient_of_variation,
         "maximum performance coefficient of variation",
@@ -441,12 +505,28 @@ fn selection_policy(policy: &Policy) -> Result<SelectionPolicy, String> {
     )?;
     Ok(SelectionPolicy {
         required_workloads: workloads,
+        general_score_workloads,
+        repeated_specialization_workloads,
         performance_metrics,
         minimum_samples,
         maximum_cv,
         maximum_regression,
         minimum_improvement,
     })
+}
+
+fn unique_workloads(
+    values: Option<Vec<String>>,
+    name: &str,
+    allow_empty: bool,
+) -> Result<Vec<String>, String> {
+    values
+        .filter(|values| {
+            (allow_empty || !values.is_empty())
+                && values.iter().all(|value| !value.trim().is_empty())
+                && values.iter().collect::<BTreeSet<_>>().len() == values.len()
+        })
+        .ok_or_else(|| format!("{name} are missing, invalid, or duplicated"))
 }
 
 fn comparable_identity(left: &StoredIdentity, right: &StoredIdentity) -> bool {
@@ -538,6 +618,23 @@ fn geometric_mean(values: impl Iterator<Item = f64>) -> Option<f64> {
     Some((values.iter().map(|value| value.ln()).sum::<f64>() / values.len() as f64).exp())
 }
 
+fn selection_scores(medians: &BTreeMap<String, f64>, policy: &SelectionPolicy) -> SelectionScores {
+    let score = |workloads: &[String]| {
+        if workloads.is_empty() {
+            return None;
+        }
+        workloads
+            .iter()
+            .map(|workload| medians.get(workload).copied())
+            .collect::<Option<Vec<_>>>()
+            .and_then(|values| geometric_mean(values.into_iter()))
+    };
+    SelectionScores {
+        general: score(&policy.general_score_workloads),
+        repeated_specialization: score(&policy.repeated_specialization_workloads),
+    }
+}
+
 fn finite_fraction(value: Option<f64>, name: &str) -> Result<f64, String> {
     value
         .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
@@ -553,9 +650,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn geometric_score_weights_workloads_equally() {
-        let score = geometric_mean([10.0, 40.0].into_iter()).unwrap();
-        assert!((score - 20.0).abs() < 1e-12);
+    fn repeated_visible_output_is_reported_but_cannot_drive_default_selection() {
+        let policy = SelectionPolicy {
+            required_workloads: vec!["novel".to_owned(), "repeat".to_owned()],
+            general_score_workloads: vec!["novel".to_owned()],
+            repeated_specialization_workloads: vec!["repeat".to_owned()],
+            performance_metrics: BTreeMap::from([
+                ("novel".to_owned(), PerformanceMetric::DecodeTps),
+                ("repeat".to_owned(), PerformanceMetric::DecodeTps),
+            ]),
+            minimum_samples: 1,
+            maximum_cv: 0.1,
+            maximum_regression: 0.1,
+            minimum_improvement: 0.03,
+        };
+        let baseline = BTreeMap::from([("novel".to_owned(), 10.0), ("repeat".to_owned(), 10.0)]);
+        let repeated_only_gain =
+            BTreeMap::from([("novel".to_owned(), 10.0), ("repeat".to_owned(), 100.0)]);
+
+        let baseline_scores = selection_scores(&baseline, &policy);
+        let candidate_scores = selection_scores(&repeated_only_gain, &policy);
+        assert_eq!(candidate_scores.general, baseline_scores.general);
+        assert!(
+            candidate_scores.repeated_specialization.unwrap()
+                > baseline_scores.repeated_specialization.unwrap()
+        );
+        let candidate = TuningCandidate {
+            run_id: "repeat-only".to_owned(),
+            profile: "turbo-16k".to_owned(),
+            runtime_sha256: Some("a".repeat(64)),
+            configuration_sha256: Some("b".repeat(64)),
+            eligible: true,
+            general_score: candidate_scores.general,
+            repeated_specialization_score: candidate_scores.repeated_specialization,
+            general_improvement_fraction: Some(0.0),
+            repeated_specialization_improvement_fraction: Some(9.0),
+            workload_medians: repeated_only_gain,
+            reasons: Vec::new(),
+        };
+        assert_eq!(
+            tuning_disposition(std::slice::from_ref(&candidate), policy.minimum_improvement).0,
+            TuningDisposition::RetainBaseline
+        );
     }
 
     #[test]

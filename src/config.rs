@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionConfig {
     pub schema: u32,
     pub root: PathBuf,
@@ -43,6 +44,7 @@ pub(crate) struct CleanupConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     pub name: String,
     pub runtime: String,
@@ -61,6 +63,21 @@ pub struct Profile {
     pub skill_tool: bool,
     pub vision_fit: bool,
     pub fit_target_mib: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileCapabilityContract {
+    schema: u32,
+    maximum_threads: u32,
+    runtimes: BTreeMap<String, RuntimeCapabilities>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeCapabilities {
+    kv_cache: Vec<String>,
+    request_local_ngram: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -118,7 +135,7 @@ pub fn resolve(
     let profile_path = install_root
         .join("profiles")
         .join(format!("{profile_name}.json"));
-    let (profile, profile_bytes): (Profile, _) = read_json_with_bytes(&profile_path, "Profile")?;
+    let (profile, profile_bytes) = read_profile_with_bytes(&profile_path)?;
     validate_profile(&profile, profile_name, &profile_path)?;
 
     let server = session
@@ -205,6 +222,26 @@ fn validate_session(
             path.display()
         ));
     }
+    let capabilities = profile_capabilities()?;
+    let unknown_runtimes = session
+        .runtimes
+        .keys()
+        .filter(|name| !capabilities.runtimes.contains_key(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown_runtimes.is_empty() {
+        return Err(format!(
+            "Session Config contains unsupported runtime names {}; expected only {}: {}",
+            unknown_runtimes.join(", "),
+            capabilities
+                .runtimes
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            path.display()
+        ));
+    }
     match (session.schema, session.active_profile.as_deref()) {
         (3, Some(profile)) if !profile.trim().is_empty() => {}
         (3, _) => {
@@ -254,6 +291,16 @@ pub(crate) fn cleanup_config(session: &SessionConfig) -> Result<Option<CleanupCo
                 session.schema
             ));
         }
+        if session
+            .cleanup
+            .as_object()
+            .is_some_and(|cleanup| cleanup.keys().any(|key| key != "enabled"))
+        {
+            return Err(format!(
+                "Session Config schema {} cleanup contains unknown fields; only enabled is supported",
+                session.schema
+            ));
+        }
         return Ok(None);
     }
     let cleanup: CleanupConfig = serde_json::from_value(session.cleanup.clone())
@@ -261,16 +308,33 @@ pub(crate) fn cleanup_config(session: &SessionConfig) -> Result<Option<CleanupCo
     Ok(cleanup.enabled.then_some(cleanup))
 }
 
-fn validate_profile(profile: &Profile, selected: &str, path: &Path) -> Result<(), String> {
+pub(crate) fn validate_profile(
+    profile: &Profile,
+    selected: &str,
+    path: &Path,
+) -> Result<(), String> {
     if profile.name != selected {
         return Err(format!(
             "Profile name '{}' does not match selected name '{}'.",
             profile.name, selected
         ));
     }
-    if profile.runtime.trim().is_empty() || profile.kv_cache.trim().is_empty() {
+    let capabilities = profile_capabilities()?;
+    let supported_runtimes = capabilities.runtimes.keys().cloned().collect::<Vec<_>>();
+    let Some(runtime) = capabilities.runtimes.get(&profile.runtime) else {
         return Err(format!(
-            "Profile runtime and kv_cache must be non-empty strings: {}",
+            "Profile runtime '{}' is unsupported; expected one of: {}: {}",
+            profile.runtime,
+            supported_runtimes.join(", "),
+            path.display()
+        ));
+    };
+    if !runtime.kv_cache.contains(&profile.kv_cache) {
+        return Err(format!(
+            "Profile kv_cache '{}' is unsupported by runtime '{}'; expected one of: {}: {}",
+            profile.kv_cache,
+            profile.runtime,
+            runtime.kv_cache.join(", "),
             path.display()
         ));
     }
@@ -291,7 +355,68 @@ fn validate_profile(profile: &Profile, selected: &str, path: &Path) -> Result<()
             ));
         }
     }
+    if profile.output > profile.context {
+        return Err(format!(
+            "Profile output ({}) must not exceed context ({}): {}",
+            profile.output,
+            profile.context,
+            path.display()
+        ));
+    }
+    if profile.ubatch_size > profile.batch_size {
+        return Err(format!(
+            "Profile ubatch_size ({}) must not exceed batch_size ({}): {}",
+            profile.ubatch_size,
+            profile.batch_size,
+            path.display()
+        ));
+    }
+    if profile.threads > capabilities.maximum_threads {
+        return Err(format!(
+            "Profile threads ({}) exceeds Alpine's supported sanity limit of {}: {}",
+            profile.threads,
+            capabilities.maximum_threads,
+            path.display()
+        ));
+    }
+    if profile.ngram_reset_on_begin && !profile.ngram_mod {
+        return Err(format!(
+            "Profile ngram_reset_on_begin requires ngram_mod: {}",
+            path.display()
+        ));
+    }
+    if profile.ngram_mod && !runtime.request_local_ngram {
+        return Err(format!(
+            "Profile runtime '{}' does not support request-local ngram_mod; select a runtime whose capability contract enables it: {}",
+            profile.runtime,
+            path.display()
+        ));
+    }
     Ok(())
+}
+
+fn profile_capabilities() -> Result<ProfileCapabilityContract, String> {
+    let contract: ProfileCapabilityContract =
+        serde_json::from_str(include_str!("../config/profile-capabilities.json"))
+            .map_err(|error| format!("invalid embedded Profile capability contract: {error}"))?;
+    if contract.schema != 1
+        || contract.maximum_threads == 0
+        || contract.runtimes.is_empty()
+        || contract.runtimes.iter().any(|(name, runtime)| {
+            name.trim().is_empty()
+                || runtime.kv_cache.is_empty()
+                || runtime.kv_cache.iter().any(|value| value.trim().is_empty())
+                || runtime
+                    .kv_cache
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != runtime.kv_cache.len()
+        })
+    {
+        return Err("embedded Profile capability contract is incomplete or invalid".to_owned());
+    }
+    Ok(contract)
 }
 
 fn validate_profile_name(name: &str) -> Result<(), String> {
@@ -319,6 +444,26 @@ fn read_json_with_bytes<T: for<'de> Deserialize<'de>>(
     let value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("Malformed {kind} {}: {error}", path.display()))?;
     Ok((value, bytes))
+}
+
+fn read_profile_with_bytes(path: &Path) -> Result<(Profile, Vec<u8>), String> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        format!(
+            "Profile missing or unreadable at {}: {error}",
+            path.display()
+        )
+    })?;
+    let raw: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Malformed Profile {}: {error}", path.display()))?;
+    if raw.get("status").is_some() {
+        return Err(format!(
+            "Malformed Profile {}: field 'status' is not a Profile setting; lifecycle and deployment roles belong to append-only deployment history",
+            path.display()
+        ));
+    }
+    let profile = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Malformed Profile {}: {error}", path.display()))?;
+    Ok((profile, bytes))
 }
 
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -391,7 +536,7 @@ mod tests {
         std::fs::write(
             root.join("profiles/stable-16k.json"),
             serde_json::to_vec(&json!({
-                "name": "stable-16k", "status": "production", "runtime": "official",
+                "name": "stable-16k", "runtime": "official",
                 "context": 16384, "output": 4096, "parallel": 1, "threads": 16,
                 "batch_size": 2048, "ubatch_size": 768, "kv_cache": "q8_0",
                 "tensor_cpu_through_block": 43, "mtp_depth": 3, "ngram_mod": false,
@@ -507,6 +652,80 @@ mod tests {
                 .unwrap_err()
                 .contains("invalid Profile name")
         );
+    }
+
+    #[test]
+    fn profile_and_session_unknown_fields_fail_closed_actionably() {
+        let directory = tempfile::tempdir().unwrap();
+        write_fixture(directory.path());
+        let profile_path = directory.path().join("profiles/stable-16k.json");
+        let original_profile = std::fs::read(&profile_path).unwrap();
+        let mut profile: serde_json::Value = serde_json::from_slice(&original_profile).unwrap();
+        profile["status"] = json!("production");
+        std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).unwrap();
+        let error = resolve(directory.path(), None, true).unwrap_err();
+        assert!(error.contains("status"));
+        assert!(error.contains("deployment history"));
+
+        std::fs::write(&profile_path, &original_profile).unwrap();
+        let session_path = directory.path().join("config/session.json");
+        let mut session: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&session_path).unwrap()).unwrap();
+        session["llama_server"] = json!("obsolete");
+        std::fs::write(&session_path, serde_json::to_vec(&session).unwrap()).unwrap();
+        assert!(
+            resolve(directory.path(), None, true)
+                .unwrap_err()
+                .contains("unknown field `llama_server`")
+        );
+    }
+
+    #[test]
+    fn invalid_profile_relationships_and_enumerations_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        write_fixture(directory.path());
+        let profile_path = directory.path().join("profiles/stable-16k.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&profile_path).unwrap()).unwrap();
+        for (field, value, expected) in [
+            ("output", json!(32768), "output"),
+            ("ubatch_size", json!(4096), "ubatch_size"),
+            ("kv_cache", json!("mystery"), "kv_cache"),
+            ("runtime", json!("mystery"), "runtime"),
+            ("threads", json!(257), "threads"),
+        ] {
+            let mut profile = original.clone();
+            profile[field] = value;
+            std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).unwrap();
+            let error = resolve(directory.path(), None, true).unwrap_err();
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+
+        for (ngram_mod, reset, expected) in [
+            (true, true, "runtime"),
+            (false, true, "ngram_reset_on_begin"),
+        ] {
+            let mut profile = original.clone();
+            profile["ngram_mod"] = json!(ngram_mod);
+            profile["ngram_reset_on_begin"] = json!(reset);
+            std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).unwrap();
+            let error = resolve(directory.path(), None, true).unwrap_err();
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn every_checked_in_profile_satisfies_the_closed_contract() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for entry in std::fs::read_dir(root.join("config/profiles")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let name = path.file_stem().unwrap().to_str().unwrap();
+            let (profile, _): (Profile, Vec<u8>) = read_json_with_bytes(&path, "Profile").unwrap();
+            validate_profile(&profile, name, &path).unwrap();
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import shutil
 import subprocess
@@ -16,6 +17,15 @@ from .io import write_json_atomic
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SESSION_SCHEMAS = {3, 4, 5}
+SESSION_FIELDS = {
+    "schema", "root", "host", "port", "active_profile", "runtimes", "model", "mmproj",
+    "chat_template", "api_key_file", "base_url_file", "state_file", "cleanup",
+}
+PROFILE_FIELDS = {
+    "name", "runtime", "context", "output", "parallel", "threads", "batch_size",
+    "ubatch_size", "kv_cache", "tensor_cpu_through_block", "mtp_depth", "ngram_mod",
+    "ngram_reset_on_begin", "external_skills", "skill_tool", "vision_fit", "fit_target_mib",
+}
 
 
 class ConfigError(ValueError):
@@ -68,6 +78,39 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _profile_capabilities() -> dict[str, Any]:
+    path = REPO_ROOT / "config" / "profile-capabilities.json"
+    contract = read_json(path)
+    runtimes = contract.get("runtimes")
+    if (
+        set(contract) != {"schema", "maximum_threads", "runtimes"}
+        or contract.get("schema") != 1
+        or not isinstance(contract.get("maximum_threads"), int)
+        or isinstance(contract.get("maximum_threads"), bool)
+        or contract["maximum_threads"] < 1
+        or not isinstance(runtimes, dict)
+        or not runtimes
+    ):
+        raise ConfigError(f"{path}: invalid Profile capability contract")
+    for name, runtime in runtimes.items():
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(runtime, dict)
+            or set(runtime) != {"kv_cache", "request_local_ngram"}
+            or not isinstance(runtime.get("kv_cache"), list)
+            or not runtime["kv_cache"]
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in runtime["kv_cache"]
+            )
+            or len(set(runtime["kv_cache"])) != len(runtime["kv_cache"])
+            or not isinstance(runtime.get("request_local_ngram"), bool)
+        ):
+            raise ConfigError(f"{path}: invalid runtime capability for {name!r}")
+    return contract
+
+
 def _required_string(value: dict[str, Any], name: str, source: Path) -> str:
     candidate = value.get(name)
     if not isinstance(candidate, str) or not candidate.strip():
@@ -76,11 +119,37 @@ def _required_string(value: dict[str, Any], name: str, source: Path) -> str:
 
 
 def _validate_profile(profile: dict[str, Any], name: str, source: Path) -> None:
+    if "status" in profile:
+        raise ConfigError(
+            f"{source}: field 'status' is not a Profile setting; lifecycle and deployment roles "
+            "belong to append-only deployment history"
+        )
+    unknown = sorted(set(profile) - PROFILE_FIELDS)
+    if unknown:
+        raise ConfigError(f"{source}: unknown Profile fields: {', '.join(unknown)}")
+    missing = sorted(PROFILE_FIELDS - set(profile))
+    if missing:
+        raise ConfigError(f"{source}: missing Profile fields: {', '.join(missing)}")
     if _required_string(profile, "name", source) != name:
         raise ConfigError(f"{source}: Profile name does not match selected name '{name}'")
-    _required_string(profile, "runtime", source)
-    _required_string(profile, "kv_cache", source)
-    positive = ("context", "output", "parallel", "threads", "batch_size", "ubatch_size", "mtp_depth")
+    capabilities = _profile_capabilities()
+    runtime = _required_string(profile, "runtime", source)
+    runtime_capabilities = capabilities["runtimes"].get(runtime)
+    if runtime_capabilities is None:
+        raise ConfigError(
+            f"{source}: Profile runtime {runtime!r} is unsupported; expected "
+            f"{', '.join(capabilities['runtimes'])}"
+        )
+    kv_cache = _required_string(profile, "kv_cache", source)
+    if kv_cache not in runtime_capabilities["kv_cache"]:
+        raise ConfigError(
+            f"{source}: Profile kv_cache {kv_cache!r} is unsupported by runtime {runtime!r}; "
+            f"expected {', '.join(runtime_capabilities['kv_cache'])}"
+        )
+    positive = (
+        "context", "output", "parallel", "threads", "batch_size", "ubatch_size", "mtp_depth",
+        "fit_target_mib",
+    )
     for field in positive:
         value = profile.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -88,6 +157,71 @@ def _validate_profile(profile: dict[str, Any], name: str, source: Path) -> None:
     block = profile.get("tensor_cpu_through_block")
     if not isinstance(block, int) or isinstance(block, bool) or block < 0:
         raise ConfigError(f"{source}: Profile value 'tensor_cpu_through_block' must be a non-negative integer")
+    if profile["output"] > profile["context"]:
+        raise ConfigError(f"{source}: Profile output must not exceed context")
+    if profile["ubatch_size"] > profile["batch_size"]:
+        raise ConfigError(f"{source}: Profile ubatch_size must not exceed batch_size")
+    if profile["threads"] > capabilities["maximum_threads"]:
+        raise ConfigError(
+            f"{source}: Profile threads exceeds Alpine's supported sanity limit of "
+            f"{capabilities['maximum_threads']}"
+        )
+    for field in (
+        "ngram_mod", "ngram_reset_on_begin", "external_skills", "skill_tool", "vision_fit",
+    ):
+        if not isinstance(profile[field], bool):
+            raise ConfigError(f"{source}: Profile value '{field}' must be a Boolean")
+    if profile["ngram_reset_on_begin"] and not profile["ngram_mod"]:
+        raise ConfigError(f"{source}: Profile ngram_reset_on_begin requires ngram_mod")
+    if profile["ngram_mod"] and not runtime_capabilities["request_local_ngram"]:
+        raise ConfigError(
+            f"{source}: Profile runtime {runtime!r} does not support request-local ngram_mod"
+        )
+
+
+def _validate_cleanup(session: dict[str, Any], schema: int, source: Path) -> None:
+    cleanup = session.get("cleanup")
+    if schema < 5:
+        if cleanup is None:
+            return
+        if not isinstance(cleanup, dict):
+            raise ConfigError(f"{source}: schema {schema} cleanup must be an object or null")
+        unknown = sorted(set(cleanup) - {"enabled"})
+        enabled = cleanup.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ConfigError(f"{source}: schema {schema} cleanup.enabled must be a Boolean")
+        if enabled:
+            raise ConfigError(
+                f"{source}: schema {schema} uses the retired cleanup start_script contract; "
+                "migrate it to schema 5"
+            )
+        if unknown:
+            raise ConfigError(
+                f"{source}: schema {schema} cleanup contains unknown fields: {', '.join(unknown)}"
+            )
+        return
+
+    if not isinstance(cleanup, dict):
+        raise ConfigError(f"{source}: schema 5 cleanup must be an object")
+    allowed = {"enabled", "port", "executable", "arguments", "stdout", "stderr", "health"}
+    unknown = sorted(set(cleanup) - allowed)
+    if unknown:
+        raise ConfigError(f"{source}: schema 5 cleanup contains unknown fields: {', '.join(unknown)}")
+    enabled = cleanup.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"{source}: schema 5 cleanup.enabled must be a Boolean")
+    port = cleanup.get("port")
+    if port is not None and (
+        not isinstance(port, int) or isinstance(port, bool) or not 0 <= port <= 65535
+    ):
+        raise ConfigError(f"{source}: schema 5 cleanup.port must be an unsigned 16-bit integer")
+    for field in ("executable", "stdout", "stderr", "health"):
+        value = cleanup.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(f"{source}: schema 5 cleanup.{field} must be a string or null")
+    arguments = cleanup.get("arguments", [])
+    if not isinstance(arguments, list) or any(not isinstance(value, str) for value in arguments):
+        raise ConfigError(f"{source}: schema 5 cleanup.arguments must be an array of strings")
 
 
 def resolve_session(
@@ -106,19 +240,59 @@ def resolve_session(
         )
     session_path = root / "config" / "session.json"
     session = read_json(session_path)
+    unknown_session = sorted(set(session) - SESSION_FIELDS)
+    if unknown_session:
+        raise ConfigError(
+            f"{session_path}: unknown Session Config fields: {', '.join(unknown_session)}"
+        )
+    required_session = SESSION_FIELDS - {"active_profile", "cleanup"}
+    missing_session = sorted(required_session - set(session))
+    if missing_session:
+        raise ConfigError(
+            f"{session_path}: missing Session Config fields: {', '.join(missing_session)}"
+        )
     schema = session.get("schema")
     if schema not in SESSION_SCHEMAS:
         raise ConfigError(
             f"{session_path}: unsupported Session Config schema {session.get('schema')!r}; "
             "expected 3, 4 or 5"
         )
+    runtimes = session.get("runtimes")
+    if not isinstance(runtimes, dict):
+        raise ConfigError(f"{session_path}: 'runtimes' must be an object")
+    capabilities = _profile_capabilities()
+    unknown_runtimes = sorted(set(runtimes) - set(capabilities["runtimes"]))
+    if unknown_runtimes:
+        raise ConfigError(
+            f"{session_path}: unsupported runtime names: {', '.join(unknown_runtimes)}; "
+            f"expected {', '.join(capabilities['runtimes'])}"
+        )
+    for name, value in runtimes.items():
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(
+                f"{session_path}: runtime {name!r} must be a string path or null"
+            )
     configured_root = Path(_required_string(session, "root", session_path)).expanduser().resolve()
     if configured_root != root:
         raise ConfigError(f"{session_path}: root resolves to {configured_root}, expected {root}")
-    _required_string(session, "host", session_path)
+    host = _required_string(session, "host", session_path)
+    try:
+        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        raise ConfigError(f"{session_path}: Session Config host must resolve explicitly to loopback")
     port = session.get("port")
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
         raise ConfigError(f"{session_path}: 'port' must be an integer between 1 and 65535")
+    if schema == 3:
+        _required_string(session, "active_profile", session_path)
+    elif "active_profile" in session:
+        raise ConfigError(
+            f"{session_path}: schema {schema} stores deployment roles in append-only deployment "
+            "history, not active_profile"
+        )
+    _validate_cleanup(session, schema, session_path)
     if profile_name:
         selected = profile_name
     elif schema == 3:
@@ -147,9 +321,7 @@ def resolve_session(
         raise ConfigError(f"Profile missing: {profile_path}")
     profile = read_json(profile_path)
     _validate_profile(profile, selected, profile_path)
-    profile.pop("status", None)
     runtime_name = str(profile["runtime"])
-    runtimes = session.get("runtimes")
     runtime_value = runtimes.get(runtime_name) if isinstance(runtimes, dict) else None
     if not isinstance(runtime_value, str) or not runtime_value.strip():
         raise ConfigError(f"Runtime '{runtime_name}' is unavailable for Profile '{selected}'")
