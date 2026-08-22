@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "id": "focus-timer-v1",
+  "prompt": "Use write exactly once create index.html. tiny offline Focus Timer, circular 25-min countdown, Start/Pause Reset, completed-session localStorage. HARD LIMIT 90 nonblank lines, 1200 words. no dependencies. Do not call write_file. reply DONE.",
+  "workspace": {
+    "fixture": "empty-temporary-directory",
+    "allowed_created_files": [
+      "index.html"
+    ],
+    "protected_paths": []
+  },
+  "hard_gates": {
+    "required_tool_calls": {
+      "write": 1
+    },
+    "forbidden_tool_calls": [
+      "write_file"
+    ],
+    "final_response": "DONE",
+    "maximum_nonblank_lines": 90,
+    "maximum_words": 1200,
+    "external_dependencies": false,
+    "network_requests": false,
+    "unexpected_files": false
+  },
+  "measurement": {
+    "artifact_encoding": "utf-8",
+    "nonblank_lines": "Count index.html lines whose Unicode-trimmed content is non-empty.",
+    "words": "Count index.html tokens separated by Unicode whitespace.",
+    "dependency_check": "Reject external script, stylesheet, font, media, module, import, or package references.",
+    "network_check": "Load in an isolated browser context with network denied and reject any attempted request.",
+    "functional_check_environment": "Use a fresh localStorage namespace, load index.html locally, and exercise visible controls with a controllable clock."
+  },
+  "functional_checks": [
+    {
+      "id": "circular-display",
+      "description": "The page visibly presents the countdown as a circular timer."
+    },
+    {
+      "id": "initial-duration",
+      "description": "A new or reset timer displays and represents exactly 25 minutes."
+    },
+    {
+      "id": "start-pause",
+      "description": "One control starts an elapsed-time-based countdown and can pause it without losing the remaining time."
+    },
+    {
+      "id": "reset",
+      "description": "Reset stops the timer and restores the full 25-minute duration."
+    },
+    {
+      "id": "completed-session-persistence",
+      "description": "Natural completion increments a completed-session count stored in localStorage and restored after reload."
+    }
+  ],
+  "scoring": {
+    "hard_gate_failure_score": 0,
+    "points_per_functional_check": 20,
+    "maximum_score": 100,
+    "pass_score": 100
+  },
+  "result_record": {
+    "tool_call_recording": "Record only tool name, ordinal, success or failure, and duration. Do not retain arguments, payloads, generated file content, or transcript text.",
+    "required_identity_fields": [
+      "contract_sha256",
+      "harness",
+      "harness_executable_sha256",
+      "model",
+      "profile_sha256",
+      "session_config_sha256",
+      "session_identity"
+    ],
+    "required_observation_fields": [
+      "started_at",
+      "wall_ms",
+      "exit_code",
+      "timed_out",
+      "input_tokens",
+      "output_tokens",
+      "cache_read_tokens",
+      "cache_write_tokens",
+      "tool_calls",
+      "final_response",
+      "artifact_sha256",
+      "nonblank_lines",
+      "words",
+      "hard_gate_results",
+      "functional_check_results",
+      "score"
+    ]
+  },
+  "privacy": {
+    "store_prompt": true,
+    "store_reference_output": false,
+    "store_transcript": false
+  }
+}
