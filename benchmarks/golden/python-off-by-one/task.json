@@ -1,6 +1,8 @@
 {
-  "schema": 1,
+  "schema": 2,
   "id": "python-off-by-one",
+  "visibility": "public",
+  "capabilities": ["single-file-repair"],
   "language": "python",
   "prompt": "Fix the bug in this isolated repository. The chunk_ranges(total, size) function must return contiguous half-open ranges that cover exactly 0..total, with no empty range when total is divisible by size. Preserve the public API, do not modify tests, make the smallest coherent change, run the tests, and report the result.",
   "test_command": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"],

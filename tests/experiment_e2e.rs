@@ -268,7 +268,7 @@ fn write_repository(root: &Path) {
     std::fs::write(
         root.join("config/promotion-policy.json"),
         serde_json::to_vec(&json!({
-            "schema": 3,
+            "schema": 4,
             "lifecycle": ["experimental", "candidate", "validated", "production"],
             "gates": {
                 "candidate": {
@@ -277,6 +277,8 @@ fn write_repository(root: &Path) {
                     "require_quality_pass": true,
                     "require_deterministic_outputs": true,
                     "performance_metric_by_workload": {"fixture": "decode-tps"},
+                    "general_score_workloads": ["fixture"],
+                    "repeated_specialization_workloads": [],
                     "maximum_performance_coefficient_of_variation": 0.10,
                     "maximum_median_performance_regression_fraction": 0.10,
                     "minimum_tuning_selection_improvement_fraction": 0.03
@@ -316,10 +318,11 @@ fn write_repository(root: &Path) {
     std::fs::write(
         root.join("benchmarks/micro/workloads.json"),
         serde_json::to_vec(&json!({
-            "schema": 2,
+            "schema": 3,
             "workloads": [{
                 "id": "fixture", "prompt_file": "prompts/fixture.txt",
-                "repeat": 1, "n_predict": 1, "quality": "nonempty"
+                "repeat": 1, "n_predict": 1,
+                "quality": {"kind": "mechanical-response"}
             }]
         }))
         .unwrap(),
@@ -364,7 +367,7 @@ fn write_install(root: &Path, port: u16, runtime: &Path, pid: u32, process_start
     std::fs::write(
         &profile,
         serde_json::to_vec(&json!({
-            "name": "fixture", "status": "experimental", "runtime": "official",
+            "name": "fixture", "runtime": "official",
             "context": 1024, "output": 16, "parallel": 1, "threads": 1,
             "batch_size": 32, "ubatch_size": 16, "kv_cache": "f16",
             "tensor_cpu_through_block": 0, "mtp_depth": 1, "ngram_mod": false,

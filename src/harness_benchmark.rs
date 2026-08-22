@@ -22,7 +22,6 @@ const PI_API_KEY_ENV: &str = "ALPINE_PI_API_KEY";
 #[derive(Debug, Clone)]
 pub struct HarnessBenchmarkOptions {
     pub install_root: PathBuf,
-    pub project: PathBuf,
     pub profile: Option<String>,
     pub runs: u32,
     pub request_timeout: Duration,
@@ -68,12 +67,6 @@ pub fn run(options: &HarnessBenchmarkOptions) -> Result<HarnessBenchmarkReport, 
     if options.runs == 0 || options.runs > 20 {
         return Err("harness benchmark runs must be between 1 and 20".to_owned());
     }
-    let project = std::fs::canonicalize(&options.project)
-        .map_err(|error| format!("failed to resolve benchmark project: {error}"))?;
-    if !project.is_dir() {
-        return Err("benchmark project must be a directory".to_owned());
-    }
-
     let resolved = config::resolve(&options.install_root, options.profile.as_deref(), true)?;
     let status = verify_session_identity(&resolved)?;
     let session_identity = status

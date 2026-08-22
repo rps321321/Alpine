@@ -23,6 +23,9 @@ def control_plane_files(repo_root: Path) -> Iterator[tuple[Path, Path]]:
     artifact_manifest = repo_root / "config" / "artifacts.json"
     if artifact_manifest.is_file():
         yield artifact_manifest, Path("config/artifacts.json")
+    profile_capabilities = repo_root / "config" / "profile-capabilities.json"
+    if profile_capabilities.is_file():
+        yield profile_capabilities, Path("config/profile-capabilities.json")
 
 
 def expected_control_plane(repo_root: Path) -> dict[str, str]:

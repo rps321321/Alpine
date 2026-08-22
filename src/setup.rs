@@ -96,12 +96,6 @@ struct CustomBuild {
     options: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ProfileSelection {
-    name: String,
-    runtime: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PublicationItem {
     stage: PathBuf,
@@ -207,7 +201,8 @@ pub fn run(options: &SetupOptions) -> Result<SetupReport, String> {
     let profile_path = repository_root
         .join("config/profiles")
         .join(format!("{}.json", options.profile));
-    let selected_profile: ProfileSelection = read_json(&profile_path, "Profile")?;
+    let selected_profile: crate::config::Profile = read_json(&profile_path, "Profile")?;
+    crate::config::validate_profile(&selected_profile, &options.profile, &profile_path)?;
     if selected_profile.name != options.profile {
         return Err(format!(
             "Profile name '{}' does not match requested Profile '{}'.",
@@ -409,6 +404,7 @@ fn publication_items(
     for relative in [
         "config/artifacts.json",
         "config/control-plane.json",
+        "config/profile-capabilities.json",
         "config/session.json",
         "alpine.exe",
         "Open Minimal OpenCode.cmd",
@@ -635,6 +631,7 @@ fn validate_publication_journal(items: &[PublicationItem]) -> Result<(), String>
         "profiles",
         "config/artifacts.json",
         "config/control-plane.json",
+        "config/profile-capabilities.json",
         "config/session.json",
         "alpine.exe",
         "Open Minimal OpenCode.cmd",
@@ -808,6 +805,7 @@ fn reserved_setup_path(path: &str) -> bool {
         path,
         "config/artifacts.json"
             | "config/control-plane.json"
+            | "config/profile-capabilities.json"
             | "config/session.json"
             | "alpine.exe"
             | "Open Minimal OpenCode.cmd"
@@ -1496,7 +1494,11 @@ fn copy_control_plane(
     }
     std::fs::create_dir_all(stage.join("config"))
         .map_err(|error| format!("failed to create staged config directory: {error}"))?;
-    copy_atomic(manifest_path, &stage.join("config/artifacts.json"))
+    copy_atomic(manifest_path, &stage.join("config/artifacts.json"))?;
+    copy_atomic(
+        &repository_root.join("config/profile-capabilities.json"),
+        &stage.join("config/profile-capabilities.json"),
+    )
 }
 
 fn build_alpine_control_plane(repository_root: &Path, stage: &Path) -> Result<(), String> {
@@ -1685,6 +1687,16 @@ fn write_control_plane_identity(
     files.push(ControlPlaneFile {
         path: "config/artifacts.json".to_owned(),
         sha256: artifact_digest,
+        generated: false,
+    });
+    let capability_source = repository_root.join("config/profile-capabilities.json");
+    let capability_digest = sha256_file(&capability_source)?;
+    if sha256_file(&stage.join("config/profile-capabilities.json"))? != capability_digest {
+        return Err("Copied Profile capability contract differs.".to_owned());
+    }
+    files.push(ControlPlaneFile {
+        path: "config/profile-capabilities.json".to_owned(),
+        sha256: capability_digest,
         generated: false,
     });
     for relative in [
@@ -1889,6 +1901,9 @@ fn verify_control_plane_identity(
                 _ if normalized == "config/artifacts.json" => {
                     repository_root.join("config/artifacts.json")
                 }
+                _ if normalized == "config/profile-capabilities.json" => {
+                    repository_root.join("config/profile-capabilities.json")
+                }
                 _ => return Err(format!("unknown control-plane source path: {normalized}")),
             };
             if sha256_file(&source)? != entry.sha256 {
@@ -1908,6 +1923,7 @@ fn verify_control_plane_identity(
 fn expected_control_plane_paths(repository_root: &Path) -> Result<BTreeSet<String>, String> {
     let mut expected: BTreeSet<String> = [
         "config/artifacts.json".to_owned(),
+        "config/profile-capabilities.json".to_owned(),
         "alpine.exe".to_owned(),
         "Open Minimal OpenCode.cmd".to_owned(),
         "Open Local Qwen.exe".to_owned(),
@@ -2429,7 +2445,22 @@ mod tests {
             root.join("config/profiles/stable-16k.json"),
             serde_json::to_vec(&serde_json::json!({
                 "name": "stable-16k",
-                "runtime": profile_runtime
+                "runtime": profile_runtime,
+                "context": 16384,
+                "output": 4096,
+                "parallel": 1,
+                "threads": 16,
+                "batch_size": 2048,
+                "ubatch_size": 768,
+                "kv_cache": "q8_0",
+                "tensor_cpu_through_block": 43,
+                "mtp_depth": 3,
+                "ngram_mod": false,
+                "ngram_reset_on_begin": false,
+                "external_skills": false,
+                "skill_tool": false,
+                "vision_fit": true,
+                "fit_target_mib": 512
             }))
             .unwrap(),
         )
@@ -2476,6 +2507,16 @@ mod tests {
         let mut options = setup_options(&repository, &install);
         options.profile = "missing".to_owned();
         assert!(run(&options).unwrap_err().contains("Profile"));
+        assert!(!install.exists());
+
+        write_repository_contract(&repository, "official");
+        let profile_path = repository.join("config/profiles/stable-16k.json");
+        let mut invalid: Value =
+            serde_json::from_slice(&std::fs::read(&profile_path).unwrap()).unwrap();
+        invalid["output"] = serde_json::json!(32768);
+        std::fs::write(&profile_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let error = run(&setup_options(&repository, &install)).unwrap_err();
+        assert!(error.contains("output"));
         assert!(!install.exists());
 
         write_repository_contract(&repository, "custom");
@@ -2818,6 +2859,10 @@ mod tests {
             ("runtime/launcher/OpenLocalQwen.cs", b"source".as_slice()),
             ("config/profiles/stable-16k.json", b"{}".as_slice()),
             ("config/artifacts.json", b"{}".as_slice()),
+            (
+                "config/profile-capabilities.json",
+                b"{\"schema\":1}".as_slice(),
+            ),
             ("Cargo.toml", b"[package]\nname='fixture'\n".as_slice()),
             ("Cargo.lock", b"# lock\n".as_slice()),
             ("src/lib.rs", b"pub fn fixture() {}\n".as_slice()),
@@ -2841,6 +2886,11 @@ mod tests {
         copy_atomic(
             &repo.join("config/artifacts.json"),
             &install.join("config/artifacts.json"),
+        )
+        .unwrap();
+        copy_atomic(
+            &repo.join("config/profile-capabilities.json"),
+            &install.join("config/profile-capabilities.json"),
         )
         .unwrap();
         for relative in [

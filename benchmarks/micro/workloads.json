@@ -1,26 +1,32 @@
 {
-  "schema": 2,
+  "schema": 3,
   "workloads": [
     {
       "id": "prefill-4k",
       "prompt_file": "prompts/prefill.txt",
       "repeat": 270,
       "n_predict": 1,
-      "quality": "nonempty"
+      "quality": {"kind": "mechanical-response"}
     },
     {
       "id": "novel-256",
       "prompt_file": "prompts/novel.txt",
       "repeat": 1,
       "n_predict": 256,
-      "quality": "nonempty"
+      "quality": {"kind": "mechanical-response"}
     },
     {
       "id": "repeat-code-256",
       "prompt_file": "prompts/repeat-code.txt",
       "repeat": 1,
       "n_predict": 256,
-      "quality": "nonempty"
+      "ignore_eos": false,
+      "quality": {
+        "kind": "exact-copy",
+        "expected_file": "expected/repeat-code.txt",
+        "expected_sha256": "b5a08a899baea34e83800db2938fe38b2a200137b311f629e2affca275d785cb",
+        "terminal_newline": "required"
+      }
     },
     {
       "id": "structured-json-128",
@@ -28,7 +34,12 @@
       "repeat": 1,
       "n_predict": 128,
       "ignore_eos": false,
-      "quality": "json"
+      "quality": {
+        "kind": "structured-json",
+        "safe": true,
+        "files": ["src/main.py", "tests/test_main.py"],
+        "maximum_reason_words": 8
+      }
     }
   ]
 }

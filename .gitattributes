@@ -1,2 +1,4 @@
 patches/*.patch whitespace=-blank-at-eol,-blank-at-eof
 benchmarks/micro/prompts/*.txt whitespace=-blank-at-eol,-blank-at-eof
+benchmarks/micro/prompts/*.txt text eol=lf
+benchmarks/micro/expected/*.txt text eol=lf

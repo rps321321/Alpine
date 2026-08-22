@@ -394,7 +394,7 @@ enum Commands {
     },
     GoldenAgent {
         anchor_run_id: String,
-        #[arg(long, default_value = "python-off-by-one")]
+        #[arg(long, default_value = "public-v1")]
         task: String,
         #[arg(long, default_value_os_t = default_repository_root())]
         repository_root: PathBuf,
@@ -416,8 +416,6 @@ enum Commands {
     HarnessBenchmark {
         #[arg(long, default_value_os_t = default_install_root())]
         install_root: PathBuf,
-        #[arg(long, default_value_os_t = default_project())]
-        project: PathBuf,
         #[arg(long)]
         profile: Option<String>,
         #[arg(long, default_value_t = 3)]
@@ -1064,7 +1062,6 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
         }
         Commands::HarnessBenchmark {
             install_root,
-            project,
             profile,
             runs,
             request_timeout_ms,
@@ -1072,7 +1069,6 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
         } => {
             let report = Alpine::run_harness_benchmark(&HarnessBenchmarkOptions {
                 install_root,
-                project,
                 profile,
                 runs,
                 request_timeout: Duration::from_millis(request_timeout_ms),

@@ -73,7 +73,7 @@ Rank bounded tuning candidates without mutating the installation:
 cargo run --release --bin alpine -- tune --baseline-run <baseline-tuning-run-id> --candidate-run <candidate-tuning-run-id>
 ```
 
-Tuning holds hardware, Alpine binary, model, workload suite and policy constant while treating runtime and material configuration as search dimensions. Every candidate must pass row-level quality, deterministic-output, sample-count and variability gates using the metric explicitly assigned to each workload by policy. A candidate is recommended only if its equally weighted geometric-mean performance score clears the versioned improvement threshold without violating any per-workload regression floor; otherwise Alpine explicitly retains the baseline.
+Tuning holds hardware, Alpine binary, model, workload suite and policy constant while treating runtime and material configuration as search dimensions. Every candidate must pass row-level quality, deterministic-output, sample-count and variability gates using the metric explicitly assigned to each workload by policy. A candidate is recommended only if its general geometric-mean score, which excludes repeated-visible-output specialization, clears the versioned improvement threshold without violating any per-workload regression floor. Repeated specialization and its gain are reported separately and cannot select the default by themselves.
 
 Inspect the host against the versioned Support Envelope:
 
@@ -97,7 +97,7 @@ Run the Rust-owned same-process stability gate against the exact passed final ru
 cargo run --release --bin alpine -- same-process-stability <final-run-id>
 cargo run --release --bin alpine -- clean-restart-stability <final-run-id>
 cargo run --release --bin alpine -- near-limit-context <final-run-id> --ratio 0.85
-cargo run --release --bin alpine -- golden-agent <final-run-id> --task python-off-by-one
+cargo run --release --bin alpine -- golden-agent <final-run-id> --task public-v1
 cargo run --release --bin alpine -- rollback-proof <final-run-id>
 ```
 
@@ -105,7 +105,7 @@ The restart gate performs ten actual stop/start cycles under the same exclusive 
 
 The context gate uses the server tokenizer to construct a reproducible immutable-ledger prompt within two percent of the configured target ratio, performs the three-needle retrieval twice on one verified process, verifies both raw responses, and restores the prior Session.
 
-The golden-agent gate copies the versioned fixture into an isolated temporary worktree, launches OpenCode directly from Rust with the reviewed minimal policy and a secret-scrubbed child environment, verifies the effective context/safety policy, runs the executable tests, rejects protected-path edits or unexpected files, binds the OpenCode executable hash, and restores the prior Session. It does not invoke the PowerShell launcher.
+The default public-v1 golden-agent gate copies a versioned public fixture into an isolated temporary worktree and checks multi-file repair, exactly one declared failed read followed by successful recovery, and retention of an early exact constraint through context growth. It launches OpenCode directly from Rust with the reviewed minimal policy and a secret-scrubbed child environment, verifies the effective context/safety policy, rejects malformed or conflicting tool effects, runs executable tests, rejects protected-path edits or unexpected files, binds both executable identities and the task-suite hash, and restores the prior Session. Promotion Policy requires this exact public task and capability set. Checked-in tasks are public reproducibility fixtures, not hidden evidence, and the gate does not invoke the PowerShell launcher.
 
 The rollback proof transactionally switches to the configured `stable-16k` rollback Profile, verifies its current deployment role and Profile/Session/runtime identities, performs a real 16-token inference smoke, and restores the prior material Session before publishing evidence.
 
@@ -163,7 +163,7 @@ cargo run --release --bin alpine -- package-runtime --built-runtime C:\path\to\b
 - `src/`: Rust control-plane Modules and the `alpine` CLI.
 - `config/support-envelope.json`: versioned capability envelope; current-machine observations do not belong here.
 - `config/evaluation-plan.json`: versioned search space, resource budget and requested qualification target.
-- `config/profiles/` and `config/artifacts.json`: versioned inference-only Profile and artifact contracts consumed by Rust; deployment roles are not stored in Profile bytes.
+- `config/profiles/`, `config/profile-capabilities.json`, and `config/artifacts.json`: versioned inference-only Profile, runtime-capability, and artifact contracts; deployment roles are not stored in Profile bytes.
 - `%USERPROFILE%\local-models`: default generated machine-local installation containing large artifacts, runtime bundles, local credentials and logs. The install root remains configurable; it is not source code and must not be committed.
 - `results/`: local identity-bound evidence, intentionally ignored by Git unless an explicit redacted publication artifact is prepared.
 

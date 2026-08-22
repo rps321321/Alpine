@@ -137,11 +137,14 @@ struct PromotionGate {
     require_quality_pass: Option<bool>,
     require_deterministic_outputs: Option<bool>,
     performance_metric_by_workload: Option<BTreeMap<String, PerformanceMetric>>,
+    general_score_workloads: Option<Vec<String>>,
+    repeated_specialization_workloads: Option<Vec<String>>,
     maximum_performance_coefficient_of_variation: Option<f64>,
     maximum_median_performance_regression_fraction: Option<f64>,
     minimum_tuning_selection_improvement_fraction: Option<f64>,
     #[serde(default)]
     requires_external_evidence: Vec<String>,
+    golden_evidence: Option<external::GoldenEvidenceRequirement>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -565,7 +568,7 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
             .config
             .pointer("/benchmark/schema")
             .and_then(Value::as_u64)
-            == Some(2);
+            == Some(3);
     add_check(
         &mut checks,
         "benchmark-contract",
@@ -574,7 +577,7 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
             "name": final_run.evidence.config.pointer("/benchmark/name"),
             "schema": final_run.evidence.config.pointer("/benchmark/schema"),
         }),
-        json!({"name": "micro", "schema": 2}),
+        json!({"name": "micro", "schema": 3}),
     );
     not_proven |= !benchmark_contract;
 
@@ -841,7 +844,10 @@ pub fn qualify_run(options: &RunQualificationOptions) -> Result<RunQualification
             &store,
             &options.final_run_id,
             identity,
-            &gate.requires_external_evidence,
+            &external::ExternalEvidenceRequirements {
+                kinds: &gate.requires_external_evidence,
+                golden: gate.golden_evidence.as_ref(),
+            },
             &repository_root,
             result_root,
             &current_binary_sha256,
@@ -1152,15 +1158,15 @@ fn inherited_gate(
     policy: &PromotionPolicy,
     target: QualificationTarget,
 ) -> Result<PromotionGate, String> {
-    if policy.schema != 3 {
+    if policy.schema != 4 {
         return Err(format!(
-            "unsupported promotion policy schema {}; expected 3",
+            "unsupported promotion policy schema {}; expected 4",
             policy.schema
         ));
     }
     if policy.lifecycle != ["experimental", "candidate", "validated", "production"] {
         return Err(
-            "promotion policy schema 3 lifecycle must be experimental, candidate, validated, production"
+            "promotion policy schema 4 lifecycle must be experimental, candidate, validated, production"
                 .to_owned(),
         );
     }
@@ -1203,6 +1209,12 @@ fn inherited_gate(
         if gate.performance_metric_by_workload.is_some() {
             merged.performance_metric_by_workload = gate.performance_metric_by_workload;
         }
+        if gate.general_score_workloads.is_some() {
+            merged.general_score_workloads = gate.general_score_workloads;
+        }
+        if gate.repeated_specialization_workloads.is_some() {
+            merged.repeated_specialization_workloads = gate.repeated_specialization_workloads;
+        }
         if gate.maximum_performance_coefficient_of_variation.is_some() {
             merged.maximum_performance_coefficient_of_variation =
                 gate.maximum_performance_coefficient_of_variation;
@@ -1222,6 +1234,9 @@ fn inherited_gate(
             if !merged.requires_external_evidence.contains(&evidence) {
                 merged.requires_external_evidence.push(evidence);
             }
+        }
+        if gate.golden_evidence.is_some() {
+            merged.golden_evidence = gate.golden_evidence;
         }
     }
     let workloads = merged
@@ -1249,6 +1264,32 @@ fn inherited_gate(
     if metrics.keys().collect::<BTreeSet<_>>() != workloads.iter().collect::<BTreeSet<_>>() {
         return Err("performance metric keys must exactly match required workloads".to_owned());
     }
+    let general = merged
+        .general_score_workloads
+        .as_ref()
+        .ok_or_else(|| "general score workloads must be explicit".to_owned())?;
+    let repeated = merged
+        .repeated_specialization_workloads
+        .as_ref()
+        .ok_or_else(|| "repeated specialization workloads must be explicit".to_owned())?;
+    let general_set = general.iter().collect::<BTreeSet<_>>();
+    let repeated_set = repeated.iter().collect::<BTreeSet<_>>();
+    let required_set = workloads.iter().collect::<BTreeSet<_>>();
+    if general.is_empty()
+        || general_set.len() != general.len()
+        || repeated_set.len() != repeated.len()
+        || !general_set.is_disjoint(&repeated_set)
+        || general_set
+            .union(&repeated_set)
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != required_set
+    {
+        return Err(
+            "general and repeated specialization workloads must be unique, disjoint, and cover required workloads"
+                .to_owned(),
+        );
+    }
     if merged
         .maximum_performance_coefficient_of_variation
         .is_none_or(|value| !value.is_finite() || value < 0.0)
@@ -1273,6 +1314,38 @@ fn inherited_gate(
         .any(|name| name.trim().is_empty())
     {
         return Err("external-evidence names must not be empty".to_owned());
+    }
+    let requires_golden = merged
+        .requires_external_evidence
+        .iter()
+        .any(|name| name == "golden-agent-task-pass");
+    match (&merged.golden_evidence, requires_golden) {
+        (Some(requirement), true)
+            if !requirement.task_id.trim().is_empty()
+                && requirement.task_id.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+                })
+                && !requirement.required_capabilities.is_empty()
+                && requirement
+                    .required_capabilities
+                    .iter()
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == requirement.required_capabilities.len() => {}
+        (Some(_), true) => {
+            return Err("golden evidence requirement is incomplete or duplicated".to_owned());
+        }
+        (None, true) => {
+            return Err(
+                "golden-agent evidence kind requires a task and capability contract".to_owned(),
+            );
+        }
+        (Some(_), false) => {
+            return Err(
+                "golden evidence requirement has no matching external-evidence kind".to_owned(),
+            );
+        }
+        (None, false) => {}
     }
     Ok(merged)
 }
@@ -1545,7 +1618,7 @@ mod tests {
 
     fn promotion_policy() -> PromotionPolicy {
         serde_json::from_value(json!({
-            "schema": 3,
+            "schema": 4,
             "lifecycle": ["experimental", "candidate", "validated", "production"],
             "gates": {
                 "candidate": {
@@ -1554,6 +1627,8 @@ mod tests {
                     "require_quality_pass": true,
                     "require_deterministic_outputs": true,
                     "performance_metric_by_workload": {"fixture": "decode-tps"},
+                    "general_score_workloads": ["fixture"],
+                    "repeated_specialization_workloads": [],
                     "maximum_performance_coefficient_of_variation": 0.1,
                     "maximum_median_performance_regression_fraction": 0.1,
                     "minimum_tuning_selection_improvement_fraction": 0.03
@@ -1578,7 +1653,7 @@ mod tests {
         assert!(inherited_gate(&missing, QualificationTarget::Candidate).is_err());
 
         let unknown = serde_json::from_value::<PromotionPolicy>(json!({
-            "schema": 3,
+            "schema": 4,
             "lifecycle": ["experimental", "candidate", "validated", "production"],
             "gates": {
                 "candidate": {
@@ -1587,6 +1662,8 @@ mod tests {
                     "require_quality_pass": true,
                     "require_deterministic_outputs": true,
                     "performance_metric_by_workload": {"fixture": "decode-tps"},
+                    "general_score_workloads": ["fixture"],
+                    "repeated_specialization_workloads": [],
                     "maximum_performance_coefficient_of_variation": 0.1,
                     "maximum_median_performance_regression_fraction": 0.1,
                     "minimum_tuning_selection_improvement_fraction": 0.03,
@@ -1625,6 +1702,23 @@ mod tests {
         let mut cycle = promotion_policy();
         cycle.gates.get_mut("candidate").unwrap().inherits = Some("production".to_owned());
         assert!(inherited_gate(&cycle, QualificationTarget::Candidate).is_err());
+    }
+
+    #[test]
+    fn validated_policy_binds_the_required_public_golden_capabilities() {
+        let mut policy = promotion_policy();
+        let validated = policy.gates.get_mut("validated").unwrap();
+        validated.requires_external_evidence = vec!["golden-agent-task-pass".to_owned()];
+        validated.golden_evidence = Some(external::GoldenEvidenceRequirement {
+            task_id: "public-v1".to_owned(),
+            required_capabilities: vec![
+                crate::golden::GoldenCapability::MultiFileTddRepair,
+                crate::golden::GoldenCapability::ToolErrorRecovery,
+                crate::golden::GoldenCapability::ConstraintRetention,
+            ],
+        });
+        let gate = inherited_gate(&policy, QualificationTarget::Validated).unwrap();
+        assert_eq!(gate.golden_evidence.unwrap().task_id, "public-v1");
     }
 
     #[test]

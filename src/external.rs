@@ -158,11 +158,17 @@ pub(crate) struct NearLimitContextEvidence {
 pub(crate) struct GoldenAgentEvidence {
     pub schema: u32,
     pub task_id: String,
+    pub capabilities: Vec<crate::golden::GoldenCapability>,
+    pub tool_calls: u64,
+    pub tool_failures: u64,
+    pub required_failure_matches: u64,
     pub suite_sha256: String,
     pub opencode_path: PathBuf,
     pub opencode_sha256: String,
     pub harness_policy_sha256: String,
     pub effective_config_sha256: String,
+    pub test_executable_path: PathBuf,
+    pub test_executable_sha256: String,
     pub agent_exit_code: i32,
     pub tests_exit_code: i32,
     pub protected_before: BTreeMap<String, String>,
@@ -173,6 +179,24 @@ pub(crate) struct GoldenAgentEvidence {
     pub tests_stdout_sha256: String,
     pub tests_stderr_sha256: String,
     pub restored_prior_session: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GoldenEvidenceRequirement {
+    pub task_id: String,
+    pub required_capabilities: Vec<crate::golden::GoldenCapability>,
+}
+
+pub(crate) struct ExternalEvidenceRequirements<'a> {
+    pub kinds: &'a [String],
+    pub golden: Option<&'a GoldenEvidenceRequirement>,
+}
+
+struct CurrentEvidenceContext<'a> {
+    repository_root: &'a Path,
+    producer_sha256: &'a str,
+    golden_requirement: Option<&'a GoldenEvidenceRequirement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,6 +464,7 @@ pub(crate) fn record(
         options.kind,
         &options.repository_root,
         &identity.software,
+        None,
     )?;
     validate_semantics(&payload, options.kind)?;
     let bytes = serde_json::to_vec_pretty(&payload)
@@ -472,6 +497,7 @@ pub(crate) fn record(
             options.kind,
             &options.repository_root,
             &identity.software,
+            None,
         )?;
         validate_semantics(&existing, options.kind)?;
         if existing.evidence != options.evidence || existing.reviewed_by != payload.reviewed_by {
@@ -636,7 +662,7 @@ pub(crate) fn inspect_required(
     store: &EvidenceStore,
     anchor_run_id: &str,
     identity: &EvidenceIdentity,
-    required: &[String],
+    requirements: &ExternalEvidenceRequirements<'_>,
     repository_root: &Path,
     result_root: &Path,
     producer_sha256: &str,
@@ -646,8 +672,13 @@ pub(crate) fn inspect_required(
     for artifact in &artifacts {
         by_kind.entry(&artifact.kind).or_default().push(artifact);
     }
-    let mut statuses = Vec::with_capacity(required.len());
-    for name in required {
+    let mut statuses = Vec::with_capacity(requirements.kinds.len());
+    let current = CurrentEvidenceContext {
+        repository_root,
+        producer_sha256,
+        golden_requirement: requirements.golden,
+    };
+    for name in requirements.kinds {
         let kind = parse_kind(name)?;
         let Some(matches) = by_kind.get(name.as_str()) else {
             statuses.push(status(
@@ -689,8 +720,7 @@ pub(crate) fn inspect_required(
             kind,
             anchor_run_id,
             identity,
-            repository_root,
-            producer_sha256,
+            &current,
         );
         statuses.push(match result {
             Ok(digest) => ExternalEvidenceStatus {
@@ -718,8 +748,7 @@ fn inspect_artifact(
     kind: ExternalEvidenceKind,
     anchor_run_id: &str,
     identity: &EvidenceIdentity,
-    repository_root: &Path,
-    producer_sha256: &str,
+    current: &CurrentEvidenceContext<'_>,
 ) -> Result<String, (ExternalEvidenceStatusKind, String)> {
     let metadata = std::fs::metadata(path).map_err(|error| {
         (
@@ -754,8 +783,14 @@ fn inspect_artifact(
     })?;
     validate_contract(&payload, kind, anchor_run_id, identity)
         .map_err(|reason| (ExternalEvidenceStatusKind::IdentityMismatched, reason))?;
-    validate_current(&payload, kind, repository_root, producer_sha256)
-        .map_err(|reason| (ExternalEvidenceStatusKind::Stale, reason))?;
+    validate_current(
+        &payload,
+        kind,
+        current.repository_root,
+        current.producer_sha256,
+        current.golden_requirement,
+    )
+    .map_err(|reason| (ExternalEvidenceStatusKind::Stale, reason))?;
     validate_semantics(&payload, kind)
         .map_err(|reason| (ExternalEvidenceStatusKind::Invalid, reason))?;
     if kind == ExternalEvidenceKind::OperatorReviewedCapabilityReport {
@@ -802,6 +837,7 @@ fn validate_current(
     kind: ExternalEvidenceKind,
     repository_root: &Path,
     producer_sha256: &str,
+    golden_requirement: Option<&GoldenEvidenceRequirement>,
 ) -> Result<(), String> {
     if payload.producer_sha256 != producer_sha256 {
         return Err("artifact was produced by a stale Alpine binary".to_owned());
@@ -809,6 +845,12 @@ fn validate_current(
     if kind == ExternalEvidenceKind::GoldenAgentTaskPass {
         let evidence: GoldenAgentEvidence = serde_json::from_value(payload.evidence.clone())
             .map_err(|error| format!("invalid golden-agent evidence: {error}"))?;
+        if !valid_golden_task_id(&evidence.task_id) {
+            return Err("golden-agent evidence task id is invalid".to_owned());
+        }
+        if let Some(requirement) = golden_requirement {
+            validate_golden_requirement(&evidence, requirement)?;
+        }
         let task_root = repository_root
             .join("benchmarks/golden")
             .join(&evidence.task_id);
@@ -823,17 +865,60 @@ fn validate_current(
         if tree_sha256(&task_root, &files)? != evidence.suite_sha256 {
             return Err("golden task suite identity is stale".to_owned());
         }
+        let task_path = task_root.join("task.json");
+        let task: Value = serde_json::from_slice(&std::fs::read(&task_path).map_err(|error| {
+            format!(
+                "golden task contract is unavailable at {}: {error}",
+                task_path.display()
+            )
+        })?)
+        .map_err(|error| format!("golden task contract is invalid: {error}"))?;
+        let capabilities: Vec<crate::golden::GoldenCapability> = serde_json::from_value(
+            task.get("capabilities")
+                .cloned()
+                .ok_or_else(|| "golden task capabilities are missing".to_owned())?,
+        )
+        .map_err(|error| format!("golden task capabilities are invalid: {error}"))?;
+        if task.get("schema").and_then(Value::as_u64) != Some(2)
+            || task.get("visibility").and_then(Value::as_str) != Some("public")
+            || capabilities != evidence.capabilities
+        {
+            return Err(
+                "golden-agent evidence capabilities do not match the public task".to_owned(),
+            );
+        }
+        let required_failure_count = task
+            .pointer("/trace_gate/expected_failure/exact_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if evidence.required_failure_matches != required_failure_count {
+            return Err(
+                "golden-agent evidence does not match the current required failure effect"
+                    .to_owned(),
+            );
+        }
         let current_opencode = crate::process::resolve_executable("opencode")
             .ok_or_else(|| "OpenCode executable is unavailable".to_owned())?;
-        let current_opencode = std::fs::canonicalize(&current_opencode)
-            .map_err(|error| format!("failed to resolve OpenCode executable: {error}"))?;
-        let recorded_opencode = std::fs::canonicalize(&evidence.opencode_path)
-            .map_err(|error| format!("recorded OpenCode executable is unavailable: {error}"))?;
-        if current_opencode != recorded_opencode
-            || sha256_file(&current_opencode)? != evidence.opencode_sha256
-        {
-            return Err("golden-agent OpenCode executable identity is stale".to_owned());
-        }
+        validate_executable_identity(
+            &current_opencode,
+            &evidence.opencode_path,
+            &evidence.opencode_sha256,
+            "OpenCode",
+        )?;
+        let test_command = task
+            .get("test_command")
+            .and_then(Value::as_array)
+            .and_then(|values| values.first())
+            .and_then(Value::as_str)
+            .ok_or_else(|| "golden task test executable is missing".to_owned())?;
+        let current_test = crate::process::resolve_executable(test_command)
+            .ok_or_else(|| "golden task test executable is unavailable".to_owned())?;
+        validate_executable_identity(
+            &current_test,
+            &evidence.test_executable_path,
+            &evidence.test_executable_sha256,
+            "test",
+        )?;
     }
     if kind == ExternalEvidenceKind::RollbackProfileAvailable {
         let evidence: RollbackProfileEvidence = serde_json::from_value(payload.evidence.clone())
@@ -879,6 +964,45 @@ fn validate_current(
                     .to_owned(),
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_golden_requirement(
+    evidence: &GoldenAgentEvidence,
+    requirement: &GoldenEvidenceRequirement,
+) -> Result<(), String> {
+    let required = requirement
+        .required_capabilities
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let observed = evidence
+        .capabilities
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if evidence.task_id != requirement.task_id || !required.is_subset(&observed) {
+        return Err(format!(
+            "golden-agent evidence does not satisfy required task '{}' and capabilities",
+            requirement.task_id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_executable_identity(
+    current: &Path,
+    recorded: &Path,
+    recorded_sha256: &str,
+    label: &str,
+) -> Result<(), String> {
+    let current = std::fs::canonicalize(current)
+        .map_err(|error| format!("failed to resolve golden {label} executable: {error}"))?;
+    let recorded = std::fs::canonicalize(recorded)
+        .map_err(|error| format!("recorded golden {label} executable is unavailable: {error}"))?;
+    if current != recorded || sha256_file(&current)? != recorded_sha256 {
+        return Err(format!("golden-agent {label} executable identity is stale"));
     }
     Ok(())
 }
@@ -1312,14 +1436,22 @@ fn validate_golden_agent(value: &Value) -> Result<(), String> {
         &evidence.opencode_sha256,
         &evidence.harness_policy_sha256,
         &evidence.effective_config_sha256,
+        &evidence.test_executable_sha256,
         &evidence.agent_stdout_sha256,
         &evidence.agent_stderr_sha256,
         &evidence.tests_stdout_sha256,
         &evidence.tests_stderr_sha256,
     ];
-    if evidence.schema != 1
-        || evidence.task_id.trim().is_empty()
+    if evidence.schema != 3
+        || !valid_golden_task_id(&evidence.task_id)
+        || evidence.capabilities.is_empty()
+        || evidence.capabilities.iter().collect::<BTreeSet<_>>().len()
+            != evidence.capabilities.len()
+        || evidence.tool_calls == 0
+        || evidence.tool_failures > evidence.tool_calls
+        || evidence.required_failure_matches > evidence.tool_failures
         || !evidence.opencode_path.is_absolute()
+        || !evidence.test_executable_path.is_absolute()
         || hashes.into_iter().any(|hash| !is_sha256(hash))
         || evidence.agent_exit_code != 0
         || evidence.tests_exit_code != 0
@@ -1338,6 +1470,13 @@ fn validate_golden_agent(value: &Value) -> Result<(), String> {
         return Err("golden-agent protected path evidence is malformed".to_owned());
     }
     Ok(())
+}
+
+fn valid_golden_task_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
 }
 
 fn validate_rollback_profile(value: &Value) -> Result<(), String> {
@@ -1642,13 +1781,19 @@ mod tests {
     fn golden_agent() -> GoldenAgentEvidence {
         let protected = BTreeMap::from([("tests/test_ranges.py".to_owned(), "a".repeat(64))]);
         GoldenAgentEvidence {
-            schema: 1,
+            schema: 3,
             task_id: "python-off-by-one".to_owned(),
+            capabilities: vec![crate::golden::GoldenCapability::SingleFileRepair],
+            tool_calls: 2,
+            tool_failures: 0,
+            required_failure_matches: 0,
             suite_sha256: "b".repeat(64),
             opencode_path: PathBuf::from(r"C:\fixture\opencode.cmd"),
             opencode_sha256: "c".repeat(64),
             harness_policy_sha256: "3".repeat(64),
             effective_config_sha256: "d".repeat(64),
+            test_executable_path: PathBuf::from(r"C:\fixture\python.exe"),
+            test_executable_sha256: "4".repeat(64),
             agent_exit_code: 0,
             tests_exit_code: 0,
             protected_before: protected.clone(),
@@ -1782,6 +1927,43 @@ mod tests {
             .unexpected_files
             .push("unrequested.txt".to_owned());
         assert!(validate_golden_agent(&serde_json::to_value(unexpected).unwrap()).is_err());
+
+        let mut traversal = golden_agent();
+        traversal.task_id = "../outside".to_owned();
+        assert!(validate_golden_agent(&serde_json::to_value(traversal).unwrap()).is_err());
+
+        let mut impossible_failure_count = golden_agent();
+        impossible_failure_count.required_failure_matches = 1;
+        assert!(
+            validate_golden_agent(&serde_json::to_value(impossible_failure_count).unwrap())
+                .is_err()
+        );
+
+        let requirement = GoldenEvidenceRequirement {
+            task_id: "public-v1".to_owned(),
+            required_capabilities: vec![
+                crate::golden::GoldenCapability::MultiFileTddRepair,
+                crate::golden::GoldenCapability::ToolErrorRecovery,
+                crate::golden::GoldenCapability::ConstraintRetention,
+            ],
+        };
+        assert!(validate_golden_requirement(&golden_agent(), &requirement).is_err());
+
+        let mut stale_runner = golden_agent();
+        stale_runner.test_executable_sha256 = "9".repeat(64);
+        assert!(validate_golden_agent(&serde_json::to_value(stale_runner).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn golden_test_executable_identity_detects_tampering() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("python-fixture.exe");
+        std::fs::write(&executable, b"first identity").unwrap();
+        let digest = sha256_file(&executable).unwrap();
+        validate_executable_identity(&executable, &executable, &digest, "test").unwrap();
+
+        std::fs::write(&executable, b"tampered identity").unwrap();
+        assert!(validate_executable_identity(&executable, &executable, &digest, "test").is_err());
     }
 
     #[test]

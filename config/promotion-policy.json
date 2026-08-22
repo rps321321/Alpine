@@ -1,5 +1,5 @@
 {
-  "schema": 3,
+  "schema": 4,
   "lifecycle": ["experimental", "candidate", "validated", "production"],
   "gates": {
     "candidate": {
@@ -13,12 +13,22 @@
         "repeat-code-256": "decode-tps",
         "structured-json-128": "decode-tps"
       },
+      "general_score_workloads": ["prefill-4k", "novel-256", "structured-json-128"],
+      "repeated_specialization_workloads": ["repeat-code-256"],
       "maximum_performance_coefficient_of_variation": 0.10,
       "maximum_median_performance_regression_fraction": 0.10,
       "minimum_tuning_selection_improvement_fraction": 0.03
     },
     "validated": {
       "inherits": "candidate",
+      "golden_evidence": {
+        "task_id": "public-v1",
+        "required_capabilities": [
+          "multi-file-tdd-repair",
+          "tool-error-recovery",
+          "constraint-retention"
+        ]
+      },
       "requires_external_evidence": [
         "same-process-50-request-greedy-stability",
         "ten-clean-restart-greedy-stability",

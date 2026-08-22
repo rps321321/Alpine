@@ -44,7 +44,7 @@ pub use external::{
     ExternalEvidenceStatus, ExternalEvidenceStatusKind, OperatorReviewOptions,
     PublicCapabilityReviewFacts, RecordedExternalEvidence,
 };
-pub use golden::{GoldenAgentOptions, GoldenAgentReport};
+pub use golden::{GoldenAgentOptions, GoldenAgentReport, GoldenCapability};
 pub use hardware::{HardwareReport, HardwareSnapshot};
 pub use harness_benchmark::{HarnessBenchmarkOptions, HarnessBenchmarkReport, HarnessSample};
 pub use identity::runtime_bundle_sha256;

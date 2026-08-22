@@ -79,12 +79,14 @@ struct SessionState {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkloadSuite {
     schema: u32,
     workloads: Vec<WorkloadDefinition>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkloadDefinition {
     id: String,
     prompt_file: PathBuf,
@@ -96,17 +98,34 @@ struct WorkloadDefinition {
     quality: QualityCheck,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum QualityCheck {
-    Json,
-    Nonempty,
+    MechanicalResponse,
+    ExactCopy {
+        expected_file: PathBuf,
+        expected_sha256: String,
+        terminal_newline: TerminalNewlinePolicy,
+    },
+    StructuredJson {
+        safe: bool,
+        files: Vec<String>,
+        maximum_reason_words: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum TerminalNewlinePolicy {
+    Required,
+    Forbidden,
 }
 
 #[derive(Debug, Clone)]
 struct Workload {
     definition: WorkloadDefinition,
     prompt: String,
+    expected_exact_payload: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -303,7 +322,7 @@ fn prepare(options: &MicrobenchmarkOptions) -> Result<PreparedExperiment, String
 
     let benchmark_configuration = json!({
         "name": "micro",
-        "schema": 2,
+        "schema": 3,
         "sha256": workload_identity,
         "files": workload_files,
         "workloads": if options.workloads.is_empty() { json!("all") } else { json!(options.workloads) },
@@ -430,7 +449,11 @@ fn execute(
             };
             let completion =
                 stream_completion(&agent, &prepared.resolved.base_url, &api_key, workload)?;
-            let quality_pass = quality_pass(&completion.content, workload.definition.quality);
+            let quality_pass = quality_pass(
+                &completion.content,
+                &workload.definition.quality,
+                workload.expected_exact_payload.as_deref(),
+            );
             let raw = completion_json(&completion, workload, iteration, warmup, quality_pass);
             writer.record_sample(
                 &prepared.run_id,
@@ -659,9 +682,9 @@ fn load_workloads(
     let root = repository_root.join("benchmarks/micro");
     let definition_path = root.join("workloads.json");
     let suite: WorkloadSuite = read_json(&definition_path, "microbenchmark suite")?;
-    if suite.schema != 2 {
+    if suite.schema != 3 {
         return Err(format!(
-            "unsupported microbenchmark schema {}; expected 2",
+            "unsupported microbenchmark schema {}; expected 3",
             suite.schema
         ));
     }
@@ -689,10 +712,57 @@ fn load_workloads(
         }
         let base_prompt = std::fs::read_to_string(&prompt_path)
             .map_err(|error| format!("failed to read prompt {}: {error}", prompt_path.display()))?;
+        let base_prompt = normalize_prompt_line_endings(&base_prompt, &definition.id)?;
         let repeat = usize::try_from(definition.repeat)
             .map_err(|_| format!("workload {} repeat is too large", definition.id))?;
         let prompt = base_prompt.repeat(repeat);
-        workloads.push(Workload { definition, prompt });
+        let expected_exact_payload = match &definition.quality {
+            QualityCheck::ExactCopy {
+                expected_file,
+                expected_sha256,
+                terminal_newline,
+            } => {
+                let expected_path = root.join(expected_file);
+                files.push(expected_path.clone());
+                let payload = std::fs::read(&expected_path).map_err(|error| {
+                    format!(
+                        "failed to read exact-copy payload {}: {error}",
+                        expected_path.display()
+                    )
+                })?;
+                if sha256_bytes(&payload) != *expected_sha256 {
+                    return Err(format!(
+                        "workload {} exact-copy payload digest is stale",
+                        definition.id
+                    ));
+                }
+                if !terminal_newline.matches(&payload) {
+                    return Err(format!(
+                        "workload {} exact-copy payload violates its terminal newline policy",
+                        definition.id
+                    ));
+                }
+                let expected_text = std::str::from_utf8(&payload).map_err(|error| {
+                    format!(
+                        "workload {} exact-copy payload must be UTF-8: {error}",
+                        definition.id
+                    )
+                })?;
+                if !prompt.contains(expected_text) {
+                    return Err(format!(
+                        "workload {} exact-copy payload is not embedded exactly in its normalized prompt",
+                        definition.id
+                    ));
+                }
+                Some(payload)
+            }
+            _ => None,
+        };
+        workloads.push(Workload {
+            definition,
+            prompt,
+            expected_exact_payload,
+        });
     }
     if workloads.is_empty() {
         return Err("no microbenchmark workloads matched the selection".to_owned());
@@ -710,6 +780,16 @@ fn load_workloads(
         })
         .collect();
     Ok((workloads, identity, file_names))
+}
+
+fn normalize_prompt_line_endings(value: &str, workload: &str) -> Result<String, String> {
+    let normalized = value.replace("\r\n", "\n");
+    if normalized.contains('\r') {
+        return Err(format!(
+            "workload {workload} prompt contains an unsupported bare carriage return"
+        ));
+    }
+    Ok(normalized)
 }
 
 pub(crate) fn current_microbenchmark_identity(
@@ -745,6 +825,48 @@ fn validate_workload(workload: &WorkloadDefinition) -> Result<(), String> {
             "workload {} prompt path must stay inside the suite",
             workload.id
         ));
+    }
+    match &workload.quality {
+        QualityCheck::MechanicalResponse => {}
+        QualityCheck::ExactCopy {
+            expected_file,
+            expected_sha256,
+            ..
+        } => {
+            if workload.repeat != 1 || workload.ignore_eos {
+                return Err(format!(
+                    "workload {} exact-copy contract requires repeat=1 and ignore_eos=false",
+                    workload.id
+                ));
+            }
+            if expected_file.is_absolute()
+                || expected_file
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return Err(format!(
+                    "workload {} exact-copy payload path must stay inside the suite",
+                    workload.id
+                ));
+            }
+            require_sha256("exact-copy payload", expected_sha256)?;
+        }
+        QualityCheck::StructuredJson {
+            files,
+            maximum_reason_words,
+            ..
+        } => {
+            if files.len() != 2
+                || files.iter().any(|value| value.trim().is_empty())
+                || files[0] == files[1]
+                || !(1..=8).contains(maximum_reason_words)
+            {
+                return Err(format!(
+                    "workload {} structured JSON contract is incomplete or out of bounds",
+                    workload.id
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -929,20 +1051,42 @@ fn verify_health(agent: &ureq::Agent, base_url: &str, api_key: &str) -> Result<(
     }
 }
 
-fn quality_pass(content: &str, check: QualityCheck) -> bool {
+impl TerminalNewlinePolicy {
+    fn matches(self, payload: &[u8]) -> bool {
+        match self {
+            Self::Required => payload.ends_with(b"\n") && !payload.ends_with(b"\n\n"),
+            Self::Forbidden => !payload.ends_with(b"\n"),
+        }
+    }
+}
+
+fn quality_pass(content: &str, check: &QualityCheck, expected_exact: Option<&[u8]>) -> bool {
     match check {
-        QualityCheck::Nonempty => !content.trim().is_empty(),
-        QualityCheck::Json => serde_json::from_str::<Value>(content).is_ok_and(|value| {
+        QualityCheck::MechanicalResponse => !content.trim().is_empty(),
+        QualityCheck::ExactCopy {
+            expected_sha256,
+            terminal_newline,
+            ..
+        } => expected_exact.is_some_and(|expected| {
+            content.as_bytes() == expected
+                && sha256_bytes(content.as_bytes()) == *expected_sha256
+                && terminal_newline.matches(content.as_bytes())
+        }),
+        QualityCheck::StructuredJson {
+            safe,
+            files,
+            maximum_reason_words,
+        } => serde_json::from_str::<Value>(content).is_ok_and(|value| {
             let Some(object) = value.as_object() else {
                 return false;
             };
+            let reason = object.get("reason").and_then(Value::as_str);
             object.len() == 3
-                && object.get("safe").is_some_and(Value::is_boolean)
-                && object.get("reason").is_some_and(Value::is_string)
-                && object.get("files").is_some_and(|files| {
-                    files
-                        .as_array()
-                        .is_some_and(|items| items.len() == 2 && items.iter().all(Value::is_string))
+                && object.get("safe") == Some(&Value::Bool(*safe))
+                && object.get("files") == serde_json::to_value(files).ok().as_ref()
+                && reason.is_some_and(|reason| {
+                    let words = reason.split_whitespace().count();
+                    (1..=*maximum_reason_words).contains(&words)
                 })
         }),
     }
@@ -1090,14 +1234,67 @@ mod tests {
 
     #[test]
     fn structured_quality_requires_the_exact_contract() {
+        let check = QualityCheck::StructuredJson {
+            safe: true,
+            files: vec!["src/main.py".to_owned(), "tests/test_main.py".to_owned()],
+            maximum_reason_words: 8,
+        };
         assert!(quality_pass(
-            r#"{"safe":true,"files":["a","b"],"reason":"ok"}"#,
-            QualityCheck::Json
+            r#"{"safe":true,"files":["src/main.py","tests/test_main.py"],"reason":"looks safe"}"#,
+            &check,
+            None,
         ));
         assert!(!quality_pass(
-            r#"{"safe":true,"files":["a"],"reason":"ok"}"#,
-            QualityCheck::Json
+            r#"{"safe":false,"files":["src/main.py","tests/test_main.py"],"reason":"looks safe"}"#,
+            &check,
+            None,
         ));
+        assert!(!quality_pass(
+            r#"{"safe":true,"files":["src/main.py","tests/test_main.py"],"reason":"one two three four five six seven eight nine"}"#,
+            &check,
+            None,
+        ));
+        assert!(!quality_pass(
+            r#"{"safe":true,"files":["src/wrong.py","tests/test_main.py"],"reason":"looks safe"}"#,
+            &check,
+            None,
+        ));
+        assert!(!quality_pass(
+            r#"{"safe":true,"files":["src/main.py","tests/test_main.py"],"reason":"looks safe","extra":true}"#,
+            &check,
+            None,
+        ));
+    }
+
+    #[test]
+    fn exact_copy_quality_is_byte_exact_and_enforces_newline_policy() {
+        let expected = b"fn exact() {}\n";
+        let check = QualityCheck::ExactCopy {
+            expected_file: PathBuf::from("expected.txt"),
+            expected_sha256: sha256_bytes(expected),
+            terminal_newline: TerminalNewlinePolicy::Required,
+        };
+        assert!(quality_pass("fn exact() {}\n", &check, Some(expected)));
+        assert!(!quality_pass("fn exact() {}", &check, Some(expected)));
+        assert!(!quality_pass("anything nonempty\n", &check, Some(expected)));
+    }
+
+    #[test]
+    fn prompt_line_endings_are_normalized_before_exact_copy_comparison() {
+        assert_eq!(
+            normalize_prompt_line_endings("source\r\nline\r\n", "fixture").unwrap(),
+            "source\nline\n"
+        );
+        assert!(normalize_prompt_line_endings("source\rline", "fixture").is_err());
+    }
+
+    #[test]
+    fn checked_in_microbenchmark_suite_is_self_consistent() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (workloads, identity, files) = load_workloads(root, &[]).unwrap();
+        assert_eq!(workloads.len(), 4);
+        assert_eq!(identity.len(), 64);
+        assert!(files.iter().any(|path| path == "expected/repeat-code.txt"));
     }
 
     #[test]

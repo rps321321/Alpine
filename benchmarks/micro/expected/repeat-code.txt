@@ -1,5 +1,3 @@
-Reproduce the source below exactly, without a fence or explanation. Include exactly one trailing LF after the final closing brace.
-SOURCE:
 function normalizePath(input) {
   const slashes = input.replaceAll('\\', '/');
   const parts = slashes.split('/');
@@ -17,6 +15,3 @@ function isInsideWorkspace(workspace, candidate) {
   const path = normalizePath(candidate).toLowerCase();
   return path === root || path.startsWith(root + '/');
 }
-END SOURCE
-COPY:
-
