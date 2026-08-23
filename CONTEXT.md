@@ -210,6 +210,14 @@ _Avoid_: benchmark, qualification, guaranteed fit, recommendation without uncert
 The contextual Alpine Desktop side panel used to inspect local web artifacts. Displaying a URL does not grant authenticated browser authority or host-action consent.
 _Avoid_: trusted browser session, Chrome profile, unrestricted web tool
 
+**Desktop UI Preference**:
+A non-authoritative machine-local presentation choice such as whether the project rail or Context Panel is open. It may use webview-local storage because it grants no project, model, browser or execution authority.
+_Avoid_: application state, project permission, durable Task fact
+
+**Compute Device Summary**:
+A first-launch inventory of compute devices the trusted host can identify for local-model work. Device presence and capacity may inform a Model Assessment but do not prove placement, speed, model fit or Windows graphics scheduling.
+_Avoid_: GPU recommendation, iGPU assignment, measured placement, Qualification evidence
+
 **Inference Server**:
 The local process that loads weights and serves an OpenAI-compatible API on localhost.
 _Avoid_: the model (when you mean the process), runtime (when you mean this specific server)

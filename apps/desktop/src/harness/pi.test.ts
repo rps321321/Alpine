@@ -21,6 +21,7 @@ describe("Pi harness adapter", () => {
       baseUrl: "http://127.0.0.1:8080/v1",
       contextWindow: 16_384,
       maxTokens: 2_048,
+      input: ["text"],
     });
   });
 

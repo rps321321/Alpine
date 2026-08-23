@@ -7,6 +7,17 @@ export interface HardwareProfile {
   gpu: string | null;
   vramBytes: number;
   driver: string | null;
+  platform: string;
+  architecture: string;
+  osVersion: string | null;
+  physicalCores: number | null;
+  logicalProcessors: number;
+  computeDevices: Array<{
+    name: string;
+    memoryBytes: number;
+    driver: string;
+    backend: "cuda";
+  }>;
 }
 
 export interface ModelSelection {
@@ -439,6 +450,17 @@ export const previewDesktopClient: DesktopClient = {
         gpu: "NVIDIA GeForce RTX 4090",
         vramBytes: 24 * gib,
         driver: "591.74",
+        platform: "windows",
+        architecture: "x86_64",
+        osVersion: "11",
+        physicalCores: 16,
+        logicalProcessors: 32,
+        computeDevices: [{
+          name: "NVIDIA GeForce RTX 4090",
+          memoryBytes: 24 * gib,
+          driver: "591.74",
+          backend: "cuda",
+        }],
       },
       settings: {
         schema: 2,

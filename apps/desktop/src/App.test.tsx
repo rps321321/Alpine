@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -13,6 +13,17 @@ function client(): DesktopClient {
         gpu: "NVIDIA GeForce RTX 4090",
         vramBytes: 25_769_803_776,
         driver: "591.74",
+        platform: "windows",
+        architecture: "x86_64",
+        osVersion: "11",
+        physicalCores: 16,
+        logicalProcessors: 32,
+        computeDevices: [{
+          name: "NVIDIA GeForce RTX 4090",
+          memoryBytes: 25_769_803_776,
+          driver: "591.74",
+          backend: "cuda" as const,
+        }],
       },
       settings: {
         schema: 2,
@@ -147,6 +158,109 @@ function client(): DesktopClient {
 }
 
 describe("Alpine Desktop primary workflow", () => {
+  it("keeps project management in a collapsible left rail and lets either rail get out of the way", async () => {
+    const desktop = client();
+    const project = { id: "project-1", name: "Alpine", root: "C:\\workspace\\Alpine", createdAtMs: 1, lastOpenedAtMs: 2 };
+    vi.mocked(desktop.listProjects).mockResolvedValue([project]);
+    const user = userEvent.setup();
+
+    const first = render(<App desktop={desktop} />);
+    await screen.findByText("NVIDIA GeForce RTX 4090");
+    expect(screen.getByText("windows 11 · x86_64")).toBeVisible();
+    expect(screen.getByText("16 cores · 32 logical processors")).toBeVisible();
+    expect(screen.getByText(/Windows chooses interface graphics/)).toBeVisible();
+
+    const projectMenu = await screen.findByRole("button", { name: "Alpine project menu" });
+    await user.click(projectMenu);
+    expect(screen.getByRole("menu", { name: "Projects" })).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: "Add project" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Hide projects" }));
+    expect(screen.getByRole("button", { name: "Show projects" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("navigation", { name: "Workspace" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Hide inspector" }));
+    expect(screen.getByRole("button", { name: "Show inspector" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("complementary", { name: "Context inspector" })).not.toBeInTheDocument();
+
+    first.unmount();
+    render(<App desktop={desktop} />);
+    expect(screen.getByRole("button", { name: "Show projects" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Show inspector" })).toBeVisible();
+  });
+
+  it("combines discovery and local downloads into one model library", async () => {
+    const desktop = client();
+    vi.mocked(desktop.listDownloads).mockResolvedValue([
+      { filename: "Qwen3.8-27B-Q4_K_M.gguf", sizeBytes: 17_448_304_640, state: "installed", source: "hugging-face", repoId: "Blackfrost/Qwen3.8-27B", revision: "a".repeat(40), sha256: "b".repeat(64), localPath: "C:\\models\\qwen.gguf" },
+      { filename: "Llama-3.3-8B-Q5_K_M.gguf", sizeBytes: 6_123_456_789, state: "installed", source: "import", repoId: null, revision: null, sha256: "c".repeat(64), localPath: "C:\\models\\llama.gguf" },
+    ]);
+    const user = userEvent.setup();
+
+    render(<App desktop={desktop} />);
+    await screen.findByText("NVIDIA GeForce RTX 4090");
+    await user.click(screen.getByRole("button", { name: "Models" }));
+
+    expect(screen.queryByRole("button", { name: "Downloads" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Model library" })).toBeVisible();
+    expect(screen.getAllByText("Qwen3.8-27B-Q4_K_M.gguf")).not.toHaveLength(0);
+    expect(screen.getAllByText("Llama-3.3-8B-Q5_K_M.gguf")).not.toHaveLength(0);
+
+    const selector = screen.getByRole("combobox", { name: "Model for new tasks" });
+    expect(selector).toHaveDisplayValue("Not selected");
+    await user.selectOptions(selector, "Qwen3.8-27B-Q4_K_M.gguf");
+    await waitFor(() => expect(desktop.setDefaultModel).toHaveBeenCalledWith({
+      repoId: "Blackfrost/Qwen3.8-27B",
+      filename: "Qwen3.8-27B-Q4_K_M.gguf",
+    }));
+  });
+
+  it("uses the composer add control for attachments and opens previews beside the task", async () => {
+    const user = userEvent.setup();
+    render(<App desktop={client()} />);
+    await screen.findByText("NVIDIA GeForce RTX 4090");
+
+    await user.click(screen.getByRole("button", { name: "Add attachment or tool" }));
+    expect(screen.getByRole("menu", { name: "Add to task" })).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: /Attach image/ })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: /Attach PDF/ })).toBeDisabled();
+    expect(screen.getByText("Current model is text-only")).toBeVisible();
+    expect(screen.queryByRole("menuitem", { name: /project/i })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu", { name: "Add to task" })).not.toBeInTheDocument();
+
+    expect(screen.queryByRole("button", { name: "Browser" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(screen.getByRole("textbox", { name: "Preview address" })).toHaveValue("http://127.0.0.1:4173");
+    await user.click(screen.getByRole("button", { name: "Open preview" }));
+    expect(screen.getByTitle("Browser preview")).toHaveAttribute("src", "http://127.0.0.1:4173/");
+    expect(screen.getByRole("heading", { name: "What should we build?" })).toBeVisible();
+  });
+
+  it("ignores a slower stale model search response", async () => {
+    const desktop = client();
+    let resolveFirst!: (models: Awaited<ReturnType<DesktopClient["searchModels"]>>) => void;
+    vi.mocked(desktop.searchModels)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce([{ id: "New/Result-GGUF", revision: "d".repeat(40), publisher: "New", downloads: 2, likes: 1, lastModified: null, gated: false, artifacts: [] }]);
+    const user = userEvent.setup();
+
+    render(<App desktop={desktop} />);
+    await screen.findByText("NVIDIA GeForce RTX 4090");
+    await user.click(screen.getByRole("button", { name: "Models" }));
+    const search = screen.getByRole("searchbox", { name: "Search Hugging Face" });
+    await user.clear(search);
+    await user.type(search, "old");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.clear(search);
+    await user.type(search, "new");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+
+    expect(await screen.findByText("New/Result-GGUF")).toBeVisible();
+    resolveFirst([{ id: "Old/Result-GGUF", revision: "e".repeat(40), publisher: "Old", downloads: 1, likes: 0, lastModified: null, gated: false, artifacts: [] }]);
+    await waitFor(() => expect(screen.queryByText("Old/Result-GGUF")).not.toBeInTheDocument());
+  });
+
   it("moves from live hardware to a default model without implying qualification", async () => {
     const desktop = client();
     vi.mocked(desktop.listDownloads)
@@ -161,16 +275,16 @@ describe("Alpine Desktop primary workflow", () => {
     await user.click(screen.getByRole("button", { name: "Search" }));
     await user.click(await screen.findByRole("button", { name: /Qwen3\.5-9B-GGUF/i }));
 
-    expect(await screen.findByText("Estimate — run analysis to measure")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Download before selecting" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Download model" }));
+    expect(await screen.findByText("Estimate, not a performance result.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Download first" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Download" }));
     expect(await screen.findByText("Saved 5.7 GB")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Set as default" }));
+    await user.click(screen.getByRole("button", { name: "Use for new tasks" }));
     expect(desktop.setDefaultModel).toHaveBeenCalledWith({
       repoId: "Qwen/Qwen3.5-9B-GGUF",
       filename: "Qwen3.5-9B-Q4_K_M.gguf",
     });
-    expect(await screen.findByText("Default for new tasks")).toBeVisible();
+    expect(await screen.findByText("Used for new tasks")).toBeVisible();
 
     expect(desktop.downloadModel).toHaveBeenCalledWith(
       {
@@ -194,10 +308,14 @@ describe("Alpine Desktop primary workflow", () => {
     expect(screen.getByText("Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Browser" }));
-    expect(screen.getByRole("textbox", { name: "Browser address" })).toHaveValue(
+    expect(screen.getByText("Local addresses only")).toBeVisible();
+    expect(screen.getByText("Not enabled")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(screen.getByRole("textbox", { name: "Preview address" })).toHaveValue(
       "http://127.0.0.1:4173",
     );
-    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("button", { name: "Open preview" }));
     expect(screen.getByTitle("Browser preview")).toHaveAttribute(
       "src",
       "http://127.0.0.1:4173/",
@@ -213,7 +331,7 @@ describe("Alpine Desktop primary workflow", () => {
 
     expect(
       screen.getByText(
-        "Select the active runtime model in Settings, or configure the downloaded artifact in Alpine first.",
+        "Choose the same model in Settings that the local runtime is using.",
       ),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "Run measured diagnostic" })).toBeDisabled();

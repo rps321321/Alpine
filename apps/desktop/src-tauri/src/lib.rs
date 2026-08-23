@@ -84,6 +84,21 @@ struct HardwareProfile {
     gpu: Option<String>,
     vram_bytes: u64,
     driver: Option<String>,
+    platform: String,
+    architecture: String,
+    os_version: Option<String>,
+    physical_cores: Option<usize>,
+    logical_processors: usize,
+    compute_devices: Vec<ComputeDevice>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComputeDevice {
+    name: String,
+    memory_bytes: u64,
+    driver: String,
+    backend: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -234,6 +249,17 @@ fn capture_capacity() -> Result<(HardwareProfile, HardwareCapacity), String> {
     let vram_bytes = primary_gpu
         .map(|gpu| gpu.vram_mib.saturating_mul(1024 * 1024))
         .unwrap_or(0);
+    let compute_devices = report
+        .snapshot
+        .nvidia_gpus
+        .iter()
+        .map(|gpu| ComputeDevice {
+            name: gpu.name.clone(),
+            memory_bytes: gpu.vram_mib.saturating_mul(1024 * 1024),
+            driver: gpu.driver_version.clone(),
+            backend: "cuda",
+        })
+        .collect();
     Ok((
         HardwareProfile {
             cpu: report.snapshot.cpu.brand,
@@ -241,6 +267,12 @@ fn capture_capacity() -> Result<(HardwareProfile, HardwareCapacity), String> {
             gpu: primary_gpu.map(|gpu| gpu.name.clone()),
             vram_bytes,
             driver: primary_gpu.map(|gpu| gpu.driver_version.clone()),
+            platform: report.snapshot.platform.os,
+            architecture: report.snapshot.platform.architecture,
+            os_version: report.snapshot.platform.os_version,
+            physical_cores: report.snapshot.cpu.physical_cores,
+            logical_processors: report.snapshot.cpu.logical_processors,
+            compute_devices,
         },
         HardwareCapacity {
             total_memory_bytes: report.snapshot.physical_memory_bytes,
