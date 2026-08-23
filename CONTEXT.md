@@ -158,6 +158,14 @@ _Avoid_: hard-coded 8100, scattered ports, mutable marketing names as provenance
 OpenCode, pointed at a configurable local OpenAI-compatible endpoint. The only path from model output to host actions.
 _Avoid_: wrapper, frontend, chatbot, Cline, protocol bridge
 
+**Agent Engine Candidate**:
+A source-pinned, untrusted and disposable worker seam evaluated under Alpine-owned Evidence Identity, budgets, typed events/errors and exact Inference Session restoration. Candidate project, session, configuration and transcript stores never become Alpine authority.
+_Avoid_: second Harness, embedded authority, permanent generic protocol, candidate session as recovery truth
+
+**Agent Engine Bake-off**:
+The bounded headless comparison of reviewed Agent Engine Candidates. Alpine launches exact package-locked adapters from disposable roots, owns Evidence Identity and Session restoration, and turns candidate-native SDK/RPC/JSON observations into typed events and errors. Every required scenario is either demonstrated under identical material inputs or retained as an explicit typed failure. It is architecture evidence, not Qualification, Promotion or approval to absorb a dependency.
+_Avoid_: benchmark winner, production engine selection, fork approval, model qualification
+
 **Inference Server**:
 The local process that loads weights and serves an OpenAI-compatible API on localhost.
 _Avoid_: the model (when you mean the process), runtime (when you mean this specific server)

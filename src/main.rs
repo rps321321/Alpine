@@ -1,12 +1,12 @@
 use alpine_control_plane::{
-    AcquireSessionOptions, Alpine, BootstrapDeploymentOptions, BuildLauncherOptions,
-    CleanRestartStabilityOptions, EvaluationOptions, EvidencePhase, ExternalEvidenceKind,
-    GoldenAgentOptions, HarnessBenchmarkOptions, MicrobenchmarkOptions, NearLimitContextOptions,
-    OpenCodeOptions, OperatorReviewOptions, PackageRuntimeOptions, PromoteOptions,
-    PublicEvidenceOptions, RecordIncidentOptions, ReleaseSessionOptions, ResolveIncidentOptions,
-    RollbackDeploymentOptions, RollbackDisposition, RollbackProofOptions, RunQualificationOptions,
-    SameProcessStabilityOptions, SessionAcquisition, SetupOptions, SetupRuntime,
-    StartSessionOptions, StopSessionOptions, TuningDisposition, TuningOptions,
+    AcquireSessionOptions, AgentEngineBakeoffOptions, Alpine, BootstrapDeploymentOptions,
+    BuildLauncherOptions, CleanRestartStabilityOptions, EvaluationOptions, EvidencePhase,
+    ExternalEvidenceKind, GoldenAgentOptions, HarnessBenchmarkOptions, MicrobenchmarkOptions,
+    NearLimitContextOptions, OpenCodeOptions, OperatorReviewOptions, PackageRuntimeOptions,
+    PromoteOptions, PublicEvidenceOptions, RecordIncidentOptions, ReleaseSessionOptions,
+    ResolveIncidentOptions, RollbackDeploymentOptions, RollbackDisposition, RollbackProofOptions,
+    RunQualificationOptions, SameProcessStabilityOptions, SessionAcquisition, SetupOptions,
+    SetupRuntime, StartSessionOptions, StopSessionOptions, TuningDisposition, TuningOptions,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
@@ -422,6 +422,24 @@ enum Commands {
         runs: u32,
         #[arg(long, default_value_t = 600_000)]
         request_timeout_ms: u64,
+        #[arg(long)]
+        compact: bool,
+    },
+    AgentEngineBakeoff {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long, default_value_os_t = default_repository_root())]
+        repository_root: PathBuf,
+        #[arg(long, default_value_os_t = default_install_root())]
+        install_root: PathBuf,
+        #[arg(long)]
+        candidate_root: PathBuf,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, default_value_t = 15_000)]
+        lock_timeout_ms: u64,
+        #[arg(long, default_value_t = 600_000)]
+        startup_timeout_ms: u64,
         #[arg(long)]
         compact: bool,
     },
@@ -1082,6 +1100,37 @@ fn run(cli: Cli) -> Result<u8, Box<dyn std::error::Error>> {
                         && sample.tool_calls > 0
                         && sample.tool_failures == 0
                 }) {
+                    0
+                } else {
+                    2
+                },
+            )
+        }
+        Commands::AgentEngineBakeoff {
+            plan,
+            repository_root,
+            install_root,
+            candidate_root,
+            profile,
+            lock_timeout_ms,
+            startup_timeout_ms,
+            compact,
+        } => {
+            let report = Alpine::run_agent_engine_bakeoff(&AgentEngineBakeoffOptions {
+                plan,
+                repository_root,
+                install_root,
+                candidate_root,
+                profile,
+                lock_timeout: Duration::from_millis(lock_timeout_ms),
+                startup_timeout: Duration::from_millis(startup_timeout_ms),
+            })?;
+            write_json(&report, compact)?;
+            Ok(
+                if report.evidence_complete
+                    && report.all_prior_sessions_restored
+                    && report.all_scenarios_demonstrated
+                {
                     0
                 } else {
                     2

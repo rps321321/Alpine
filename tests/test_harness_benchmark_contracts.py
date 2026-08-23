@@ -7,6 +7,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FOCUS_TIMER = REPO_ROOT / "benchmarks" / "experiments" / "focus-timer.json"
+AGENT_ENGINE_BAKEOFF = REPO_ROOT / "config" / "agent-engine-bakeoff.json"
+AGENT_ENGINE_FIXTURE = (
+    REPO_ROOT / "benchmarks" / "agent-engine-bakeoff" / "public-v1" / "task.json"
+)
+AGENT_ENGINE_WORKER = REPO_ROOT / "scripts" / "agent-engine-bakeoff-worker.mjs"
 EXPECTED_PROMPT = (
     "Use write exactly once create index.html. tiny offline Focus Timer, circular 25-min "
     "countdown, Start/Pause Reset, completed-session localStorage. HARD LIMIT 90 nonblank "
@@ -15,6 +20,74 @@ EXPECTED_PROMPT = (
 
 
 class HarnessBenchmarkContractTests(unittest.TestCase):
+    def test_agent_engine_bakeoff_is_source_pinned_bounded_and_private(self) -> None:
+        plan = json.loads(AGENT_ENGINE_BAKEOFF.read_text(encoding="utf-8"))
+
+        self.assertEqual(plan["schema"], 1)
+        self.assertEqual(plan["id"], "agent-engine-bakeoff-v1")
+        self.assertEqual(
+            [candidate["id"] for candidate in plan["candidates"]],
+            [
+                "opencode-process",
+                "pi-sdk-core",
+                "pi-process-rpc",
+                "cline-agents",
+            ],
+        )
+        for candidate in plan["candidates"]:
+            source = candidate["source"]
+            self.assertEqual(len(source["commit"]), 40)
+            self.assertTrue(source["package_integrity"].startswith("sha512-"))
+            self.assertIn(source["license"], {"MIT", "Apache-2.0"})
+            self.assertTrue(candidate["smallest_missing_upstream_hook"])
+            self.assertFalse(candidate["security"]["built_in_sandbox"])
+
+        self.assertEqual(plan["budget"]["requests"], 24)
+        self.assertEqual(plan["budget"]["max_event_queue"], 128)
+        self.assertEqual(len(plan["required_scenarios"]), 11)
+        self.assertEqual(plan["inputs"]["profile"], "stable-16k")
+        self.assertEqual(plan["inputs"]["model_id"], "local-qwen")
+        self.assertEqual(plan["inputs"]["temperature"], 0)
+        self.assertEqual(
+            plan["inputs"]["fixture"],
+            "benchmarks/agent-engine-bakeoff/public-v1/task.json",
+        )
+        self.assertEqual(plan["recommendation"]["decision"], "no-go")
+        self.assertEqual(
+            [package["package"] for package in plan["supporting_packages"]],
+            ["@earendil-works/pi-ai"],
+        )
+        self.assertTrue(
+            plan["supporting_packages"][0]["package_integrity"].startswith("sha512-")
+        )
+        self.assertFalse(any(plan["privacy"].values()))
+        published = AGENT_ENGINE_BAKEOFF.read_text(encoding="utf-8")
+        self.assertNotIn("C:\\Users\\", published)
+        self.assertNotIn("api_key", published.lower())
+        self.assertNotIn('"prompt":', published.lower())
+        self.assertTrue(AGENT_ENGINE_FIXTURE.is_file())
+        worker = AGENT_ENGINE_WORKER.read_text(encoding="utf-8")
+        self.assertIn('request.candidate === "opencode-process"', worker)
+        self.assertIn('request.candidate === "pi-sdk-core"', worker)
+        self.assertIn('request.candidate === "pi-process-rpc"', worker)
+        self.assertIn('request.candidate === "cline-agents"', worker)
+        self.assertIn('"no-exact-system-prompt-override"', worker)
+        self.assertIn('"rpc-read-cannot-enforce-exact-path"', worker)
+        self.assertIn('event.type === "turn_start"', worker)
+        self.assertIn('event.type === "turn-started"', worker)
+        self.assertIn("maxIterations: request.budget.requests", worker)
+        self.assertIn("modelOptions: {", worker)
+        self.assertIn("maxTokens: policy.max_output_tokens", worker)
+        self.assertIn("temperature: policy.temperature", worker)
+        self.assertNotIn("maxTokensPerTurn", worker)
+        self.assertIn("failureFromReceipt", worker)
+        self.assertIn("...receipt", worker)
+        self.assertNotIn("budgetFailure(receipt.requests_used)", worker)
+        self.assertNotIn("safeFailure(\"pi-sdk-scenario-not-observed\", receipt.requests_used)", worker)
+        self.assertNotIn("safeFailure(\"cline-scenario-not-observed\", receipt.requests_used)", worker)
+        self.assertNotIn('receipt.requests_used = 1', worker)
+        self.assertNotIn("console.error", worker)
+
     def test_focus_timer_is_preserved_only_as_an_unimplemented_experiment(self) -> None:
         contract = json.loads(FOCUS_TIMER.read_text(encoding="utf-8"))
 
