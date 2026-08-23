@@ -1,0 +1,42 @@
+import type { StreamFn } from "@earendil-works/pi-agent-core";
+import { describe, expect, it } from "vitest";
+import { PiHarness, localPiModel } from "./pi";
+
+const config = {
+  modelId: "Qwen3.5-9B-Q4_K_M.gguf",
+  baseUrl: "http://127.0.0.1:8080/",
+  apiKey: "local-test-token",
+  contextWindow: 16_384,
+  maxTokens: 2_048,
+  temperature: 0.2,
+};
+
+describe("Pi harness adapter", () => {
+  it("maps the selected local model to Pi's OpenAI-compatible provider contract", () => {
+    expect(localPiModel(config)).toMatchObject({
+      id: "Qwen3.5-9B-Q4_K_M.gguf",
+      provider: "alpine-local",
+      api: "openai-completions",
+      baseUrl: "http://127.0.0.1:8080/v1",
+      contextWindow: 16_384,
+      maxTokens: 2_048,
+    });
+  });
+
+  it("does not duplicate the v1 path from an Alpine base-url file", () => {
+    expect(localPiModel({ ...config, baseUrl: "http://127.0.0.1:8080/v1" }).baseUrl).toBe(
+      "http://127.0.0.1:8080/v1",
+    );
+  });
+
+  it("constructs the embedded Pi agent with the launch-time model", () => {
+    const neverCalled = (() => {
+      throw new Error("test stream should not run");
+    }) as StreamFn;
+    const harness = new PiHarness(config, { streamFn: neverCalled });
+
+    expect(harness.agent.state.model.id).toBe("Qwen3.5-9B-Q4_K_M.gguf");
+    expect(harness.agent.steeringMode).toBe("one-at-a-time");
+    expect(harness.agent.followUpMode).toBe("one-at-a-time");
+  });
+});

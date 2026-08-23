@@ -1,0 +1,37 @@
+[package]
+name = "alpine-desktop"
+version = "0.1.0"
+description = "Local-first desktop application for the Alpine control plane"
+license = "Apache-2.0"
+repository = "https://github.com/rps321321/Alpine"
+edition = "2024"
+rust-version = "1.88"
+autobins = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "alpine_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "alpine-desktop-app"
+path = "src/main.rs"
+
+[build-dependencies]
+base64 = "0.22.1"
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+alpine-control-plane = { path = "../../.." }
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+percent-encoding = "2.3.2"
+sha2 = "0.11.0"
+ureq = { version = "3.4.0", default-features = false, features = ["json", "rustls"] }
+
+[lints.rust]
+unsafe_code = "forbid"

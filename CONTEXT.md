@@ -166,6 +166,30 @@ _Avoid_: second Harness, embedded authority, permanent generic protocol, candida
 The bounded headless comparison of reviewed Agent Engine Candidates. Alpine launches exact package-locked adapters from disposable roots, owns Evidence Identity and Session restoration, and turns candidate-native SDK/RPC/JSON observations into typed events and errors. Every required scenario is either demonstrated under identical material inputs or retained as an explicit typed failure. It is architecture evidence, not Qualification, Promotion or approval to absorb a dependency.
 _Avoid_: benchmark winner, production engine selection, fork approval, model qualification
 
+**Alpine Desktop**:
+The local-first task application that presents Alpine's model, evidence, Inference Session and agent workflows through one coherent desktop experience. It is a user interface over Alpine authority, not a second control plane.
+_Avoid_: Pi Desktop, wrapper, dashboard, desktop authority
+
+**Desktop Interface**:
+The small typed command-and-event surface between Alpine Desktop and the Rust control plane. Long operations publish typed lifecycle events; formatted terminal text is never application state.
+_Avoid_: frontend API, CLI parsing, Tauri commands as the domain model
+
+**Agent Runtime Adapter**:
+A replaceable implementation of the agent loop inside Alpine Desktop. Pi SDK/core is the first experimental Adapter; Alpine owns its model, policy, tools, task state, credentials and recovery truth.
+_Avoid_: Harness authority, Pi session, permanent engine protocol, embedded control plane
+
+**Model Registry**:
+The machine-local catalog of exact imported or downloaded model artifacts and their provenance. A Model Registry entry is not evidence that the artifact runs or is qualified.
+_Avoid_: Hugging Face search results, model folder, Qualification database
+
+**Model Assessment**:
+A pre-run compatibility and resource-fit estimate for one exact model artifact on the current host. It may guide a download or conservative first run but is not Experiment or Qualification evidence.
+_Avoid_: benchmark, qualification, guaranteed fit, recommendation without uncertainty
+
+**Browser Surface**:
+The contextual Alpine Desktop side panel used to inspect local web artifacts. Displaying a URL does not grant authenticated browser authority or host-action consent.
+_Avoid_: trusted browser session, Chrome profile, unrestricted web tool
+
 **Inference Server**:
 The local process that loads weights and serves an OpenAI-compatible API on localhost.
 _Avoid_: the model (when you mean the process), runtime (when you mean this specific server)
