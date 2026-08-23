@@ -1,8 +1,13 @@
 pub mod assessment;
 pub mod catalog;
+pub mod store;
+pub mod workspace;
 
-use alpine_control_plane::{Alpine, StartSessionOptions};
-use assessment::{HardwareCapacity, ModelAssessment};
+use alpine_control_plane::{
+    Alpine, EvaluationOptions, EvaluationPlan, QualificationTarget, SessionStatus,
+    StartSessionOptions, StopSessionOptions,
+};
+use assessment::{HardwareCapacity, ModelAssessment, PlacementPlan};
 use catalog::ModelSearchResult;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,9 +20,18 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, State};
+use store::{
+    CreateTask, DesktopProject, DesktopStore, DesktopTask, ModelRegistryEntry, ModelSource,
+    NewTaskEvent, NewTaskMessage, NewToolApproval, RegisterModelArtifact, TaskDetail, TaskEvent,
+    TaskMessage, TaskStatus, ToolApproval,
+};
+use tauri::{AppHandle, Emitter, Manager, State};
+use workspace::{
+    WorkspaceEdit, WorkspaceEditResult, WorkspaceEntry, WorkspaceRead, WorkspaceSearchMatch,
+    WorkspaceShell, WorkspaceShellResult,
+};
 
-const SETTINGS_SCHEMA: u32 = 1;
+const SETTINGS_SCHEMA: u32 = 2;
 
 fn settings_schema() -> u32 {
     SETTINGS_SCHEMA
@@ -49,6 +63,8 @@ struct DesktopSettings {
     default_profile: String,
     #[serde(default = "local_metrics_default")]
     local_metrics_enabled: bool,
+    #[serde(default)]
+    evaluation_repository_root: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +73,7 @@ struct SettingsUpdate {
     install_root: String,
     default_profile: String,
     local_metrics_enabled: bool,
+    evaluation_repository_root: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +125,53 @@ struct RuntimeProbeReport {
     evidence_label: &'static str,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvaluationProgress {
+    state: &'static str,
+    scope: String,
+    message: String,
+}
+
+fn same_inference_session_state(before: &SessionStatus, after: &SessionStatus) -> bool {
+    before.active == after.active
+        && before.healthy == after.healthy
+        && before.foreign == after.foreign
+        && before.profile == after.profile
+        && before.vision == after.vision
+        && before.runtime == after.runtime
+        && before.fallback == after.fallback
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FullEvaluationSummary {
+    evaluation_id: String,
+    scope: String,
+    plan_id: String,
+    plan_sha256: String,
+    decision: String,
+    production_decision: Option<String>,
+    selected_profile: Option<String>,
+    recommendation: String,
+    artifact_path: String,
+    tuning_measurements: Vec<alpine_control_plane::ProfileMeasurement>,
+    tuning: Option<serde_json::Value>,
+    final_evidence: Option<serde_json::Value>,
+    candidate_qualification: Option<serde_json::Value>,
+    validated_qualification: Option<serde_json::Value>,
+    production_qualification: Option<serde_json::Value>,
+    same_process_requests: Option<u32>,
+    clean_restarts: Option<u32>,
+    near_limit_context_tokens: Option<u32>,
+    golden_tool_calls: Option<u64>,
+    golden_tool_failures: Option<u64>,
+    rollback_profile: &'static str,
+    rollback_proved: bool,
+    prior_session_restored: bool,
+    deployment_changed: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct ProbeResponse {
     choices: Vec<ProbeChoice>,
@@ -137,12 +201,27 @@ struct DownloadReceipt {
     already_present: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgress {
+    repo_id: String,
+    filename: String,
+    bytes_written: u64,
+    total_bytes: u64,
+    state: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DownloadedModel {
     filename: String,
     size_bytes: u64,
     state: &'static str,
+    source: Option<String>,
+    repo_id: Option<String>,
+    revision: Option<String>,
+    sha256: Option<String>,
+    local_path: String,
 }
 
 #[derive(Clone, Default)]
@@ -202,7 +281,33 @@ fn default_settings(app: &AppHandle) -> Result<DesktopSettings, String> {
             .map(|session| session.profile_name)
             .unwrap_or_else(default_profile),
         local_metrics_enabled: true,
+        evaluation_repository_root: discover_evaluation_repository_root()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     })
+}
+
+fn discover_evaluation_repository_root() -> Option<PathBuf> {
+    let mut starts = Vec::new();
+    if let Ok(path) = std::env::current_dir() {
+        starts.push(path);
+    }
+    if let Ok(path) = std::env::current_exe()
+        && let Some(parent) = path.parent()
+    {
+        starts.push(parent.to_path_buf());
+    }
+    starts.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    for start in starts {
+        for candidate in start.ancestors().take(8) {
+            if candidate.join("config/evaluation-plan.json").is_file()
+                && candidate.join("benchmarks/micro/workloads.json").is_file()
+            {
+                return candidate.canonicalize().ok();
+            }
+        }
+    }
+    None
 }
 
 fn read_settings(app: &AppHandle) -> Result<DesktopSettings, String> {
@@ -214,11 +319,17 @@ fn read_settings(app: &AppHandle) -> Result<DesktopSettings, String> {
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     let mut settings: DesktopSettings = serde_json::from_str(&value)
         .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
-    if settings.schema != SETTINGS_SCHEMA {
+    if settings.schema == 0 || settings.schema > SETTINGS_SCHEMA {
         return Err(format!(
             "unsupported desktop settings schema {}; expected {SETTINGS_SCHEMA}",
             settings.schema
         ));
+    }
+    settings.schema = SETTINGS_SCHEMA;
+    if settings.evaluation_repository_root.is_empty() {
+        settings.evaluation_repository_root = discover_evaluation_repository_root()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
     }
     let legacy_generated_root = app
         .path()
@@ -333,10 +444,31 @@ fn update_settings(app: AppHandle, update: SettingsUpdate) -> Result<DesktopSett
         return Err("the Alpine installation root must be an absolute path".to_owned());
     }
     let default_profile = validate_profile_name(update.default_profile.trim())?.to_owned();
+    let evaluation_repository_root = PathBuf::from(update.evaluation_repository_root.trim());
+    if !evaluation_repository_root.is_absolute() {
+        return Err("the evaluation repository root must be an absolute path".to_owned());
+    }
+    if !evaluation_repository_root
+        .join("config/evaluation-plan.json")
+        .is_file()
+        || !evaluation_repository_root
+            .join("benchmarks/micro/workloads.json")
+            .is_file()
+    {
+        return Err(
+            "the evaluation repository root must contain Alpine config and benchmark resources"
+                .to_owned(),
+        );
+    }
     let mut settings = read_settings(&app)?;
     settings.install_root = install_root.to_string_lossy().into_owned();
     settings.default_profile = default_profile;
     settings.local_metrics_enabled = update.local_metrics_enabled;
+    settings.evaluation_repository_root = evaluation_repository_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve evaluation repository root: {error}"))?
+        .to_string_lossy()
+        .into_owned();
     write_settings(&app, &settings)?;
     Ok(settings)
 }
@@ -393,6 +525,54 @@ fn assess_model(artifact_bytes: u64) -> Result<ModelAssessment, String> {
     }
     let (_, capacity) = capture_capacity()?;
     Ok(assessment::assess_model(&capacity, artifact_bytes))
+}
+
+#[tauri::command]
+fn plan_model_placement(artifact_bytes: u64) -> Result<PlacementPlan, String> {
+    if artifact_bytes == 0 {
+        return Err("artifact size is required before planning model placement".to_owned());
+    }
+    let (_, capacity) = capture_capacity()?;
+    Ok(assessment::plan_placement(&capacity, artifact_bytes))
+}
+
+fn start_runtime_blocking(app: AppHandle) -> Result<RuntimeSnapshot, String> {
+    let settings = read_settings(&app)?;
+    Alpine::start_session(&StartSessionOptions {
+        install_root: PathBuf::from(&settings.install_root),
+        profile: Some(settings.default_profile.clone()),
+        vision: false,
+        force_fallback: false,
+        lock_timeout: Duration::from_secs(15),
+        startup_timeout: Duration::from_secs(600),
+    })
+    .map_err(|error| format!("the local llama.cpp session could not start: {error}"))?;
+    Ok(runtime_snapshot(&settings))
+}
+
+#[tauri::command]
+async fn start_runtime(app: AppHandle) -> Result<RuntimeSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || start_runtime_blocking(app))
+        .await
+        .map_err(|error| format!("runtime start worker failed: {error}"))?
+}
+
+fn stop_runtime_blocking(app: AppHandle) -> Result<RuntimeSnapshot, String> {
+    let settings = read_settings(&app)?;
+    Alpine::stop_session(&StopSessionOptions {
+        install_root: PathBuf::from(&settings.install_root),
+        lock_timeout: Duration::from_secs(15),
+        allow_legacy_identity: false,
+    })
+    .map_err(|error| format!("the verified local llama.cpp session could not stop: {error}"))?;
+    Ok(runtime_snapshot(&settings))
+}
+
+#[tauri::command]
+async fn stop_runtime(app: AppHandle) -> Result<RuntimeSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || stop_runtime_blocking(app))
+        .await
+        .map_err(|error| format!("runtime stop worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -524,6 +704,225 @@ async fn run_runtime_probe(app: AppHandle) -> Result<RuntimeProbeReport, String>
         .map_err(|error| format!("runtime probe worker failed: {error}"))?
 }
 
+fn serialized_label(value: impl Serialize) -> Result<String, String> {
+    serde_json::to_value(value)
+        .map_err(|error| format!("failed to encode evaluation decision: {error}"))?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "evaluation decision did not encode as a string".to_owned())
+}
+
+fn run_full_evaluation_blocking(
+    app: AppHandle,
+    scope: String,
+) -> Result<FullEvaluationSummary, String> {
+    let target = match scope.as_str() {
+        "candidate" => QualificationTarget::Candidate,
+        "validated" => QualificationTarget::Validated,
+        "production" => QualificationTarget::Production,
+        _ => return Err("evaluation scope must be candidate, validated, or production".to_owned()),
+    };
+    let settings = read_settings(&app)?;
+    if settings.evaluation_repository_root.is_empty() {
+        return Err("configure the Alpine evaluation repository root in Settings".to_owned());
+    }
+    let repository_root = PathBuf::from(&settings.evaluation_repository_root)
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve evaluation repository root: {error}"))?;
+    let install_root = PathBuf::from(&settings.install_root);
+    let prior_session = Alpine::session_status(&install_root, Duration::from_secs(15))
+        .map_err(|error| format!("failed to capture the prior Inference Session: {error}"))?;
+    let source_plan_path = repository_root.join("config/evaluation-plan.json");
+    let source_plan = std::fs::read(&source_plan_path).map_err(|error| {
+        format!(
+            "failed to read evaluation plan {}: {error}",
+            source_plan_path.display()
+        )
+    })?;
+    let mut plan: EvaluationPlan = serde_json::from_slice(&source_plan).map_err(|error| {
+        format!(
+            "invalid evaluation plan {}: {error}",
+            source_plan_path.display()
+        )
+    })?;
+    plan.target = target;
+    plan.id = format!("{}-desktop-{scope}", plan.id);
+    let result_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve evaluation evidence directory: {error}"))?
+        .join("evidence");
+    let plan_root = result_root.join("plans");
+    std::fs::create_dir_all(&plan_root)
+        .map_err(|error| format!("failed to create {}: {error}", plan_root.display()))?;
+    let plan_path = plan_root.join(format!("{scope}.json"));
+    std::fs::write(
+        &plan_path,
+        serde_json::to_vec_pretty(&plan)
+            .map_err(|error| format!("failed to encode desktop evaluation plan: {error}"))?,
+    )
+    .map_err(|error| format!("failed to write {}: {error}", plan_path.display()))?;
+    let _ = app.emit(
+        "evaluation-progress",
+        EvaluationProgress {
+            state: "running",
+            scope: scope.clone(),
+            message: format!(
+                "Measuring {} against {} with {} measured runs per workload",
+                std::iter::once(&plan.baseline_profile)
+                    .chain(plan.candidate_profiles.iter())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                plan.workloads.join(", "),
+                plan.microbenchmark.runs
+            ),
+        },
+    );
+    let report = Alpine::run_evaluation(&EvaluationOptions {
+        repository_root: repository_root.clone(),
+        install_root: install_root.clone(),
+        result_root: result_root.clone(),
+        plan: plan_path,
+        allow_legacy_identity: false,
+    })
+    .map_err(|error| error.to_string())?;
+    let restored_session = Alpine::session_status(&install_root, Duration::from_secs(15))
+        .map_err(|error| format!("evaluation completed but the restored Inference Session could not be verified: {error}"))?;
+    let prior_session_restored = same_inference_session_state(&prior_session, &restored_session);
+    let database = result_root.join("results.sqlite3");
+    let final_evidence = report
+        .final_run_id
+        .as_deref()
+        .map(|id| Alpine::run_evidence(&database, id).map_err(|error| error.to_string()))
+        .transpose()?
+        .map(|evidence| {
+            serde_json::to_value(evidence)
+                .map_err(|error| format!("failed to encode final run evidence: {error}"))
+        })
+        .transpose()?;
+    let tuning = report
+        .tuning
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| format!("failed to encode tuning report: {error}"))?;
+    let recommendation = match (&report.selected_profile, &report.tuning) {
+        (Some(profile), Some(tuning)) if tuning.reasons.is_empty() => {
+            format!("Use {profile} for this Evidence Identity; no Deployment Role was changed.")
+        }
+        (Some(profile), Some(tuning)) => format!(
+            "Use {profile} for this Evidence Identity. {} No Deployment Role was changed.",
+            tuning.reasons.join(" ")
+        ),
+        (Some(profile), None) => {
+            format!("{profile} completed measurement; no Deployment Role was changed.")
+        }
+        (None, Some(tuning)) if !tuning.reasons.is_empty() => format!(
+            "Retain the baseline: {} No Deployment Role was changed.",
+            tuning.reasons.join(" ")
+        ),
+        _ => "No configuration was proven. Retain the current default and inspect the evidence."
+            .to_owned(),
+    };
+    let summary = FullEvaluationSummary {
+        evaluation_id: report.evaluation_id.clone(),
+        scope: scope.clone(),
+        plan_id: report.plan_id.clone(),
+        plan_sha256: report.plan_sha256.clone(),
+        decision: serialized_label(report.decision)?,
+        production_decision: report
+            .production_decision
+            .map(serialized_label)
+            .transpose()?,
+        selected_profile: report.selected_profile.clone(),
+        recommendation,
+        artifact_path: report.artifact_path.to_string_lossy().into_owned(),
+        tuning_measurements: report.tuning_measurements,
+        tuning,
+        final_evidence,
+        candidate_qualification: report
+            .candidate_qualification
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| format!("failed to encode candidate qualification: {error}"))?,
+        validated_qualification: report
+            .validated_qualification
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| format!("failed to encode validated qualification: {error}"))?,
+        production_qualification: report
+            .production_qualification
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| format!("failed to encode production qualification: {error}"))?,
+        same_process_requests: report
+            .same_process_stability
+            .as_ref()
+            .map(|value| value.requests),
+        clean_restarts: report
+            .clean_restart_stability
+            .as_ref()
+            .map(|value| value.clean_restarts),
+        near_limit_context_tokens: report
+            .near_limit_context
+            .as_ref()
+            .map(|value| value.actual_prompt_tokens),
+        golden_tool_calls: report.golden_agent.as_ref().map(|value| value.tool_calls),
+        golden_tool_failures: report
+            .golden_agent
+            .as_ref()
+            .map(|value| value.tool_failures),
+        rollback_profile: "stable-16k",
+        rollback_proved: report
+            .rollback_proof
+            .as_ref()
+            .is_some_and(|value| value.restored_prior_session),
+        prior_session_restored,
+        deployment_changed: false,
+    };
+    let _ = app.emit(
+        "evaluation-progress",
+        EvaluationProgress {
+            state: "completed",
+            scope,
+            message: format!(
+                "Evaluation {} completed with decision {}",
+                summary.evaluation_id, summary.decision
+            ),
+        },
+    );
+    Ok(summary)
+}
+
+#[tauri::command]
+async fn run_full_evaluation(
+    app: AppHandle,
+    scope: String,
+) -> Result<FullEvaluationSummary, String> {
+    let worker_app = app.clone();
+    let worker_scope = scope.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        run_full_evaluation_blocking(worker_app, worker_scope)
+    })
+    .await
+    .map_err(|error| format!("evaluation worker failed: {error}"))?;
+    if let Err(error) = &result {
+        let _ = app.emit(
+            "evaluation-progress",
+            EvaluationProgress {
+                state: "failed",
+                scope,
+                message: error.clone(),
+            },
+        );
+    }
+    result
+}
+
 fn validated_repo_id(value: &str) -> Result<&str, String> {
     let segments = value.split('/').collect::<Vec<_>>();
     let valid = segments.len() == 2
@@ -604,17 +1003,31 @@ fn validate_download(
 fn download_model_blocking(
     app: AppHandle,
     selection: ModelSelection,
+    revision: String,
     expected_bytes: u64,
     expected_sha256: Option<String>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<DownloadReceipt, String> {
     let repo_id = validated_repo_id(selection.repo_id.trim())?;
+    let revision = catalog::validated_revision(&revision)?;
     let remote_path = catalog::validated_remote_artifact_path(selection.filename.trim())?;
     let filename = Path::new(remote_path)
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "the remote artifact has no usable filename".to_owned())?;
     let filename = catalog::validated_artifact_filename(filename)?;
+    let emit_progress = |bytes_written: u64, state: &'static str| {
+        let _ = app.emit(
+            "download-progress",
+            DownloadProgress {
+                repo_id: repo_id.to_owned(),
+                filename: filename.to_owned(),
+                bytes_written,
+                total_bytes: expected_bytes,
+                state,
+            },
+        );
+    };
     let expected_sha256 = validated_sha256(expected_sha256)?;
     let settings = read_settings(&app)?;
     let model_root = PathBuf::from(settings.install_root).join("models");
@@ -622,10 +1035,12 @@ fn download_model_blocking(
         .map_err(|error| format!("failed to create {}: {error}", model_root.display()))?;
     let destination = model_root.join(filename);
     if destination.exists() {
+        emit_progress(0, "validating");
         let bytes = validate_download(&destination, expected_bytes, expected_sha256.as_deref())
             .map_err(|error| {
                 format!("the existing model is not the requested artifact: {error}")
             })?;
+        emit_progress(bytes, "completed");
         return Ok(DownloadReceipt {
             path: destination.to_string_lossy().into_owned(),
             bytes_written: bytes,
@@ -638,6 +1053,7 @@ fn download_model_blocking(
         .map(|metadata| metadata.len())
         .unwrap_or(0);
     if expected_bytes > 0 && partial_bytes == expected_bytes {
+        emit_progress(partial_bytes, "validating");
         if let Ok(bytes) = validate_download(&partial, expected_bytes, expected_sha256.as_deref()) {
             std::fs::rename(&partial, &destination).map_err(|error| {
                 format!(
@@ -646,6 +1062,7 @@ fn download_model_blocking(
                     destination.display()
                 )
             })?;
+            emit_progress(bytes, "completed");
             return Ok(DownloadReceipt {
                 path: destination.to_string_lossy().into_owned(),
                 bytes_written: bytes,
@@ -664,7 +1081,7 @@ fn download_model_blocking(
         .user_agent("Alpine-Desktop/0.1")
         .build()
         .into();
-    let mut request = agent.get(&catalog::download_url(repo_id, remote_path));
+    let mut request = agent.get(&catalog::download_url(repo_id, revision, remote_path));
     if resume_from > 0 {
         request = request.header("Range", format!("bytes={resume_from}-"));
     }
@@ -683,6 +1100,10 @@ fn download_model_blocking(
     let mut writer = std::io::BufWriter::new(file);
     let mut reader = response.body_mut().as_reader();
     let mut bytes_written = initial_bytes;
+    let mut last_progress = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+    emit_progress(bytes_written, "downloading");
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         if cancelled.load(Ordering::Relaxed) {
@@ -692,6 +1113,7 @@ fn download_model_blocking(
                     partial.display()
                 )
             })?;
+            emit_progress(bytes_written, "cancelled");
             return Err("model download cancelled; the partial file was retained".to_owned());
         }
         let read = reader
@@ -704,11 +1126,16 @@ fn download_model_blocking(
             .write_all(&buffer[..read])
             .map_err(|error| format!("failed while writing {}: {error}", partial.display()))?;
         bytes_written = bytes_written.saturating_add(read as u64);
+        if last_progress.elapsed() >= Duration::from_millis(250) {
+            emit_progress(bytes_written, "downloading");
+            last_progress = Instant::now();
+        }
     }
     writer
         .flush()
         .map_err(|error| format!("failed to flush {}: {error}", partial.display()))?;
     drop(writer);
+    emit_progress(bytes_written, "validating");
     validate_download(&partial, expected_bytes, expected_sha256.as_deref()).map_err(|error| {
         format!("download validation failed for {filename}: {error}; the partial file was retained")
     })?;
@@ -719,6 +1146,7 @@ fn download_model_blocking(
             destination.display()
         )
     })?;
+    emit_progress(bytes_written, "completed");
     Ok(DownloadReceipt {
         path: destination.to_string_lossy().into_owned(),
         bytes_written,
@@ -730,11 +1158,15 @@ fn download_model_blocking(
 async fn download_model(
     app: AppHandle,
     registry: State<'_, DownloadRegistry>,
+    store: State<'_, Arc<DesktopStore>>,
     selection: ModelSelection,
+    revision: String,
     expected_bytes: u64,
     expected_sha256: Option<String>,
 ) -> Result<DownloadReceipt, String> {
     let key = format!("{}\n{}", selection.repo_id, selection.filename);
+    let provenance = selection.clone();
+    let provenance_revision = revision.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
     {
         let mut active = registry
@@ -747,8 +1179,34 @@ async fn download_model(
         active.insert(key.clone(), Arc::clone(&cancelled));
     }
     let active = Arc::clone(&registry.0);
+    let store = Arc::clone(store.inner());
     let result = tauri::async_runtime::spawn_blocking(move || {
-        download_model_blocking(app, selection, expected_bytes, expected_sha256, cancelled)
+        let receipt = download_model_blocking(
+            app,
+            selection,
+            revision,
+            expected_bytes,
+            expected_sha256,
+            cancelled,
+        )?;
+        let digest = file_sha256(Path::new(&receipt.path))?;
+        store
+            .register_model_artifact(RegisterModelArtifact {
+                source: ModelSource::HuggingFace,
+                repo_id: Some(provenance.repo_id.clone()),
+                revision: Some(provenance_revision.clone()),
+                filename: provenance.filename.clone(),
+                local_path: receipt.path.clone(),
+                observed_bytes: receipt.bytes_written,
+                sha256: digest,
+                origin_url: Some(catalog::download_url(
+                    &provenance.repo_id,
+                    &provenance_revision,
+                    &provenance.filename,
+                )),
+            })
+            .map_err(|error| format!("downloaded model could not be registered: {error}"))?;
+        Ok(receipt)
     })
     .await
     .map_err(|error| format!("model download worker failed: {error}"));
@@ -775,35 +1233,343 @@ fn cancel_download(
 }
 
 #[tauri::command]
-fn list_downloads(app: AppHandle) -> Result<Vec<DownloadedModel>, String> {
-    let model_root = PathBuf::from(read_settings(&app)?.install_root).join("models");
-    let Ok(entries) = std::fs::read_dir(&model_root) else {
-        return Ok(Vec::new());
-    };
-    let mut models = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            if !metadata.is_file() {
-                return None;
-            }
-            let filename = entry.file_name().to_str()?.to_owned();
-            let state = if filename.to_ascii_lowercase().ends_with(".gguf") {
-                "installed"
-            } else if filename.to_ascii_lowercase().ends_with(".gguf.part") {
-                "partial"
-            } else {
-                return None;
-            };
-            Some(DownloadedModel {
-                filename,
-                size_bytes: metadata.len(),
-                state,
-            })
+fn list_downloads(
+    app: AppHandle,
+    store: State<'_, Arc<DesktopStore>>,
+) -> Result<Vec<DownloadedModel>, String> {
+    let registered = store
+        .list_model_artifacts()
+        .map_err(|error| error.to_string())?;
+    let mut models = registered
+        .iter()
+        .filter(|model| Path::new(&model.local_path).is_file())
+        .map(|model| DownloadedModel {
+            filename: model.filename.clone(),
+            size_bytes: model.observed_bytes,
+            state: "installed",
+            source: Some(match model.source {
+                ModelSource::HuggingFace => "hugging-face".to_owned(),
+                ModelSource::Import => "import".to_owned(),
+            }),
+            repo_id: model.repo_id.clone(),
+            revision: model.revision.clone(),
+            sha256: Some(model.sha256.clone()),
+            local_path: model.local_path.clone(),
         })
         .collect::<Vec<_>>();
+    let registered_paths = registered
+        .iter()
+        .map(|entry| PathBuf::from(&entry.local_path))
+        .collect::<Vec<_>>();
+    let model_root = PathBuf::from(read_settings(&app)?.install_root).join("models");
+    let Ok(entries) = std::fs::read_dir(&model_root) else {
+        return Ok(models);
+    };
+    models.extend(entries.filter_map(Result::ok).filter_map(|entry| {
+        let metadata = entry.metadata().ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let filename = entry.file_name().to_str()?.to_owned();
+        let state = if filename.to_ascii_lowercase().ends_with(".gguf") {
+            "installed"
+        } else if filename.to_ascii_lowercase().ends_with(".gguf.part") {
+            "partial"
+        } else {
+            return None;
+        };
+        let local_path = entry.path();
+        if registered_paths
+            .iter()
+            .any(|registered| registered == &local_path)
+        {
+            return None;
+        }
+        Some(DownloadedModel {
+            filename,
+            size_bytes: metadata.len(),
+            state,
+            source: None,
+            repo_id: None,
+            revision: None,
+            sha256: None,
+            local_path: local_path.to_string_lossy().into_owned(),
+        })
+    }));
     models.sort_by(|left, right| left.filename.cmp(&right.filename));
     Ok(models)
+}
+
+fn import_model_blocking(
+    app: AppHandle,
+    store: Arc<DesktopStore>,
+    source_path: String,
+) -> Result<ModelRegistryEntry, String> {
+    let source = PathBuf::from(source_path.trim());
+    if !source.is_absolute() {
+        return Err("the imported GGUF path must be absolute".to_owned());
+    }
+    let source = source.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve imported GGUF {}: {error}",
+            source.display()
+        )
+    })?;
+    if !source.is_file() {
+        return Err("the imported GGUF path must identify a file".to_owned());
+    }
+    let filename = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "the imported GGUF filename is invalid".to_owned())?;
+    let filename = catalog::validated_artifact_filename(filename)?.to_owned();
+    let settings = read_settings(&app)?;
+    let model_root = PathBuf::from(settings.install_root).join("models");
+    std::fs::create_dir_all(&model_root)
+        .map_err(|error| format!("failed to create {}: {error}", model_root.display()))?;
+    let destination = model_root.join(&filename);
+    let same_file = destination
+        .canonicalize()
+        .ok()
+        .is_some_and(|path| path == source);
+    if !same_file {
+        if destination.exists() {
+            let source_hash = file_sha256(&source)?;
+            let destination_hash = file_sha256(&destination)?;
+            if source_hash != destination_hash {
+                return Err(format!(
+                    "{} already exists with different content; Alpine did not overwrite it",
+                    destination.display()
+                ));
+            }
+        } else {
+            let partial = model_root.join(format!("{filename}.import.part"));
+            std::fs::copy(&source, &partial).map_err(|error| {
+                format!(
+                    "failed to copy imported GGUF from {} to {}: {error}",
+                    source.display(),
+                    partial.display()
+                )
+            })?;
+            std::fs::rename(&partial, &destination).map_err(|error| {
+                format!(
+                    "failed to publish imported GGUF {} as {}: {error}",
+                    partial.display(),
+                    destination.display()
+                )
+            })?;
+        }
+    }
+    let observed_bytes = destination
+        .metadata()
+        .map_err(|error| format!("failed to inspect {}: {error}", destination.display()))?
+        .len();
+    let sha256 = file_sha256(&destination)?;
+    store
+        .register_model_artifact(RegisterModelArtifact {
+            source: ModelSource::Import,
+            repo_id: None,
+            revision: None,
+            filename,
+            local_path: destination.to_string_lossy().into_owned(),
+            observed_bytes,
+            sha256,
+            origin_url: None,
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn import_model(
+    app: AppHandle,
+    store: State<'_, Arc<DesktopStore>>,
+    source_path: String,
+) -> Result<ModelRegistryEntry, String> {
+    let store = Arc::clone(store.inner());
+    tauri::async_runtime::spawn_blocking(move || import_model_blocking(app, store, source_path))
+        .await
+        .map_err(|error| format!("model import worker failed: {error}"))?
+}
+
+#[tauri::command]
+fn list_model_registry(
+    store: State<'_, Arc<DesktopStore>>,
+) -> Result<Vec<ModelRegistryEntry>, String> {
+    store
+        .list_model_artifacts()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_projects(store: State<'_, Arc<DesktopStore>>) -> Result<Vec<DesktopProject>, String> {
+    store.list_projects().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_project(
+    store: State<'_, Arc<DesktopStore>>,
+    name: String,
+    root: String,
+) -> Result<DesktopProject, String> {
+    store
+        .create_project(&name, root)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_tasks(
+    store: State<'_, Arc<DesktopStore>>,
+    project_id: String,
+) -> Result<Vec<DesktopTask>, String> {
+    store
+        .list_tasks(&project_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_task(
+    store: State<'_, Arc<DesktopStore>>,
+    input: CreateTask,
+) -> Result<DesktopTask, String> {
+    store.create_task(input).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn load_task(
+    store: State<'_, Arc<DesktopStore>>,
+    task_id: String,
+) -> Result<Option<TaskDetail>, String> {
+    store.load_task(&task_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn append_task_message(
+    store: State<'_, Arc<DesktopStore>>,
+    input: NewTaskMessage,
+) -> Result<TaskMessage, String> {
+    store
+        .append_message(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn append_task_event(
+    store: State<'_, Arc<DesktopStore>>,
+    input: NewTaskEvent,
+) -> Result<TaskEvent, String> {
+    store.append_event(input).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_task_status(
+    store: State<'_, Arc<DesktopStore>>,
+    task_id: String,
+    status: TaskStatus,
+    error: Option<String>,
+) -> Result<DesktopTask, String> {
+    store
+        .set_task_status(&task_id, status, error.as_deref())
+        .map_err(|cause| cause.to_string())
+}
+
+#[tauri::command]
+fn request_tool_approval(
+    store: State<'_, Arc<DesktopStore>>,
+    input: NewToolApproval,
+) -> Result<ToolApproval, String> {
+    store
+        .request_tool_approval(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_tool_approval(
+    store: State<'_, Arc<DesktopStore>>,
+    approval_id: String,
+) -> Result<Option<ToolApproval>, String> {
+    store
+        .get_tool_approval(&approval_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_pending_approvals(
+    store: State<'_, Arc<DesktopStore>>,
+    task_id: String,
+) -> Result<Vec<ToolApproval>, String> {
+    store
+        .list_pending_approvals(&task_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn decide_tool_approval(
+    store: State<'_, Arc<DesktopStore>>,
+    approval_id: String,
+    approved: bool,
+) -> Result<ToolApproval, String> {
+    store
+        .decide_tool_approval(&approval_id, approved)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_project_files(
+    store: State<'_, Arc<DesktopStore>>,
+    task_id: String,
+    limit: usize,
+) -> Result<Vec<WorkspaceEntry>, String> {
+    workspace::list_project_files(&store, &task_id, limit).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn read_project_file(
+    store: State<'_, Arc<DesktopStore>>,
+    task_id: String,
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<WorkspaceRead, String> {
+    workspace::read_project_file(&store, &task_id, &path, offset, limit)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn search_project_files(
+    store: State<'_, Arc<DesktopStore>>,
+    task_id: String,
+    query: String,
+    limit: usize,
+) -> Result<Vec<WorkspaceSearchMatch>, String> {
+    workspace::search_project_files(&store, &task_id, &query, limit)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn edit_project_file(
+    store: State<'_, Arc<DesktopStore>>,
+    task_id: String,
+    approval_id: String,
+    edit: WorkspaceEdit,
+) -> Result<WorkspaceEditResult, String> {
+    workspace::edit_project_file(&store, &task_id, &approval_id, edit)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn run_project_shell(
+    store: State<'_, Arc<DesktopStore>>,
+    task_id: String,
+    approval_id: String,
+    shell: WorkspaceShell,
+) -> Result<WorkspaceShellResult, String> {
+    let store = Arc::clone(store.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace::run_project_shell(&store, &task_id, &approval_id, shell)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("workspace shell worker failed: {error}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -815,14 +1581,41 @@ pub fn run() {
             update_settings,
             search_models,
             assess_model,
+            plan_model_placement,
             set_default_model,
+            start_runtime,
+            stop_runtime,
             resolve_pi_launch,
             run_runtime_probe,
+            run_full_evaluation,
             download_model,
             cancel_download,
             list_downloads,
+            import_model,
+            list_model_registry,
+            list_projects,
+            create_project,
+            list_tasks,
+            create_task,
+            load_task,
+            append_task_message,
+            append_task_event,
+            set_task_status,
+            request_tool_approval,
+            get_tool_approval,
+            list_pending_approvals,
+            decide_tool_approval,
+            list_project_files,
+            read_project_file,
+            search_project_files,
+            edit_project_file,
+            run_project_shell,
         ])
         .setup(|app| {
+            let data_dir = app.path().app_data_dir()?;
+            app.manage(Arc::new(DesktopStore::open(
+                data_dir.join("desktop.sqlite3"),
+            )?));
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()

@@ -27,6 +27,7 @@ pub struct ModelArtifact {
 #[serde(rename_all = "camelCase")]
 pub struct ModelSearchResult {
     pub id: String,
+    pub revision: Option<String>,
     pub publisher: String,
     pub downloads: u64,
     pub likes: u64,
@@ -39,6 +40,8 @@ pub struct ModelSearchResult {
 #[serde(rename_all = "camelCase")]
 struct HubModel {
     id: String,
+    #[serde(default)]
+    sha: Option<String>,
     #[serde(default)]
     author: Option<String>,
     #[serde(default)]
@@ -80,13 +83,22 @@ struct HubTreeEntry {
     lfs: Option<HubLfs>,
 }
 
-pub fn download_url(repo_id: &str, filename: &str) -> String {
+pub fn download_url(repo_id: &str, revision: &str, filename: &str) -> String {
     let encoded_filename = filename
         .split('/')
         .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT).to_string())
         .collect::<Vec<_>>()
         .join("/");
-    format!("https://huggingface.co/{repo_id}/resolve/main/{encoded_filename}")
+    format!("https://huggingface.co/{repo_id}/resolve/{revision}/{encoded_filename}")
+}
+
+pub fn validated_revision(value: &str) -> Result<&str, String> {
+    let value = value.trim();
+    (value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(value)
+        .ok_or_else(|| {
+            "model downloads require the exact 40-character Hugging Face revision".to_owned()
+        })
 }
 
 fn lfs_sha256(lfs: &HubLfs) -> Option<String> {
@@ -145,7 +157,11 @@ pub fn decode_hugging_face_models(body: &str) -> Result<Vec<ModelSearchResult>, 
                         .unwrap_or(0);
                     let sha256 = file.lfs.as_ref().and_then(lfs_sha256);
                     ModelArtifact {
-                        download_url: download_url(&model.id, &file.rfilename),
+                        download_url: download_url(
+                            &model.id,
+                            model.sha.as_deref().unwrap_or("main"),
+                            &file.rfilename,
+                        ),
                         filename: file.rfilename,
                         size_bytes,
                         sha256,
@@ -155,6 +171,7 @@ pub fn decode_hugging_face_models(body: &str) -> Result<Vec<ModelSearchResult>, 
 
             (!artifacts.is_empty()).then(|| ModelSearchResult {
                 id: model.id,
+                revision: model.sha,
                 publisher,
                 downloads: model.downloads,
                 likes: model.likes,
@@ -189,7 +206,11 @@ pub fn hydrate_model_artifacts(model: &mut ModelSearchResult, body: &str) -> Res
         if let Some((size, sha256)) = metadata.get(&artifact.filename) {
             artifact.size_bytes = *size;
             artifact.sha256.clone_from(sha256);
-            artifact.download_url = download_url(&model.id, &artifact.filename);
+            artifact.download_url = download_url(
+                &model.id,
+                model.revision.as_deref().unwrap_or("main"),
+                &artifact.filename,
+            );
         }
     }
     model.artifacts.sort_by_key(|artifact| {
@@ -210,4 +231,23 @@ pub fn hydrate_model_artifacts(model: &mut ModelSearchResult, body: &str) -> Res
         (priority, artifact.size_bytes, name)
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_hugging_face_models, validated_revision};
+
+    #[test]
+    fn search_retains_exact_hugging_face_revision() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let body = format!(
+            r#"[{{"id":"Qwen/Qwen-GGUF","sha":"{revision}","siblings":[{{"rfilename":"model.gguf","size":12}}]}}]"#
+        );
+        let models = decode_hugging_face_models(&body).unwrap();
+
+        assert_eq!(models[0].revision.as_deref(), Some(revision));
+        assert!(models[0].artifacts[0].download_url.contains(revision));
+        assert_eq!(validated_revision(revision).unwrap(), revision);
+        assert!(validated_revision("main").is_err());
+    }
 }

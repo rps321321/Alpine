@@ -61,12 +61,14 @@ dependencies = [
  "base64 0.22.1",
  "log",
  "percent-encoding",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tauri",
  "tauri-build",
  "tauri-plugin-log",
+ "tempfile",
  "ureq",
 ]
 

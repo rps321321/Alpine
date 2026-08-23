@@ -58,13 +58,13 @@ model diagnostics, files, diffs, terminal output and browser artifacts.
 - The desktop shell presents one small Desktop Interface to the webview for bootstrap, model discovery, assessment, download, settings, Inference Session and task operations. Commands return typed results and long operations emit typed events.
 - Existing Support Envelope, Hardware, Profile, Inference Session, Experiment, Qualification and Deployment modules are reused rather than reimplemented in TypeScript.
 - Pi SDK/core 0.84.2 is the first experimental Agent Runtime Adapter. It is source/version/integrity pinned, receives Alpine-owned model and policy input, and exposes normalized events. It owns no Model Registry, Deployment Role, project, recovery truth or credentials.
-- Agent Runtime state required for crash recovery is serialized into an Alpine-owned form before Pi adoption can be described as reliable or production-ready. Until then the UI labels the Pi path experimental.
+- Agent Runtime input required for restart recovery is serialized as Alpine-owned Messages and typed events. Interrupted work and pending approvals settle visibly and are never replayed automatically. Pi remains experimental until the complete desktop workflow passes live capability Qualification.
 - Hugging Face is the only remote Model Catalog Adapter in v0. Search is restricted to model repositories with GGUF artifacts. Exact repository revision, filename, byte size and origin URL are retained with every download.
 - A Model Assessment is a pre-download estimate. Experiment and Qualification remain the only measured evidence paths, and only explicit Promotion changes a Deployment Role.
 - Downloads use a temporary partial file, support cancellation and publish the final artifact only after expected byte count and configured digest checks pass.
 - The Browser Surface initially optimizes for localhost previews and generated web artifacts in the side panel. Arbitrary authenticated browsing and a shared browser profile are separate authority decisions.
 - Settings are machine-local and schema-versioned. The desktop UI never writes versioned Profiles or Deployment Events by editing JSON directly.
-- UI performance instrumentation records durations and counts, not private task content. Diagnostics are opt-in beyond the compact status surfaces.
+- UI performance instrumentation records bootstrap, Pi launch, first-stream-event and stream durations, current asset transfer, long-task count and webview heap when available. Approved command duration is retained with its typed result. Metrics exclude prompts, credentials and repository content and can be disabled locally.
 - The Codex reference informs hierarchy, density and interaction placement; Alpine uses its own name, icons, content and model-native states rather than reproducing OpenAI branding.
 
 ## Testing Decisions
@@ -88,11 +88,19 @@ model diagnostics, files, diffs, terminal output and browser artifacts.
 
 ## Further Notes
 
-The implemented vertical slice is intentionally bounded but real: launch the
-native app, capture live hardware, resolve the configured Alpine installation,
-search real Hugging Face metadata, estimate fit, resume or cancel a validated
-download, persist the default model and Profile, start or reuse llama.cpp before
-creating a Pi-configured task, run a measured exact-output diagnostic, and open
-the browser side panel. Full multi-Profile evaluation, imported-model setup,
-durable task recovery, diff/terminal tooling and production packaging remain
-follow-on slices behind the same Desktop Interface.
+The implemented application now covers the complete local vertical workflow:
+native first-launch hardware capture; immutable-revision Hugging Face discovery;
+verified resumable download and existing-GGUF import into one Model Registry;
+capacity-labelled fit and placement estimates; default model/Profile selection;
+explicit verified llama.cpp start/stop plus task-time reuse; durable
+Project/Task/Message/Event/Approval recovery; Pi streaming, steering, follow-up,
+cancellation and project-scoped read/search/edit/shell tools; contextual files,
+diffs, terminal output and localhost browser preview; and bounded Candidate,
+Validated or Production evaluation through Alpine's existing evidence engine.
+
+The remaining release distinction is evidence, not a hidden placeholder: the Pi
+adapter is still labelled experimental, authenticated external browsing is not
+granted ambient authority, memory-spill fields are shown as not captured when a
+measurement plan does not provide them, and signed installer/update distribution
+requires a later release key and operator decision. The desktop never promotes a
+Profile or changes a Deployment Role during analysis.

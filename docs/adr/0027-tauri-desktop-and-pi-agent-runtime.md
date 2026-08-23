@@ -68,13 +68,20 @@ separately declared browser authority and must not inherit credentials merely
 because a URL was displayed.
 
 The tested seams are the Desktop Interface, the Agent Runtime Adapter and the
-rendered primary workflow. The application records cold start, command duration,
-time to first event, stream duration, dropped events and renderer memory without
-recording raw prompts, secrets or private file contents.
+rendered primary workflow. Local diagnostics record bootstrap and Pi launch
+duration, time to first text delta, stream duration, current renderer heap and
+client-asset transfer, while approved command results retain their own duration.
+They do not record raw prompts, secrets or private file contents.
 
-The first Analysis surface is a bounded exact-output runtime diagnostic. It is
-explicitly labelled measured diagnostic rather than Experiment or Qualification;
-full multi-Profile evaluation continues to use Alpine's existing evidence engine.
+The Analysis surface separates a bounded exact-output diagnostic from full
+multi-Profile evaluation. The diagnostic is explicitly labelled as such. Full
+analysis copies the versioned repository plan into app-local evidence storage,
+selects a declared Candidate, Validated or Production Qualification target, and
+calls Alpine's existing Experiment, tuning and Qualification engine. It reports
+workload-specific speed, correctness, determinism, stability, tool use, rollback
+and restoration state without changing a Deployment Role. Conservative GPU/CPU
+placement suggestions remain capacity estimates until that measured path proves
+them.
 
 ## Alternatives considered
 
@@ -118,8 +125,11 @@ Desktop icon binaries are materialized from text-encoded sources by the shell's
 build script. This keeps the public repository source-only while still producing
 the PNG and ICO assets required by Tauri packaging.
 
-The initial Pi path remains an experimental product capability even when its UI
-works. Durable task recovery, full multi-Profile analysis, packaging evidence and
-live capability qualification stay open gates. No model is downloaded during
-tests, no Profile is promoted by the desktop app, and Stable rollback is
-preserved.
+The Pi path remains an experimental product capability even though Alpine now
+persists Tasks, Messages, normalized events and one-shot approvals and can
+reconstruct Pi input after a restart. The upstream `AgentHarness` export remains
+an incomplete scaffold in Pi 0.84.2, so Alpine uses the reviewed low-level Agent
+API behind its own Adapter instead of treating that class as durable authority.
+Live capability Qualification of the complete desktop workflow and signed update
+distribution remain open release gates. No model is downloaded during tests, no
+Profile is promoted by the desktop app, and Stable rollback is preserved.

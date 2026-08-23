@@ -15,11 +15,12 @@ function client(): DesktopClient {
         driver: "591.74",
       },
       settings: {
-        schema: 1,
+        schema: 2,
         defaultModel: null,
         installRoot: "C:\\local-models",
         defaultProfile: "stable-16k",
         localMetricsEnabled: true,
+        evaluationRepositoryRoot: "C:\\workspace\\Alpine",
       },
       runtime: {
         state: "configured",
@@ -32,6 +33,7 @@ function client(): DesktopClient {
     searchModels: vi.fn().mockResolvedValue([
       {
         id: "Qwen/Qwen3.5-9B-GGUF",
+        revision: "0123456789abcdef0123456789abcdef01234567",
         publisher: "Qwen",
         downloads: 42_000,
         likes: 900,
@@ -56,14 +58,46 @@ function client(): DesktopClient {
       isMeasured: false,
       evidenceLabel: "Estimate — run analysis to measure",
     }),
+    planModelPlacement: vi.fn().mockResolvedValue({
+      recommendedId: "full-gpu",
+      candidates: [
+        {
+          id: "full-gpu",
+          label: "Full GPU residency",
+          gpuResidencyPercent: 100,
+          estimatedGpuBytes: 7_247_757_312,
+          estimatedSystemBytes: 536_870_912,
+          gpuHeadroomBytes: 14_656_000_000,
+          systemHeadroomBytes: 50_000_000_000,
+          viable: true,
+        },
+      ],
+      profileHint: "Start with the stable Profile.",
+      evidenceLabel: "Capacity estimate — validate with a bounded Alpine evaluation",
+    }),
     setDefaultModel: vi.fn().mockImplementation(async (selection) => ({
-      schema: 1,
+      schema: 2,
       defaultModel: selection,
       installRoot: "C:\\local-models",
       defaultProfile: "stable-16k",
+      evaluationRepositoryRoot: "C:\\workspace\\Alpine",
       localMetricsEnabled: true,
     })),
-    updateSettings: vi.fn().mockImplementation(async (update) => ({ schema: 1, defaultModel: null, ...update })),
+    updateSettings: vi.fn().mockImplementation(async (update) => ({ schema: 2, defaultModel: null, ...update })),
+    startRuntime: vi.fn().mockResolvedValue({
+      state: "running",
+      profile: "stable-16k",
+      model: "Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
+      detail: "A verified local llama.cpp session is running.",
+      availableProfiles: ["stable-16k", "turbo-16k"],
+    }),
+    stopRuntime: vi.fn().mockResolvedValue({
+      state: "configured",
+      profile: "stable-16k",
+      model: "Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
+      detail: "The runtime is configured and stopped.",
+      availableProfiles: ["stable-16k", "turbo-16k"],
+    }),
     resolvePiLaunch: vi.fn().mockResolvedValue({
       modelId: "Qwen3.5-9B-Q4_K_M.gguf",
       baseUrl: "http://127.0.0.1:8080",
@@ -80,6 +114,8 @@ function client(): DesktopClient {
       qualityPass: true,
       evidenceLabel: "Measured diagnostic — not qualification",
     }),
+    runFullEvaluation: vi.fn(),
+    subscribeEvaluationProgress: vi.fn().mockResolvedValue(() => undefined),
     downloadModel: vi.fn().mockResolvedValue({
       path: "C:\\local-models\\Qwen3.5-9B-Q4_K_M.gguf",
       bytesWritten: 6_123_456_789,
@@ -87,12 +123,35 @@ function client(): DesktopClient {
     }),
     cancelDownload: vi.fn().mockResolvedValue(true),
     listDownloads: vi.fn().mockResolvedValue([]),
+    importModel: vi.fn(),
+    listModelRegistry: vi.fn().mockResolvedValue([]),
+    subscribeDownloadProgress: vi.fn().mockResolvedValue(() => undefined),
+    listProjects: vi.fn().mockResolvedValue([]),
+    createProject: vi.fn(),
+    listTasks: vi.fn().mockResolvedValue([]),
+    createTask: vi.fn(),
+    loadTask: vi.fn().mockResolvedValue(null),
+    appendTaskMessage: vi.fn(),
+    appendTaskEvent: vi.fn(),
+    setTaskStatus: vi.fn(),
+    requestToolApproval: vi.fn(),
+    getToolApproval: vi.fn().mockResolvedValue(null),
+    listPendingApprovals: vi.fn().mockResolvedValue([]),
+    decideToolApproval: vi.fn(),
+    listProjectFiles: vi.fn().mockResolvedValue([]),
+    readProjectFile: vi.fn(),
+    searchProjectFiles: vi.fn().mockResolvedValue([]),
+    editProjectFile: vi.fn(),
+    runProjectShell: vi.fn(),
   };
 }
 
 describe("Alpine Desktop primary workflow", () => {
   it("moves from live hardware to a default model without implying qualification", async () => {
     const desktop = client();
+    vi.mocked(desktop.listDownloads)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{ filename: "Qwen3.5-9B-Q4_K_M.gguf", sizeBytes: 6_123_456_789, state: "installed", source: "hugging-face", repoId: "Qwen/Qwen3.5-9B-GGUF", revision: "0123456789abcdef0123456789abcdef01234567", sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", localPath: "C:\\local-models\\models\\Qwen3.5-9B-Q4_K_M.gguf" }]);
     const user = userEvent.setup();
     render(<App desktop={desktop} />);
 
@@ -103,6 +162,9 @@ describe("Alpine Desktop primary workflow", () => {
     await user.click(await screen.findByRole("button", { name: /Qwen3\.5-9B-GGUF/i }));
 
     expect(await screen.findByText("Estimate — run analysis to measure")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Download before selecting" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Download model" }));
+    expect(await screen.findByText("Saved 5.7 GB")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Set as default" }));
     expect(desktop.setDefaultModel).toHaveBeenCalledWith({
       repoId: "Qwen/Qwen3.5-9B-GGUF",
@@ -110,16 +172,15 @@ describe("Alpine Desktop primary workflow", () => {
     });
     expect(await screen.findByText("Default for new tasks")).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Download model" }));
     expect(desktop.downloadModel).toHaveBeenCalledWith(
       {
         repoId: "Qwen/Qwen3.5-9B-GGUF",
         filename: "Qwen3.5-9B-Q4_K_M.gguf",
       },
+      "0123456789abcdef0123456789abcdef01234567",
       6_123_456_789,
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     );
-    expect(await screen.findByText("Saved 5.7 GB")).toBeVisible();
   });
 
   it("opens settings and the browser artifact surface from the task shell", async () => {
@@ -156,5 +217,67 @@ describe("Alpine Desktop primary workflow", () => {
       ),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "Run measured diagnostic" })).toBeDisabled();
+  });
+
+  it("restores a durable task and renders its pending exact tool approval", async () => {
+    const desktop = client();
+    const project = { id: "project-1", name: "Alpine", root: "C:\\workspace\\Alpine", createdAtMs: 1, lastOpenedAtMs: 2 };
+    const task = { id: "task-1", projectId: project.id, title: "Tighten tests", status: "interrupted" as const, modelRepoId: "local/alpine-install", modelFilename: "model.gguf", profile: "stable-16k", error: null, createdAtMs: 3, updatedAtMs: 4 };
+    vi.mocked(desktop.listProjects).mockResolvedValue([project]);
+    vi.mocked(desktop.listTasks).mockResolvedValue([task]);
+    vi.mocked(desktop.loadTask).mockResolvedValue({ task, messages: [{ id: "message-1", taskId: task.id, sequence: 1, role: "user", content: "Tighten the tests", createdAtMs: 3 }], events: [] });
+    vi.mocked(desktop.listPendingApprovals).mockResolvedValue([{ id: "approval-1", taskId: task.id, toolCallId: "tool-1", operation: "shell", proposal: { command: "npm.cmd test" }, state: "pending", detail: null, createdAtMs: 4, decidedAtMs: null, settledAtMs: null }]);
+    const user = userEvent.setup();
+
+    render(<App desktop={desktop} />);
+    await user.click(await screen.findByRole("button", { name: /Tighten tests/i }));
+
+    expect(await screen.findByText("Tighten the tests")).toBeVisible();
+    expect(screen.getByText("Run command?")).toBeVisible();
+    expect(screen.getByText(/npm\.cmd test/)).toBeVisible();
+  });
+
+  it("runs the bounded evaluation and exposes measured policy evidence", async () => {
+    const desktop = client();
+    const initial = await desktop.bootstrap();
+    vi.mocked(desktop.bootstrap).mockResolvedValue({
+      ...initial,
+      settings: { ...initial.settings, defaultModel: { repoId: "local/alpine-install", filename: initial.runtime.model! } },
+    });
+    vi.mocked(desktop.runFullEvaluation).mockResolvedValue({
+      evaluationId: "evaluation-1",
+      scope: "candidate",
+      planId: "stable-vs-turbo-v1",
+      planSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      decision: "qualified",
+      productionDecision: null,
+      selectedProfile: "turbo-16k",
+      recommendation: "Use turbo-16k for this Evidence Identity; Deployment was not changed.",
+      artifactPath: "C:\\evidence\\evaluation-1.json",
+      tuningMeasurements: [],
+      tuning: {},
+      finalEvidence: { result_summary: { workloads: {}, all_quality_pass: true, all_deterministic: true } },
+      candidateQualification: { decision: "qualified" },
+      validatedQualification: null,
+      productionQualification: null,
+      sameProcessRequests: null,
+      cleanRestarts: null,
+      nearLimitContextTokens: null,
+      goldenToolCalls: null,
+      goldenToolFailures: null,
+      rollbackProfile: "stable-16k",
+      rollbackProved: false,
+      priorSessionRestored: true,
+      deploymentChanged: false,
+    });
+    const user = userEvent.setup();
+    render(<App desktop={desktop} />);
+    await screen.findByText("NVIDIA GeForce RTX 4090");
+    await user.click(screen.getByRole("button", { name: "Analysis" }));
+    await user.click(screen.getByRole("button", { name: "Run full analysis" }));
+
+    expect(await screen.findByRole("heading", { name: "qualified" })).toBeVisible();
+    expect(screen.getByText("Restored")).toBeVisible();
+    expect(desktop.runFullEvaluation).toHaveBeenCalledWith("candidate");
   });
 });

@@ -1,6 +1,7 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
 import { PiHarness, localPiModel } from "./pi";
+import type { DesktopClient } from "../desktop";
 
 const config = {
   modelId: "Qwen3.5-9B-Q4_K_M.gguf",
@@ -38,5 +39,27 @@ describe("Pi harness adapter", () => {
     expect(harness.agent.state.model.id).toBe("Qwen3.5-9B-Q4_K_M.gguf");
     expect(harness.agent.steeringMode).toBe("one-at-a-time");
     expect(harness.agent.followUpMode).toBe("one-at-a-time");
+  });
+
+  it("binds Alpine-owned coding tools and queues steering through Pi", () => {
+    const neverCalled = (() => {
+      throw new Error("test stream should not run");
+    }) as StreamFn;
+    const harness = new PiHarness(config, {
+      streamFn: neverCalled,
+      taskId: "task-1",
+      desktop: {} as DesktopClient,
+    });
+
+    expect(harness.agent.state.tools.map((tool) => tool.name)).toEqual([
+      "list_files",
+      "read_file",
+      "search_files",
+      "edit_file",
+      "run_command",
+    ]);
+    harness.steer("Focus on the failing test.");
+    harness.followUp("Then summarize the diff.");
+    expect(harness.agent.hasQueuedMessages()).toBe(true);
   });
 });

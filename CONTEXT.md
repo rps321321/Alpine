@@ -142,6 +142,26 @@ _Avoid_: OpenCode permissions, Harness Policy Boundary
 The one repository the Harness Policy Boundary binds file and Git rules to. Reachability on disk is not consent.
 _Avoid_: workspace, folder, whatever the model can see
 
+**Desktop Project Record**:
+The Alpine-owned durable identity and canonical root for one Selected Project in Alpine Desktop. It groups Tasks without granting the Agent Runtime access beyond that root.
+_Avoid_: Pi project, recent-folder shortcut, implicit filesystem authority
+
+**Task**:
+An Alpine-owned durable unit of agent work inside one Desktop Project Record. A Task retains its selected model, Profile, status, Messages and typed Task Events independently of the replaceable Agent Runtime Adapter.
+_Avoid_: Pi session, chat tab, transient prompt
+
+**Task Message**:
+An ordered user, assistant or system contribution retained as Task recovery state. Tool lifecycle is recorded as Task Events instead of being encoded into terminal-formatted Messages.
+_Avoid_: provider transcript as authority, console log, rendered markdown state
+
+**Task Event**:
+An ordered typed lifecycle fact for a Task, such as a model launch, text stream boundary, tool request, Tool Approval decision, tool result, cancellation or failure. Its kind and structured payload are application state; rendered terminal text is not.
+_Avoid_: log line, Pi-native event as durable truth, UI toast
+
+**Tool Approval**:
+An explicit Alpine Desktop decision that permits or denies one exact consequential workspace operation for one Task. Approvals are scoped to the proposed operation and are never inferred from filesystem reachability.
+_Avoid_: blanket consent, model permission, prior approval for a different command
+
 **Selected Target**:
 A later Attack Lab concept: an explicit host, IP, range, or lab authorized for active testing. v1 does not implement a destination allowlist. Operator judgment is the only destination control.
 _Avoid_: domain allowlist (for ordinary research), scanning ban, pretending OpenCode enforces target scope

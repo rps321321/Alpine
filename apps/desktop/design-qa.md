@@ -2,13 +2,10 @@
 
 ## Source and implementation
 
-- Source: the official OpenAI Codex app launch image captured from <https://openai.com/index/introducing-the-codex-app/> at 1280 x 720.
-- Source capture: `.artifacts/design/codex-official-reference.png`.
-- Implementation capture: `.artifacts/design/alpine-home.png` at 1280 x 720.
-- Combined comparison: `.artifacts/design/codex-alpine-comparison.png`.
-- Model workflow capture: `.artifacts/design/alpine-models.png`.
-- Analysis workflow capture: `.artifacts/design/alpine-analysis.png`.
-- Settings workflow capture: `.artifacts/design/alpine-settings.png`.
+- Source: the official OpenAI Codex app frame from the launch video embedded at <https://openai.com/index/introducing-the-codex-app/>, captured at 1280 x 720 on 2026-08-23.
+- Implementation: the final local production preview at 1280 x 720.
+- The source frame and final Alpine home screen were emitted together in the same browser comparison input before the final judgment.
+- The model-discovery, full-analysis and Settings states were separately captured and inspected at the same viewport.
 
 ## Comparison
 
@@ -20,11 +17,15 @@ Checked at the shared viewport:
 - clear rail, workspace, composer, and inspector hierarchy;
 - realistic hardware and model content rather than placeholder cards;
 - visible focus styles and semantic controls;
-- functional search, selection, verified download, default-model, settings,
-  browser, measured diagnostic, and task-composer paths;
+- functional search, capacity and placement assessment, immutable-revision
+  download guard, default-model guard, settings, runtime controls, browser,
+  full evaluation, measured diagnostic, and task-composer paths;
 - estimate language remains visibly distinct from measured analysis.
+- Analysis-to-Settings navigation resets the main scroll position, so every view
+  opens at its heading rather than inheriting the prior report offset.
 - the Analysis and Settings pages retain the source density and full-height rail
-  anatomy at 1280 x 720 with no console warnings or errors.
+  anatomy at 1280 x 720 with no browser console warnings or errors.
+- final browser diagnostics contained zero entries.
 
 ## Result
 

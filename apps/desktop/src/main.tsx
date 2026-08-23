@@ -6,6 +6,8 @@ import "./styles.css";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 
+performance.mark("alpine:renderer:start");
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <App desktop={isTauri ? tauriDesktopClient : previewDesktopClient} />
