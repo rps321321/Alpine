@@ -1,4 +1,5 @@
 pub mod assessment;
+pub mod browser;
 pub mod catalog;
 pub mod store;
 pub mod workspace;
@@ -8,6 +9,7 @@ use alpine_control_plane::{
     StartSessionOptions, StopSessionOptions,
 };
 use assessment::{HardwareCapacity, ModelAssessment, PlacementPlan};
+use browser::BrowserRegistry;
 use catalog::ModelSearchResult;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -31,7 +33,7 @@ use workspace::{
     WorkspaceShell, WorkspaceShellResult,
 };
 
-const SETTINGS_SCHEMA: u32 = 2;
+const SETTINGS_SCHEMA: u32 = 3;
 
 fn settings_schema() -> u32 {
     SETTINGS_SCHEMA
@@ -65,6 +67,8 @@ struct DesktopSettings {
     local_metrics_enabled: bool,
     #[serde(default)]
     evaluation_repository_root: String,
+    #[serde(default)]
+    browser_allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +78,7 @@ struct SettingsUpdate {
     default_profile: String,
     local_metrics_enabled: bool,
     evaluation_repository_root: String,
+    browser_allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -316,6 +321,7 @@ fn default_settings(app: &AppHandle) -> Result<DesktopSettings, String> {
         evaluation_repository_root: discover_evaluation_repository_root()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
+        browser_allowed_hosts: Vec::new(),
     })
 }
 
@@ -470,7 +476,11 @@ fn bootstrap_snapshot(app: AppHandle) -> Result<BootstrapSnapshot, String> {
 }
 
 #[tauri::command]
-fn update_settings(app: AppHandle, update: SettingsUpdate) -> Result<DesktopSettings, String> {
+fn update_settings(
+    app: AppHandle,
+    browser_registry: State<'_, BrowserRegistry>,
+    update: SettingsUpdate,
+) -> Result<DesktopSettings, String> {
     let install_root = PathBuf::from(update.install_root.trim());
     if !install_root.is_absolute() {
         return Err("the Alpine installation root must be an absolute path".to_owned());
@@ -496,13 +506,34 @@ fn update_settings(app: AppHandle, update: SettingsUpdate) -> Result<DesktopSett
     settings.install_root = install_root.to_string_lossy().into_owned();
     settings.default_profile = default_profile;
     settings.local_metrics_enabled = update.local_metrics_enabled;
+    settings.browser_allowed_hosts = validate_browser_hosts(update.browser_allowed_hosts)?;
     settings.evaluation_repository_root = evaluation_repository_root
         .canonicalize()
         .map_err(|error| format!("failed to resolve evaluation repository root: {error}"))?
         .to_string_lossy()
         .into_owned();
     write_settings(&app, &settings)?;
+    browser_registry.replace_persistent_hosts(settings.browser_allowed_hosts.clone());
     Ok(settings)
+}
+
+fn validate_browser_hosts(values: Vec<String>) -> Result<Vec<String>, String> {
+    let mut hosts = values
+        .into_iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if hosts.iter().any(|host| {
+        host.len() > 253
+            || host.contains('/')
+            || host.contains(':')
+            || host.chars().any(char::is_whitespace)
+    }) {
+        return Err("a saved browser host is invalid".to_owned());
+    }
+    hosts.sort();
+    hosts.dedup();
+    Ok(hosts)
 }
 
 fn read_response(mut response: ureq::http::Response<ureq::Body>) -> Result<String, String> {
@@ -1642,12 +1673,20 @@ pub fn run() {
             search_project_files,
             edit_project_file,
             run_project_shell,
+            browser::browser_navigate,
+            browser::browser_sync_surface,
+            browser::browser_command,
+            browser::browser_clear_data,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             app.manage(Arc::new(DesktopStore::open(
                 data_dir.join("desktop.sqlite3"),
             )?));
+            let browser_hosts = read_settings(app.handle())
+                .map(|settings| settings.browser_allowed_hosts)
+                .unwrap_or_default();
+            app.manage(BrowserRegistry::new(browser_hosts));
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()

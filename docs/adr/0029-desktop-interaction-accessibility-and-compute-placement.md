@@ -24,7 +24,7 @@ every page to satisfy every AAA criterion.
 
 Alpine Desktop uses three primary surfaces: a project and Task rail, a central
 Task transcript with a fixed-bottom composer, and a Context Panel containing
-System, Files, Changes, Terminal and Preview. The project rail and Context Panel
+System, Files, Changes, Terminal and Browser. The project rail and Context Panel
 toggle independently through labeled controls and keyboard shortcuts. Their open
 state is a Desktop UI Preference stored in webview-local storage, not a durable
 Task fact or authority grant.
@@ -59,10 +59,10 @@ combine heterogeneous GPUs or claim that assigning UI work to an iGPU improves
 performance. iGPU and multi-GPU placement remain explicit experimental benchmark
 candidates until the runtime and evidence contracts support them.
 
-Preview remains a localhost-only Context Panel surface. It does not inherit the
-user's normal browser identity, open authenticated external pages or expand tool
-authority. A future unrestricted Browser Surface requires an isolated WebView2
-profile, explicit data controls and system-browser OAuth.
+The initial localhost-only Preview boundary is superseded by ADR 0030. External
+pages now open in native child WebViews with an Alpine-owned profile, per-host
+consent, popup interception and explicit clear-data controls. The Browser remains
+a human surface and does not expand Pi or Desktop Interface authority.
 
 ## Alternatives considered
 
@@ -89,6 +89,6 @@ attachment.
 The main workflow is calmer and more consistent, and the interaction contract can
 be tested without granting new authority. Webview-local panel preferences are
 recoverable but intentionally disposable. Hardware reporting is richer while
-remaining conservative about placement. Full multimodal attachments, an isolated
-WebView2 browser profile, a verified skills/plugins registry, measured iGPU hosts
+remaining conservative about placement. Full multimodal attachments, a verified
+skills/plugins registry, measured iGPU hosts
 and heterogeneous multi-GPU experiments remain separate evidence-backed slices.

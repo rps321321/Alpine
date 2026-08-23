@@ -44,8 +44,8 @@ model diagnostics, files, diffs, terminal output and browser artifacts.
 19. As a developer, I want to steer a running task and queue follow-up work, so that I can correct direction without discarding progress.
 20. As a developer, I want cancellation and worker failure to settle visibly, so that I know whether the task and Inference Session are safe to continue.
 21. As a developer, I want files, diffs, tests and terminal output in the side panel, so that review remains in the task context.
-22. As a developer, I want a local browser surface in the side panel, so that localhost previews and small web artifacts can be inspected without leaving Alpine.
-23. As a developer, I want external or authenticated browsing to require an explicit surface and authority choice, so that an embedded preview is not mistaken for a trusted full browser.
+22. As a developer, I want a shared browser surface in the side panel, so that local apps and external references can be inspected without leaving Alpine.
+23. As a developer, I want each new external host to require explicit consent in an isolated Alpine profile, so browser sign-in state is not mistaken for Agent Runtime or regular-browser authority.
 24. As a privacy-conscious user, I want secrets, private prompts and raw repository content excluded from diagnostics by default, so that useful telemetry does not become a provenance leak.
 25. As a user, I want a proper Settings page for models, runtime, storage, Agent Runtime, appearance, safety and diagnostics, so that configuration is discoverable and not scattered.
 26. As a user, I want settings validation and restart requirements shown before saving, so that a bad path or port does not fail later during a task.
@@ -62,7 +62,7 @@ model diagnostics, files, diffs, terminal output and browser artifacts.
 - Hugging Face is the only remote Model Catalog Adapter in v0. Search is restricted to model repositories with GGUF artifacts. Exact repository revision, filename, byte size and origin URL are retained with every download.
 - A Model Assessment is a pre-download estimate. Experiment and Qualification remain the only measured evidence paths, and only explicit Promotion changes a Deployment Role.
 - Downloads use a temporary partial file, support cancellation and publish the final artifact only after expected byte count and configured digest checks pass.
-- The Browser Surface initially optimizes for localhost previews and generated web artifacts in the side panel. Arbitrary authenticated browsing and a shared browser profile are separate authority decisions.
+- The Browser Surface uses native child WebViews with one Alpine-owned profile, per-tab host consent, controlled tabs/downloads and a clear-data setting. It remains separate from Pi and the user's regular browser profile.
 - Settings are machine-local and schema-versioned. The desktop UI never writes versioned Profiles or Deployment Events by editing JSON directly.
 - UI performance instrumentation records bootstrap, Pi launch, first-stream-event and stream durations, current asset transfer, long-task count and webview heap when available. Approved command duration is retained with its typed result. Metrics exclude prompts, credentials and repository content and can be disabled locally.
 - The Codex reference informs hierarchy, density and interaction placement; Alpine uses its own name, icons, content and model-native states rather than reproducing OpenAI branding.
@@ -95,12 +95,12 @@ capacity-labelled fit and placement estimates; default model/Profile selection;
 explicit verified llama.cpp start/stop plus task-time reuse; durable
 Project/Task/Message/Event/Approval recovery; Pi streaming, steering, follow-up,
 cancellation and project-scoped read/search/edit/shell tools; contextual files,
-diffs, terminal output and localhost browser preview; and bounded Candidate,
+diffs, terminal output and an isolated shared browser; and bounded Candidate,
 Validated or Production evaluation through Alpine's existing evidence engine.
 
 The remaining release distinction is evidence, not a hidden placeholder: the Pi
-adapter is still labelled experimental, authenticated external browsing is not
-granted ambient authority, memory-spill fields are shown as not captured when a
+adapter is still labelled experimental, external browser hosts require explicit
+tab-scoped consent, memory-spill fields are shown as not captured when a
 measurement plan does not provide them, and signed installer/update distribution
 requires a later release key and operator decision. The desktop never promotes a
 Profile or changes a Deployment Role during analysis.

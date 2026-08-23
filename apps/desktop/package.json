@@ -32,6 +32,7 @@
     "@testing-library/user-event": "14.6.1",
     "@types/react": "19.2.0",
     "@types/react-dom": "19.2.0",
+    "axe-core": "4.13.0",
     "jsdom": "26.1.0",
     "typescript": "5.9.3",
     "vitest": "4.1.11"

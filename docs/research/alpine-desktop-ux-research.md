@@ -1,6 +1,6 @@
 # Alpine desktop UX research
 
-Research date: 2026-08-23
+Research date: 2026-08-23; browser implementation check refreshed 2026-08-24
 Scope: desktop information architecture, Codex-inspired interaction patterns, accessibility, motion performance, embedded browsing, and local compute placement.
 
 ## Result
@@ -59,6 +59,13 @@ Microsoft's `NavigationView` similarly defines expanded, compact, and minimal le
 WebView2 supports app-specific user data folders and multiple profiles with separated cookies, preferences, and cache. Microsoft cautions that many independent data folders increase memory, CPU, and disk cost; its WebView2 guidance also recommends using the system browser or broker for OAuth rather than embedded authentication. [Microsoft: WebView2 user data folders](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/user-data-folder), [Microsoft: Multiple profiles](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/multi-profile-support), [Microsoft: WebView2 for Windows apps](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/webview2)
 
 **Recommendation for Alpine.** Implement Browser as an actual webview panel or tab, not an iframe. Give it one dedicated Alpine profile, separate from the user's everyday browser, with clear controls to clear history, downloads, site data, and permissions. Open authentication flows in the system browser. Treat annotations and screenshots as explicit task attachments with origin metadata.
+
+**Implemented boundary (2026-08-24).** Alpine now uses native Tauri child WebViews,
+one application-owned profile, controlled tabs, per-host consent, popup
+interception, downloads and a clear-data setting. The Browser remains a human
+surface rather than a Pi tool. System-browser OAuth handoff, annotations,
+screenshots, history UI and persistent permissions remain unimplemented and are
+not claimed by this milestone. ADR 0030 records the authority boundary.
 
 ### Streaming task UX
 

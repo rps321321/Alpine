@@ -32,6 +32,7 @@ export interface DesktopSettings {
   defaultProfile: string;
   localMetricsEnabled: boolean;
   evaluationRepositoryRoot: string;
+  browserAllowedHosts: string[];
 }
 
 export interface SettingsUpdate {
@@ -39,6 +40,45 @@ export interface SettingsUpdate {
   defaultProfile: string;
   localMetricsEnabled: boolean;
   evaluationRepositoryRoot: string;
+  browserAllowedHosts: string[];
+}
+
+export interface BrowserBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface BrowserNavigationRequest {
+  tabId: string;
+  address: string;
+  allowHost: boolean;
+  bounds: BrowserBounds;
+}
+
+export interface BrowserNavigationResult {
+  status: "opened" | "approval-required";
+  url: string;
+  host: string | null;
+}
+
+export type BrowserCommand = "back" | "forward" | "reload" | "focus" | "close";
+
+export type BrowserEvent =
+  | { kind: "page"; tabId: string; url: string; loading: boolean }
+  | { kind: "title"; tabId: string; title: string }
+  | { kind: "accessRequested"; tabId: string; url: string; host: string }
+  | { kind: "newTabRequested"; tabId: string; url: string }
+  | { kind: "download"; tabId: string; url: string; path: string | null; state: "started" | "completed" | "failed" };
+
+export interface BrowserAdapter {
+  readonly nativeSurface: boolean;
+  navigate(request: BrowserNavigationRequest): Promise<BrowserNavigationResult>;
+  setActive(active: { tabId: string; bounds: BrowserBounds } | null): Promise<void>;
+  command(tabId: string, command: BrowserCommand): Promise<void>;
+  clearData(): Promise<void>;
+  subscribe(listener: (event: BrowserEvent) => void): Promise<() => void>;
 }
 
 export interface BootstrapSnapshot {
@@ -326,6 +366,7 @@ export interface PlacementPlan {
 }
 
 export interface DesktopClient {
+  browser: BrowserAdapter;
   bootstrap(): Promise<BootstrapSnapshot>;
   updateSettings(update: SettingsUpdate): Promise<DesktopSettings>;
   searchModels(query: string): Promise<ModelSearchResult[]>;
@@ -368,7 +409,21 @@ export interface DesktopClient {
   runProjectShell(taskId: string, approvalId: string, shell: WorkspaceShell): Promise<WorkspaceShellResult>;
 }
 
+const tauriBrowserAdapter: BrowserAdapter = {
+  nativeSurface: true,
+  navigate: (request) => invoke<BrowserNavigationResult>("browser_navigate", { request }),
+  setActive: (active) => invoke<void>("browser_sync_surface", {
+    tabId: active?.tabId ?? null,
+    bounds: active?.bounds ?? null,
+  }),
+  command: (tabId, command) => invoke<void>("browser_command", { tabId, command }),
+  clearData: () => invoke<void>("browser_clear_data"),
+  subscribe: async (listener) =>
+    listen<BrowserEvent>("browser-event", (event) => listener(event.payload)),
+};
+
 export const tauriDesktopClient: DesktopClient = {
+  browser: tauriBrowserAdapter,
   bootstrap: () => invoke<BootstrapSnapshot>("bootstrap_snapshot"),
   updateSettings: (update) => invoke<DesktopSettings>("update_settings", { update }),
   searchModels: (query) => invoke<ModelSearchResult[]>("search_models", { query }),
@@ -440,7 +495,45 @@ function previewId(prefix: string) {
   return `${prefix}-${previewNow}-${previewSequence}`;
 }
 
+const previewBrowserListeners = new Set<(event: BrowserEvent) => void>();
+const previewBrowserHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+
+function previewBrowserEvent(event: BrowserEvent) {
+  for (const listener of previewBrowserListeners) listener(event);
+}
+
+const previewBrowserAdapter: BrowserAdapter = {
+  nativeSurface: false,
+  async navigate(request) {
+    const value = /^(https?):\/\//i.test(request.address)
+      ? request.address
+      : `https://${request.address}`;
+    const url = new URL(value);
+    if (!request.allowHost && !previewBrowserHosts.has(url.hostname)) {
+      return { status: "approval-required", url: url.toString(), host: url.hostname };
+    }
+    if (request.allowHost) previewBrowserHosts.add(url.hostname);
+    queueMicrotask(() => {
+      previewBrowserEvent({ kind: "page", tabId: request.tabId, url: url.toString(), loading: true });
+      previewBrowserEvent({ kind: "page", tabId: request.tabId, url: url.toString(), loading: false });
+    });
+    return { status: "opened", url: url.toString(), host: url.hostname };
+  },
+  async setActive() {},
+  async command(tabId, command) {
+    if (command === "reload") {
+      previewBrowserEvent({ kind: "page", tabId, url: "about:blank", loading: false });
+    }
+  },
+  async clearData() {},
+  async subscribe(listener) {
+    previewBrowserListeners.add(listener);
+    return () => previewBrowserListeners.delete(listener);
+  },
+};
+
 export const previewDesktopClient: DesktopClient = {
+  browser: previewBrowserAdapter,
   async bootstrap() {
     await Promise.resolve();
     return {
@@ -463,7 +556,7 @@ export const previewDesktopClient: DesktopClient = {
         }],
       },
       settings: {
-        schema: 2,
+        schema: 3,
         defaultModel: {
           repoId: "local/alpine-install",
           filename: "Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
@@ -472,6 +565,7 @@ export const previewDesktopClient: DesktopClient = {
         defaultProfile: "stable-16k",
         localMetricsEnabled: true,
         evaluationRepositoryRoot: "C:\\workspace\\Alpine",
+        browserAllowedHosts: [],
       },
       runtime: {
         state: "configured",
@@ -548,12 +642,13 @@ export const previewDesktopClient: DesktopClient = {
   },
   async setDefaultModel(selection) {
     return {
-      schema: 2,
+      schema: 3,
       defaultModel: selection,
       installRoot: "C:\\local-models",
       defaultProfile: "stable-16k",
       evaluationRepositoryRoot: "C:\\workspace\\Alpine",
       localMetricsEnabled: true,
+      browserAllowedHosts: [],
     };
   },
   async startRuntime() {
@@ -565,7 +660,7 @@ export const previewDesktopClient: DesktopClient = {
     return { ...snapshot.runtime, state: "configured", detail: "The runtime is configured and stopped." };
   },
   async updateSettings(update) {
-    return { schema: 2, defaultModel: null, ...update };
+    return { schema: 3, defaultModel: null, ...update };
   },
   async resolvePiLaunch() {
     return {

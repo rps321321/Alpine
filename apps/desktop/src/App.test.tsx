@@ -1,11 +1,26 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import axe from "axe-core";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { DesktopClient } from "./desktop";
 
 function client(): DesktopClient {
   return {
+    browser: {
+      nativeSurface: false,
+      navigate: vi.fn().mockImplementation(async ({ address, allowHost }) => {
+        const url = new URL(/^https?:\/\//i.test(address) ? address : `https://${address}`);
+        if (!allowHost && !["localhost", "127.0.0.1", "::1"].includes(url.hostname)) {
+          return { status: "approval-required" as const, url: url.toString(), host: url.hostname };
+        }
+        return { status: "opened" as const, url: url.toString(), host: url.hostname };
+      }),
+      setActive: vi.fn().mockResolvedValue(undefined),
+      command: vi.fn().mockResolvedValue(undefined),
+      clearData: vi.fn().mockResolvedValue(undefined),
+      subscribe: vi.fn().mockResolvedValue(() => undefined),
+    },
     bootstrap: vi.fn().mockResolvedValue({
       hardware: {
         cpu: "AMD Ryzen 9 7950X3D",
@@ -26,12 +41,13 @@ function client(): DesktopClient {
         }],
       },
       settings: {
-        schema: 2,
+        schema: 3,
         defaultModel: null,
         installRoot: "C:\\local-models",
         defaultProfile: "stable-16k",
         localMetricsEnabled: true,
         evaluationRepositoryRoot: "C:\\workspace\\Alpine",
+        browserAllowedHosts: [],
       },
       runtime: {
         state: "configured",
@@ -87,14 +103,15 @@ function client(): DesktopClient {
       evidenceLabel: "Capacity estimate — validate with a bounded Alpine evaluation",
     }),
     setDefaultModel: vi.fn().mockImplementation(async (selection) => ({
-      schema: 2,
+      schema: 3,
       defaultModel: selection,
       installRoot: "C:\\local-models",
       defaultProfile: "stable-16k",
       evaluationRepositoryRoot: "C:\\workspace\\Alpine",
       localMetricsEnabled: true,
+      browserAllowedHosts: [],
     })),
-    updateSettings: vi.fn().mockImplementation(async (update) => ({ schema: 2, defaultModel: null, ...update })),
+    updateSettings: vi.fn().mockImplementation(async (update) => ({ schema: 3, defaultModel: null, ...update })),
     startRuntime: vi.fn().mockResolvedValue({
       state: "running",
       profile: "stable-16k",
@@ -215,7 +232,7 @@ describe("Alpine Desktop primary workflow", () => {
     }));
   });
 
-  it("uses the composer add control for attachments and opens previews beside the task", async () => {
+  it("uses the composer add control and opens the shared browser beside the task", async () => {
     const user = userEvent.setup();
     render(<App desktop={client()} />);
     await screen.findByText("NVIDIA GeForce RTX 4090");
@@ -229,12 +246,39 @@ describe("Alpine Desktop primary workflow", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu", { name: "Add to task" })).not.toBeInTheDocument();
 
-    expect(screen.queryByRole("button", { name: "Browser" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(screen.getByRole("textbox", { name: "Preview address" })).toHaveValue("http://127.0.0.1:4173");
-    await user.click(screen.getByRole("button", { name: "Open preview" }));
-    expect(screen.getByTitle("Browser preview")).toHaveAttribute("src", "http://127.0.0.1:4173/");
+    await user.click(screen.getByRole("button", { name: "Browser", pressed: false }));
+    const address = screen.getByRole("textbox", { name: "Browser address" });
+    await user.type(address, "http://127.0.0.1:4173");
+    await user.click(screen.getByRole("button", { name: "Go" }));
+    expect(screen.getByTitle("Browser page")).toHaveAttribute("src", "http://127.0.0.1:4173/");
     expect(screen.getByRole("heading", { name: "What should we build?" })).toBeVisible();
+  });
+
+  it("opens the shared browser with Ctrl+Shift+B and asks before a new website", async () => {
+    const desktop = client();
+    const user = userEvent.setup();
+    render(<App desktop={desktop} />);
+    await screen.findByText("NVIDIA GeForce RTX 4090");
+
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true, shiftKey: true });
+
+    const address = await screen.findByRole("textbox", { name: "Browser address" });
+    expect(screen.getByRole("complementary", { name: "Context inspector" })).toHaveClass("browser-active");
+    await user.clear(address);
+    await user.type(address, "example.com");
+    await user.click(screen.getByRole("button", { name: "Go" }));
+
+    expect(screen.getByText("Allow example.com?")).toBeVisible();
+    expect(desktop.browser.navigate).toHaveBeenLastCalledWith(expect.objectContaining({
+      address: "example.com",
+      allowHost: false,
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Allow once" }));
+    expect(desktop.browser.navigate).toHaveBeenLastCalledWith(expect.objectContaining({
+      address: "https://example.com/",
+      allowHost: true,
+    }));
   });
 
   it("ignores a slower stale model search response", async () => {
@@ -297,9 +341,10 @@ describe("Alpine Desktop primary workflow", () => {
     );
   });
 
-  it("opens settings and the browser artifact surface from the task shell", async () => {
+  it("opens browser settings, clears its isolated profile, and returns to the browser surface", async () => {
+    const desktop = client();
     const user = userEvent.setup();
-    render(<App desktop={client()} />);
+    render(<App desktop={desktop} />);
     await screen.findByText("NVIDIA GeForce RTX 4090");
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
@@ -307,19 +352,29 @@ describe("Alpine Desktop primary workflow", () => {
     await user.click(screen.getByRole("button", { name: "Use active model" }));
     expect(screen.getByText("Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf")).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Browser" }));
-    expect(screen.getByText("Local addresses only")).toBeVisible();
-    expect(screen.getByText("Not enabled")).toBeVisible();
+    await user.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Browser" }));
+    expect(screen.getByText("Ask before new websites")).toBeVisible();
+    expect(screen.getByText("Separate from your regular browser")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Clear browsing data" }));
+    await waitFor(() => expect(desktop.browser.clearData).toHaveBeenCalledOnce());
+    expect(screen.getByText("Browsing data cleared.")).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(screen.getByRole("textbox", { name: "Preview address" })).toHaveValue(
-      "http://127.0.0.1:4173",
-    );
-    await user.click(screen.getByRole("button", { name: "Open preview" }));
-    expect(screen.getByTitle("Browser preview")).toHaveAttribute(
-      "src",
-      "http://127.0.0.1:4173/",
-    );
+    await user.click(screen.getByRole("button", { name: "Browser", pressed: false }));
+    expect(screen.getByRole("textbox", { name: "Browser address" })).toBeVisible();
+  });
+
+  it("adds, switches, and closes browser tabs", async () => {
+    const desktop = client();
+    const user = userEvent.setup();
+    render(<App desktop={desktop} />);
+    await screen.findByText("NVIDIA GeForce RTX 4090");
+    await user.click(screen.getByRole("button", { name: "Browser", pressed: false }));
+
+    await user.click(screen.getByRole("button", { name: "New browser tab" }));
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: "Close New tab" }).at(-1)!);
+    expect(screen.getAllByRole("tab")).toHaveLength(1);
+    expect(desktop.browser.command).toHaveBeenCalledWith("browser-2", "close");
   });
 
   it("keeps measured analysis disabled when the selected and configured models differ", async () => {
@@ -397,5 +452,20 @@ describe("Alpine Desktop primary workflow", () => {
     expect(await screen.findByRole("heading", { name: "qualified" })).toBeVisible();
     expect(screen.getByText("Restored")).toBeVisible();
     expect(desktop.runFullEvaluation).toHaveBeenCalledWith("candidate");
+  });
+
+  it("has no automated structural WCAG A or AA violations in the primary task shell", async () => {
+    const { container } = render(<App desktop={client()} />);
+    await screen.findByText("NVIDIA GeForce RTX 4090");
+
+    const result = await axe.run(container, {
+      runOnly: {
+        type: "tag",
+        values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"],
+      },
+      rules: { "color-contrast": { enabled: false } },
+    });
+
+    expect(result.violations.map(({ id, nodes }) => ({ id, targets: nodes.map((node) => node.target) }))).toEqual([]);
   });
 });

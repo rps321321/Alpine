@@ -207,8 +207,8 @@ A pre-run compatibility and resource-fit estimate for one exact model artifact o
 _Avoid_: benchmark, qualification, guaranteed fit, recommendation without uncertainty
 
 **Browser Surface**:
-The contextual Alpine Desktop side panel used to inspect local web artifacts. Displaying a URL does not grant authenticated browser authority or host-action consent.
-_Avoid_: trusted browser session, Chrome profile, unrestricted web tool
+The contextual Alpine Desktop panel backed by isolated native child WebViews and one Alpine-owned profile. Loopback pages open directly; each new external host requires a tab-scoped user decision. It is a human-visible surface and grants no Pi, Desktop Interface or host-tool authority.
+_Avoid_: regular browser profile, agent web tool, ambient credentials, URL as consent
 
 **Desktop UI Preference**:
 A non-authoritative machine-local presentation choice such as whether the project rail or Context Panel is open. It may use webview-local storage because it grants no project, model, browser or execution authority.
