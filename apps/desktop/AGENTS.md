@@ -10,7 +10,10 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 ## Durable desktop design contract
 
-- Use a restrained dark desktop interface with a subtle light-teal accent. Prefer hierarchy, whitespace, and disclosure over card-heavy or neon dashboard styling.
+- Use the operator-selected light coral/blush visual system: a warm orange-coral-to-rose application shell, quiet cream/blush work surfaces, warm aubergine text, thin translucent separators, and coral focus/selection states. Dark-first and light-teal are obsolete defaults. Verify custom color contrast instead of assuming the reference palette is accessible.
+- Use Apple's current Human Interface Guidelines as the governing UI standard. Before changing a surface, read the applicable sections recorded in `design-research/2026-08-24/HIG-COVERAGE.md`; preserve Windows-native behavior when platform conventions differ.
+- The selected composite reference combines: option 1's left rail and right inspector structure; option 2's Browser chrome and organized Models search/list/selector; and option 3's task stream, generated mountain artwork, task search/filter, and Today/Earlier grouping. Integrate the top Settings surface into the app shell with a distinct harmonious surface color.
+- Prefer hierarchy, whitespace, and disclosure over card-heavy or neon dashboard styling. Do not nest cards merely to separate adjacent content.
 - Keep the task transcript and composer central. The composer occupies a stable bottom row and must not move when a run starts, streams, stops, errors, or queues a follow-up.
 - Keep project selection in the left rail. The composer `+` menu is only for request context such as supported attachments, skills, and tools; unavailable capabilities must explain why they are unavailable.
 - Merge model discovery, downloads, imports, installed state, and the new-task default into one Models lifecycle.

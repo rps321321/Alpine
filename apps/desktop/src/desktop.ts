@@ -23,6 +23,9 @@ export interface HardwareProfile {
 export interface ModelSelection {
   repoId: string;
   filename: string;
+  registryId?: string | null;
+  revision?: string | null;
+  sha256?: string | null;
 }
 
 export interface DesktopSettings {
@@ -70,12 +73,20 @@ export type BrowserEvent =
   | { kind: "title"; tabId: string; title: string }
   | { kind: "accessRequested"; tabId: string; url: string; host: string }
   | { kind: "newTabRequested"; tabId: string; url: string }
-  | { kind: "download"; tabId: string; url: string; path: string | null; state: "started" | "completed" | "failed" };
+  | {
+      kind: "download";
+      tabId: string;
+      url: string;
+      path: string | null;
+      state: "started" | "completed" | "failed";
+    };
 
 export interface BrowserAdapter {
   readonly nativeSurface: boolean;
   navigate(request: BrowserNavigationRequest): Promise<BrowserNavigationResult>;
-  setActive(active: { tabId: string; bounds: BrowserBounds } | null): Promise<void>;
+  setActive(
+    active: { tabId: string; bounds: BrowserBounds } | null,
+  ): Promise<void>;
   command(tabId: string, command: BrowserCommand): Promise<void>;
   clearData(): Promise<void>;
   subscribe(listener: (event: BrowserEvent) => void): Promise<() => void>;
@@ -126,7 +137,12 @@ export interface FullEvaluationSummary {
   scope: EvaluationScope;
   planId: string;
   planSha256: string;
-  decision: "qualified" | "unsupported" | "inconclusive" | "regressed" | "not-proven";
+  decision:
+    | "qualified"
+    | "unsupported"
+    | "inconclusive"
+    | "regressed"
+    | "not-proven";
   productionDecision: string | null;
   selectedProfile: string | null;
   recommendation: string;
@@ -170,6 +186,7 @@ export interface ModelArtifact {
 }
 
 export interface DownloadedModel {
+  registryId?: string | null;
   filename: string;
   sizeBytes: number;
   state: "installed" | "partial";
@@ -280,6 +297,11 @@ export interface ToolApproval {
   settledAtMs: number | null;
 }
 
+export interface ToolApprovalDecision {
+  approval: ToolApproval;
+  event: TaskEvent;
+}
+
 export interface WorkspaceEntry {
   path: string;
   kind: "file" | "directory";
@@ -339,7 +361,11 @@ export interface ModelSearchResult {
 }
 
 export interface ModelAssessment {
-  status: "fits-gpu-with-headroom" | "fits-gpu-tight" | "fits-with-cpu-offload" | "unlikely-to-fit";
+  status:
+    | "fits-gpu-with-headroom"
+    | "fits-gpu-tight"
+    | "fits-with-cpu-offload"
+    | "unlikely-to-fit";
   artifactBytes: number;
   estimatedRuntimeBytes: number;
   headroomBytes: number;
@@ -378,21 +404,42 @@ export interface DesktopClient {
   resolvePiLaunch(): Promise<PiLaunchConfig>;
   runRuntimeProbe(): Promise<RuntimeProbeReport>;
   runFullEvaluation(scope: EvaluationScope): Promise<FullEvaluationSummary>;
-  subscribeEvaluationProgress(listener: (progress: EvaluationProgress) => void): Promise<() => void>;
-  downloadModel(selection: ModelSelection, revision: string, expectedBytes: number, expectedSha256: string | null): Promise<DownloadReceipt>;
+  subscribeEvaluationProgress(
+    listener: (progress: EvaluationProgress) => void,
+  ): Promise<() => void>;
+  downloadModel(
+    selection: ModelSelection,
+    revision: string,
+    expectedBytes: number,
+    expectedSha256: string | null,
+  ): Promise<DownloadReceipt>;
   cancelDownload(selection: ModelSelection): Promise<boolean>;
   listDownloads(): Promise<DownloadedModel[]>;
   importModel(sourcePath: string): Promise<ModelRegistryEntry>;
   listModelRegistry(): Promise<ModelRegistryEntry[]>;
-  subscribeDownloadProgress(listener: (progress: DownloadProgress) => void): Promise<() => void>;
+  subscribeDownloadProgress(
+    listener: (progress: DownloadProgress) => void,
+  ): Promise<() => void>;
   listProjects(): Promise<DesktopProject[]>;
   createProject(name: string, root: string): Promise<DesktopProject>;
   listTasks(projectId: string): Promise<DesktopTask[]>;
   createTask(input: CreateTaskInput): Promise<DesktopTask>;
   loadTask(taskId: string): Promise<TaskDetail | null>;
-  appendTaskMessage(input: { taskId: string; role: MessageRole; content: string }): Promise<TaskMessage>;
-  appendTaskEvent(input: { taskId: string; kind: string; payload: unknown }): Promise<TaskEvent>;
-  setTaskStatus(taskId: string, status: TaskStatus, error?: string | null): Promise<DesktopTask>;
+  appendTaskMessage(input: {
+    taskId: string;
+    role: MessageRole;
+    content: string;
+  }): Promise<TaskMessage>;
+  appendTaskEvent(input: {
+    taskId: string;
+    kind: string;
+    payload: unknown;
+  }): Promise<TaskEvent>;
+  setTaskStatus(
+    taskId: string,
+    status: TaskStatus,
+    error?: string | null,
+  ): Promise<DesktopTask>;
   requestToolApproval(input: {
     taskId: string;
     toolCallId: string;
@@ -401,22 +448,45 @@ export interface DesktopClient {
   }): Promise<ToolApproval>;
   getToolApproval(approvalId: string): Promise<ToolApproval | null>;
   listPendingApprovals(taskId: string): Promise<ToolApproval[]>;
-  decideToolApproval(approvalId: string, approved: boolean): Promise<ToolApproval>;
+  decideToolApproval(
+    approvalId: string,
+    approved: boolean,
+  ): Promise<ToolApprovalDecision>;
   listProjectFiles(taskId: string, limit?: number): Promise<WorkspaceEntry[]>;
-  readProjectFile(taskId: string, path: string, offset?: number, limit?: number): Promise<WorkspaceRead>;
-  searchProjectFiles(taskId: string, query: string, limit?: number): Promise<WorkspaceSearchMatch[]>;
-  editProjectFile(taskId: string, approvalId: string, edit: WorkspaceEdit): Promise<WorkspaceEditResult>;
-  runProjectShell(taskId: string, approvalId: string, shell: WorkspaceShell): Promise<WorkspaceShellResult>;
+  readProjectFile(
+    taskId: string,
+    path: string,
+    offset?: number,
+    limit?: number,
+  ): Promise<WorkspaceRead>;
+  searchProjectFiles(
+    taskId: string,
+    query: string,
+    limit?: number,
+  ): Promise<WorkspaceSearchMatch[]>;
+  editProjectFile(
+    taskId: string,
+    approvalId: string,
+    edit: WorkspaceEdit,
+  ): Promise<WorkspaceEditResult>;
+  runProjectShell(
+    taskId: string,
+    approvalId: string,
+    shell: WorkspaceShell,
+  ): Promise<WorkspaceShellResult>;
 }
 
 const tauriBrowserAdapter: BrowserAdapter = {
   nativeSurface: true,
-  navigate: (request) => invoke<BrowserNavigationResult>("browser_navigate", { request }),
-  setActive: (active) => invoke<void>("browser_sync_surface", {
-    tabId: active?.tabId ?? null,
-    bounds: active?.bounds ?? null,
-  }),
-  command: (tabId, command) => invoke<void>("browser_command", { tabId, command }),
+  navigate: (request) =>
+    invoke<BrowserNavigationResult>("browser_navigate", { request }),
+  setActive: (active) =>
+    invoke<void>("browser_sync_surface", {
+      tabId: active?.tabId ?? null,
+      bounds: active?.bounds ?? null,
+    }),
+  command: (tabId, command) =>
+    invoke<void>("browser_command", { tabId, command }),
   clearData: () => invoke<void>("browser_clear_data"),
   subscribe: async (listener) =>
     listen<BrowserEvent>("browser-event", (event) => listener(event.payload)),
@@ -425,9 +495,12 @@ const tauriBrowserAdapter: BrowserAdapter = {
 export const tauriDesktopClient: DesktopClient = {
   browser: tauriBrowserAdapter,
   bootstrap: () => invoke<BootstrapSnapshot>("bootstrap_snapshot"),
-  updateSettings: (update) => invoke<DesktopSettings>("update_settings", { update }),
-  searchModels: (query) => invoke<ModelSearchResult[]>("search_models", { query }),
-  assessModel: (artifactBytes) => invoke<ModelAssessment>("assess_model", { artifactBytes }),
+  updateSettings: (update) =>
+    invoke<DesktopSettings>("update_settings", { update }),
+  searchModels: (query) =>
+    invoke<ModelSearchResult[]>("search_models", { query }),
+  assessModel: (artifactBytes) =>
+    invoke<ModelAssessment>("assess_model", { artifactBytes }),
   planModelPlacement: (artifactBytes) =>
     invoke<PlacementPlan>("plan_model_placement", { artifactBytes }),
   setDefaultModel: (selection) =>
@@ -436,41 +509,73 @@ export const tauriDesktopClient: DesktopClient = {
   stopRuntime: () => invoke<RuntimeSnapshot>("stop_runtime"),
   resolvePiLaunch: () => invoke<PiLaunchConfig>("resolve_pi_launch"),
   runRuntimeProbe: () => invoke<RuntimeProbeReport>("run_runtime_probe"),
-  runFullEvaluation: (scope) => invoke<FullEvaluationSummary>("run_full_evaluation", { scope }),
+  runFullEvaluation: (scope) =>
+    invoke<FullEvaluationSummary>("run_full_evaluation", { scope }),
   subscribeEvaluationProgress: async (listener) =>
-    listen<EvaluationProgress>("evaluation-progress", (event) => listener(event.payload)),
+    listen<EvaluationProgress>("evaluation-progress", (event) =>
+      listener(event.payload),
+    ),
   downloadModel: (selection, revision, expectedBytes, expectedSha256) =>
-    invoke<DownloadReceipt>("download_model", { selection, revision, expectedBytes, expectedSha256 }),
-  cancelDownload: (selection) => invoke<boolean>("cancel_download", { selection }),
+    invoke<DownloadReceipt>("download_model", {
+      selection,
+      revision,
+      expectedBytes,
+      expectedSha256,
+    }),
+  cancelDownload: (selection) =>
+    invoke<boolean>("cancel_download", { selection }),
   listDownloads: () => invoke<DownloadedModel[]>("list_downloads"),
-  importModel: (sourcePath) => invoke<ModelRegistryEntry>("import_model", { sourcePath }),
+  importModel: (sourcePath) =>
+    invoke<ModelRegistryEntry>("import_model", { sourcePath }),
   listModelRegistry: () => invoke<ModelRegistryEntry[]>("list_model_registry"),
   subscribeDownloadProgress: async (listener) =>
-    listen<DownloadProgress>("download-progress", (event) => listener(event.payload)),
+    listen<DownloadProgress>("download-progress", (event) =>
+      listener(event.payload),
+    ),
   listProjects: () => invoke<DesktopProject[]>("list_projects"),
-  createProject: (name, root) => invoke<DesktopProject>("create_project", { name, root }),
+  createProject: (name, root) =>
+    invoke<DesktopProject>("create_project", { name, root }),
   listTasks: (projectId) => invoke<DesktopTask[]>("list_tasks", { projectId }),
   createTask: (input) => invoke<DesktopTask>("create_task", { input }),
   loadTask: (taskId) => invoke<TaskDetail | null>("load_task", { taskId }),
-  appendTaskMessage: (input) => invoke<TaskMessage>("append_task_message", { input }),
+  appendTaskMessage: (input) =>
+    invoke<TaskMessage>("append_task_message", { input }),
   appendTaskEvent: (input) => invoke<TaskEvent>("append_task_event", { input }),
   setTaskStatus: (taskId, status, error = null) =>
     invoke<DesktopTask>("set_task_status", { taskId, status, error }),
-  requestToolApproval: (input) => invoke<ToolApproval>("request_tool_approval", { input }),
-  getToolApproval: (approvalId) => invoke<ToolApproval | null>("get_tool_approval", { approvalId }),
-  listPendingApprovals: (taskId) => invoke<ToolApproval[]>("list_pending_approvals", { taskId }),
+  requestToolApproval: (input) =>
+    invoke<ToolApproval>("request_tool_approval", { input }),
+  getToolApproval: (approvalId) =>
+    invoke<ToolApproval | null>("get_tool_approval", { approvalId }),
+  listPendingApprovals: (taskId) =>
+    invoke<ToolApproval[]>("list_pending_approvals", { taskId }),
   decideToolApproval: (approvalId, approved) =>
-    invoke<ToolApproval>("decide_tool_approval", { approvalId, approved }),
+    invoke<ToolApprovalDecision>("decide_tool_approval", {
+      approvalId,
+      approved,
+    }),
   listProjectFiles: (taskId, limit = 2_000) =>
     invoke<WorkspaceEntry[]>("list_project_files", { taskId, limit }),
   readProjectFile: (taskId, path, offset, limit) =>
     invoke<WorkspaceRead>("read_project_file", { taskId, path, offset, limit }),
   searchProjectFiles: (taskId, query, limit = 200) =>
-    invoke<WorkspaceSearchMatch[]>("search_project_files", { taskId, query, limit }),
+    invoke<WorkspaceSearchMatch[]>("search_project_files", {
+      taskId,
+      query,
+      limit,
+    }),
   editProjectFile: (taskId, approvalId, edit) =>
-    invoke<WorkspaceEditResult>("edit_project_file", { taskId, approvalId, edit }),
+    invoke<WorkspaceEditResult>("edit_project_file", {
+      taskId,
+      approvalId,
+      edit,
+    }),
   runProjectShell: (taskId, approvalId, shell) =>
-    invoke<WorkspaceShellResult>("run_project_shell", { taskId, approvalId, shell }),
+    invoke<WorkspaceShellResult>("run_project_shell", {
+      taskId,
+      approvalId,
+      shell,
+    }),
 };
 
 const gib = 1024 ** 3;
@@ -510,19 +615,38 @@ const previewBrowserAdapter: BrowserAdapter = {
       : `https://${request.address}`;
     const url = new URL(value);
     if (!request.allowHost && !previewBrowserHosts.has(url.hostname)) {
-      return { status: "approval-required", url: url.toString(), host: url.hostname };
+      return {
+        status: "approval-required",
+        url: url.toString(),
+        host: url.hostname,
+      };
     }
     if (request.allowHost) previewBrowserHosts.add(url.hostname);
     queueMicrotask(() => {
-      previewBrowserEvent({ kind: "page", tabId: request.tabId, url: url.toString(), loading: true });
-      previewBrowserEvent({ kind: "page", tabId: request.tabId, url: url.toString(), loading: false });
+      previewBrowserEvent({
+        kind: "page",
+        tabId: request.tabId,
+        url: url.toString(),
+        loading: true,
+      });
+      previewBrowserEvent({
+        kind: "page",
+        tabId: request.tabId,
+        url: url.toString(),
+        loading: false,
+      });
     });
     return { status: "opened", url: url.toString(), host: url.hostname };
   },
   async setActive() {},
   async command(tabId, command) {
     if (command === "reload") {
-      previewBrowserEvent({ kind: "page", tabId, url: "about:blank", loading: false });
+      previewBrowserEvent({
+        kind: "page",
+        tabId,
+        url: "about:blank",
+        loading: false,
+      });
     }
   },
   async clearData() {},
@@ -548,18 +672,24 @@ export const previewDesktopClient: DesktopClient = {
         osVersion: "11",
         physicalCores: 16,
         logicalProcessors: 32,
-        computeDevices: [{
-          name: "NVIDIA GeForce RTX 4090",
-          memoryBytes: 24 * gib,
-          driver: "591.74",
-          backend: "cuda",
-        }],
+        computeDevices: [
+          {
+            name: "NVIDIA GeForce RTX 4090",
+            memoryBytes: 24 * gib,
+            driver: "591.74",
+            backend: "cuda",
+          },
+        ],
       },
       settings: {
-        schema: 3,
+        schema: 4,
         defaultModel: {
-          repoId: "local/alpine-install",
+          repoId: "Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
           filename: "Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
+          registryId: "preview-model-1",
+          revision: "0123456789abcdef0123456789abcdef01234567",
+          sha256:
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         },
         installRoot: "C:\\local-models",
         defaultProfile: "stable-16k",
@@ -571,7 +701,8 @@ export const previewDesktopClient: DesktopClient = {
         state: "configured",
         profile: "stable-16k",
         model: "Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
-        detail: "The runtime is configured and will start with the next Pi task.",
+        detail:
+          "The runtime is configured and will start with the next Pi task.",
         availableProfiles: ["stable-16k", "turbo-16k", "fast-32k"],
       },
     };
@@ -591,7 +722,8 @@ export const previewDesktopClient: DesktopClient = {
           {
             filename: "Qwen3.5-9B-Q4_K_M.gguf",
             sizeBytes: 6_123_456_789,
-            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sha256:
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             downloadUrl:
               "https://huggingface.co/Qwen/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf",
           },
@@ -603,14 +735,18 @@ export const previewDesktopClient: DesktopClient = {
     return {
       status: "fits-gpu-with-headroom",
       artifactBytes,
-      estimatedRuntimeBytes: Math.ceil((artifactBytes * 1.1 + 512 * 1024 ** 2) / (256 * 1024 ** 2)) * (256 * 1024 ** 2),
+      estimatedRuntimeBytes:
+        Math.ceil((artifactBytes * 1.1 + 512 * 1024 ** 2) / (256 * 1024 ** 2)) *
+        (256 * 1024 ** 2),
       headroomBytes: 17_448_304_640,
       isMeasured: false,
       evidenceLabel: "Estimate — run analysis to measure",
     };
   },
   async planModelPlacement(artifactBytes) {
-    const runtimeBytes = Math.ceil((artifactBytes * 1.1 + 512 * 1024 ** 2) / (256 * 1024 ** 2)) * (256 * 1024 ** 2);
+    const runtimeBytes =
+      Math.ceil((artifactBytes * 1.1 + 512 * 1024 ** 2) / (256 * 1024 ** 2)) *
+      (256 * 1024 ** 2);
     const gpuBudget = 24 * gib * 0.85;
     const systemBudget = 64 * gib * 0.75;
     const candidates: PlacementCandidate[] = [
@@ -620,8 +756,11 @@ export const previewDesktopClient: DesktopClient = {
       ["cpu-only", "CPU-only fallback", 0],
     ].map(([id, label, percent]) => {
       const gpuResidencyPercent = Number(percent);
-      const estimatedGpuBytes = runtimeBytes * gpuResidencyPercent / 100;
-      const estimatedSystemBytes = runtimeBytes - estimatedGpuBytes + (gpuResidencyPercent === 100 ? 512 * 1024 ** 2 : gib);
+      const estimatedGpuBytes = (runtimeBytes * gpuResidencyPercent) / 100;
+      const estimatedSystemBytes =
+        runtimeBytes -
+        estimatedGpuBytes +
+        (gpuResidencyPercent === 100 ? 512 * 1024 ** 2 : gib);
       return {
         id: id as PlacementCandidate["id"],
         label: String(label),
@@ -630,19 +769,24 @@ export const previewDesktopClient: DesktopClient = {
         estimatedSystemBytes,
         gpuHeadroomBytes: Math.max(0, gpuBudget - estimatedGpuBytes),
         systemHeadroomBytes: Math.max(0, systemBudget - estimatedSystemBytes),
-        viable: estimatedGpuBytes <= gpuBudget && estimatedSystemBytes <= systemBudget,
+        viable:
+          estimatedGpuBytes <= gpuBudget &&
+          estimatedSystemBytes <= systemBudget,
       };
     });
     return {
-      recommendedId: candidates.find((candidate) => candidate.viable)?.id ?? null,
+      recommendedId:
+        candidates.find((candidate) => candidate.viable)?.id ?? null,
       candidates,
-      profileHint: "Start with the stable Profile; context and layer placement remain measured tuning inputs.",
-      evidenceLabel: "Capacity estimate — validate with a bounded Alpine evaluation",
+      profileHint:
+        "Start with the stable Profile; context and layer placement remain measured tuning inputs.",
+      evidenceLabel:
+        "Capacity estimate — validate with a bounded Alpine evaluation",
     };
   },
   async setDefaultModel(selection) {
     return {
-      schema: 3,
+      schema: 4,
       defaultModel: selection,
       installRoot: "C:\\local-models",
       defaultProfile: "stable-16k",
@@ -653,14 +797,22 @@ export const previewDesktopClient: DesktopClient = {
   },
   async startRuntime() {
     const snapshot = await this.bootstrap();
-    return { ...snapshot.runtime, state: "running", detail: "A verified local llama.cpp session is running." };
+    return {
+      ...snapshot.runtime,
+      state: "running",
+      detail: "A verified local llama.cpp session is running.",
+    };
   },
   async stopRuntime() {
     const snapshot = await this.bootstrap();
-    return { ...snapshot.runtime, state: "configured", detail: "The runtime is configured and stopped." };
+    return {
+      ...snapshot.runtime,
+      state: "configured",
+      detail: "The runtime is configured and stopped.",
+    };
   },
   async updateSettings(update) {
-    return { schema: 3, defaultModel: null, ...update };
+    return { schema: 4, defaultModel: null, ...update };
   },
   async resolvePiLaunch() {
     return {
@@ -689,11 +841,13 @@ export const previewDesktopClient: DesktopClient = {
       evaluationId: `preview-${scope}`,
       scope,
       planId: `local-16k-stable-vs-turbo-v1-desktop-${scope}`,
-      planSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      planSha256:
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       decision: "qualified",
       productionDecision: scope === "production" ? "not-proven" : null,
       selectedProfile: "turbo-16k",
-      recommendation: "Use turbo-16k for this Evidence Identity; no Deployment Role was changed.",
+      recommendation:
+        "Use turbo-16k for this Evidence Identity; no Deployment Role was changed.",
       artifactPath: "C:\\Alpine\\evidence\\evaluations\\preview.json",
       tuningMeasurements: [
         { profile: "stable-16k", run_id: "stable-run" },
@@ -703,10 +857,26 @@ export const previewDesktopClient: DesktopClient = {
       finalEvidence: {
         result_summary: {
           workloads: {
-            "prefill-4k": { prefill_tps: { median: 722.4 }, quality_pass_rate: 1, deterministic: true },
-            "novel-256": { decode_tps: { median: 44.8 }, quality_pass_rate: 1, deterministic: true },
-            "repeat-code-256": { decode_tps: { median: 118.6 }, quality_pass_rate: 1, deterministic: true },
-            "structured-json-128": { decode_tps: { median: 45.1 }, quality_pass_rate: 1, deterministic: true },
+            "prefill-4k": {
+              prefill_tps: { median: 722.4 },
+              quality_pass_rate: 1,
+              deterministic: true,
+            },
+            "novel-256": {
+              decode_tps: { median: 44.8 },
+              quality_pass_rate: 1,
+              deterministic: true,
+            },
+            "repeat-code-256": {
+              decode_tps: { median: 118.6 },
+              quality_pass_rate: 1,
+              deterministic: true,
+            },
+            "structured-json-128": {
+              decode_tps: { median: 45.1 },
+              quality_pass_rate: 1,
+              deterministic: true,
+            },
           },
           all_quality_pass: true,
           all_deterministic: true,
@@ -714,7 +884,8 @@ export const previewDesktopClient: DesktopClient = {
         },
       },
       candidateQualification: { decision: "qualified", reasons: [] },
-      validatedQualification: scope === "candidate" ? null : { decision: "qualified", reasons: [] },
+      validatedQualification:
+        scope === "candidate" ? null : { decision: "qualified", reasons: [] },
       productionQualification: null,
       sameProcessRequests: scope === "candidate" ? null : 50,
       cleanRestarts: scope === "candidate" ? null : 10,
@@ -744,14 +915,17 @@ export const previewDesktopClient: DesktopClient = {
   async listDownloads() {
     return [
       {
+        registryId: "preview-model-1",
         filename: "Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
         sizeBytes: 17_448_304_640,
         state: "installed",
         source: "hugging-face",
         repoId: "Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
         revision: "0123456789abcdef0123456789abcdef01234567",
-        sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        localPath: "C:\\local-models\\models\\Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
+        sha256:
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        localPath:
+          "C:\\local-models\\models\\Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
       },
     ];
   },
@@ -765,7 +939,8 @@ export const previewDesktopClient: DesktopClient = {
       filename,
       localPath: `C:\\local-models\\models\\${filename}`,
       observedBytes: 6_123_456_789,
-      sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      sha256:
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       originUrl: null,
       createdAtMs: Date.now(),
       verifiedAtMs: Date.now(),
@@ -868,10 +1043,26 @@ export const previewDesktopClient: DesktopClient = {
   },
   async decideToolApproval(approvalId, approved) {
     const approval = previewApprovals.get(approvalId);
-    if (!approval || approval.state !== "pending") throw new Error("Approval already settled");
+    if (!approval || approval.state !== "pending")
+      throw new Error("Approval already settled");
     approval.state = approved ? "approved" : "denied";
     approval.decidedAtMs = Date.now();
-    return approval;
+    const detail = previewDetails.get(approval.taskId);
+    if (!detail) throw new Error("Preview task does not exist");
+    const event: TaskEvent = {
+      id: previewId("event"),
+      taskId: approval.taskId,
+      sequence: detail.events.length + 1,
+      kind: "approval.decided",
+      payload: {
+        approvalId: approval.id,
+        operation: approval.operation,
+        approved,
+      },
+      createdAtMs: approval.decidedAtMs,
+    };
+    detail.events.push(event);
+    return { approval, event };
   },
   async listProjectFiles() {
     return [
@@ -884,7 +1075,8 @@ export const previewDesktopClient: DesktopClient = {
   async readProjectFile(_taskId, path) {
     return {
       path,
-      content: "# Preview file\n\nThis is project-scoped content from the Alpine Desktop preview.",
+      content:
+        "# Preview file\n\nThis is project-scoped content from the Alpine Desktop preview.",
       startLine: 1,
       endLine: 3,
       totalLines: 3,
@@ -907,7 +1099,8 @@ export const previewDesktopClient: DesktopClient = {
   },
   async runProjectShell(_taskId, approvalId, shell) {
     const approval = previewApprovals.get(approvalId);
-    if (approval?.state !== "approved") throw new Error("Shell command is not approved");
+    if (approval?.state !== "approved")
+      throw new Error("Shell command is not approved");
     approval.state = "completed";
     approval.settledAtMs = Date.now();
     return {

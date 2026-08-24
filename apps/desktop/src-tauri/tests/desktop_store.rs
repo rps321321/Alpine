@@ -113,7 +113,7 @@ fn tool_approval_is_exact_and_can_only_be_claimed_once() {
     let proposal = serde_json::json!({"path": "README.md", "oldText": "old", "newText": "new"});
     let pending = store
         .request_tool_approval(NewToolApproval {
-            task_id: task.id,
+            task_id: task.id.clone(),
             tool_call_id: "call-1".to_owned(),
             operation: "edit".to_owned(),
             proposal: proposal.clone(),
@@ -121,8 +121,14 @@ fn tool_approval_is_exact_and_can_only_be_claimed_once() {
         .unwrap();
     assert_eq!(pending.state, ApprovalState::Pending);
 
-    let approved = store.decide_tool_approval(&pending.id, true).unwrap();
-    assert_eq!(approved.state, ApprovalState::Approved);
+    let decision = store
+        .decide_tool_approval_with_event(&pending.id, true)
+        .unwrap();
+    assert_eq!(decision.approval.state, ApprovalState::Approved);
+    assert_eq!(decision.event.kind, "approval.decided");
+    let persisted_events = store.load_task(&task.id).unwrap().unwrap().events;
+    assert_eq!(persisted_events.len(), 1);
+    assert_eq!(persisted_events[0].id, decision.event.id);
     store
         .claim_tool_approval(&pending.id, "edit", &proposal)
         .unwrap();

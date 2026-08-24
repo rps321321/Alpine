@@ -29,6 +29,39 @@ toggle independently through labeled controls and keyboard shortcuts. Their open
 state is a Desktop UI Preference stored in webview-local storage, not a durable
 Task fact or authority grant.
 
+The left and right splits are directly resizable with pointer or keyboard. Each
+divider exposes separator semantics, a current value and bounded minimum and
+maximum widths; widths persist as disposable local preferences. Browser mode
+enforces a larger Context Panel minimum so native child-WebView geometry remains
+usable. Repeated Performance or Browser commands toggle the active panel closed,
+and Enter submits the composer while Shift+Enter inserts a line break.
+At compact window widths, overlay panes begin closed so the Task canvas remains
+usable; the operator can reveal either pane explicitly from the top bar.
+
+Desktop interaction follows the platform-applicable Apple HIG contract recorded
+in the design QA evidence. The embedded Browser exposes Back, Forward and Reload
+beside its address field. Only one measured analysis may run at a time; its
+unknown-duration work uses an accessible indeterminate progress state with a
+plain-language description, while downloads retain exact determinate progress
+and safe cancellation. Failed local-model runs keep the trusted raw failure in
+Task history but present an actionable renderer message with Retry and Settings
+recovery. The standard settings command is Command-comma on macOS and
+Control-comma on Windows. These commands supplement visible controls rather than
+replace them.
+
+The selected visual system is light-first: warm cream and blush materials,
+coral-to-rose primary chrome and deep plum text derived from the operator's
+reference palette. The project rail, Context Panel, Browser chrome, Model
+Library search/list structure, Today/Earlier Task grouping and generated Alpine
+mountain asset form one composite direction. Settings remains inside the same
+workspace shell with a distinct harmonious surface instead of appearing as a
+separate dark application. Search and filter controls follow the Apple HIG
+interaction guidance captured in the local design-research record and the
+repository UX research note. The runtime mountain raster is the only shipped
+binary design asset in this slice; its path, size ceiling, provenance and
+SHA-256 are pinned in `config/public-binary-assets.json`, while non-product
+reference captures remain local-only research material.
+
 Models and downloads are one Model Library lifecycle. It shows installed and
 verified artifacts first, provides the new-Task default selector, imports GGUF
 artifacts and searches Hugging Face. Search and assessment requests carry
@@ -37,6 +70,8 @@ generation guards so a slower stale response cannot overwrite the latest choice.
 The composer always occupies its own layout row. Streaming updates are coalesced
 to animation frames, event persistence is ordered, one run lock prevents duplicate
 launch, and cancellation settles the visible Task without moving the composer.
+Run and persistence failures remain visible in an alert beside the composer even
+after the durable user message has appeared in the transcript.
 Its `+` menu contains request context only; project switching never appears there.
 The current local model descriptor is text-only, so image and PDF actions remain
 disabled with a visible reason rather than silently dropping unsupported input.

@@ -198,6 +198,10 @@ _Avoid_: frontend API, CLI parsing, Tauri commands as the domain model
 A replaceable implementation of the agent loop inside Alpine Desktop. Pi SDK/core is the first experimental Adapter; Alpine owns its model, policy, tools, task state, credentials and recovery truth.
 _Avoid_: Harness authority, Pi session, permanent engine protocol, embedded control plane
 
+**Graph Context Adapter**:
+An opt-in, replaceable cache builder and bounded query surface that may supply a scoped project subgraph to an Agent Runtime Adapter. It owns no source, Task, permission or recovery truth and may not install hooks or mutate project instructions.
+_Avoid_: automatic Graphify install, graph authority, project index as source truth, ambient CLI access
+
 **Model Registry**:
 The machine-local catalog of exact imported or downloaded model artifacts and their provenance. A Model Registry entry is not evidence that the artifact runs or is qualified.
 _Avoid_: Hugging Face search results, model folder, Qualification database

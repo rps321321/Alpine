@@ -2,14 +2,18 @@ $ErrorActionPreference = 'Stop'
 
 function Get-NativeVersionText {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$FilePath)
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string]$Arguments = '--version',
+        [ValidateRange(1, 120000)][int]$TimeoutMilliseconds = 30000
+    )
 
     if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
         throw "Native version probe executable is missing: $FilePath"
     }
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.FileName = [IO.Path]::GetFullPath($FilePath)
-    $start.Arguments = '--version'
+    $start.Arguments = $Arguments
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
@@ -20,7 +24,11 @@ function Get-NativeVersionText {
         if (-not $process.Start()) { throw "Native version probe did not start: $FilePath" }
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            try { $process.Kill() } catch {}
+            $process.WaitForExit()
+            throw "Native version probe exceeded $TimeoutMilliseconds ms: $FilePath"
+        }
         $text = ([string]$stdout.Result) + ([string]$stderr.Result)
         if ($process.ExitCode -ne 0) {
             throw "Native version probe exited with code $($process.ExitCode): $FilePath`n$text"

@@ -1,6 +1,7 @@
 import {
   ArrowClockwise,
   ArrowLeft,
+  ArrowRight,
   Browser,
   CircleNotch,
   Plus,
@@ -160,7 +161,7 @@ export function BrowserSurface({ browser }: { browser: BrowserAdapter }) {
     setAccessRequest(null);
   };
 
-  const runCommand = async (command: "back" | "reload") => {
+  const runCommand = async (command: "back" | "forward" | "reload") => {
     setError(null);
     try {
       await browser.command(activeId, command);
@@ -216,6 +217,7 @@ export function BrowserSurface({ browser }: { browser: BrowserAdapter }) {
     </div>
     <div className="browser-toolbar">
       <button type="button" aria-label="Back" disabled={activeTab.url === "about:blank"} onClick={() => void runCommand("back")}><ArrowLeft size={15} /></button>
+      <button type="button" aria-label="Forward" disabled={activeTab.url === "about:blank"} onClick={() => void runCommand("forward")}><ArrowRight size={15} /></button>
       <button type="button" aria-label="Reload" disabled={activeTab.url === "about:blank"} onClick={() => void runCommand("reload")}><ArrowClockwise size={15} /></button>
       <form onSubmit={submit}>
         <ShieldCheck size={14} />

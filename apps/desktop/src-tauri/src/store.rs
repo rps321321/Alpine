@@ -2,7 +2,7 @@
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 use std::sync::Mutex;
@@ -239,6 +239,13 @@ pub struct ToolApproval {
     pub created_at_ms: i64,
     pub decided_at_ms: Option<i64>,
     pub settled_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalDecision {
+    pub approval: ToolApproval,
+    pub event: TaskEvent,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -667,25 +674,82 @@ impl DesktopStore {
         approval_id: &str,
         approved: bool,
     ) -> Result<ToolApproval, StoreError> {
-        let connection = self.connection()?;
+        self.decide_tool_approval_with_event(approval_id, approved)
+            .map(|decision| decision.approval)
+    }
+
+    pub fn decide_tool_approval_with_event(
+        &self,
+        approval_id: &str,
+        approved: bool,
+    ) -> Result<ToolApprovalDecision, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let mut approval = transaction
+            .query_row(
+                "SELECT id, task_id, tool_call_id, operation, proposal_json, state, detail,
+                        created_at_ms, decided_at_ms, settled_at_ms
+                 FROM tool_approvals WHERE id = ?1",
+                [approval_id],
+                approval_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::message("the Tool Approval does not exist"))?;
         let next = if approved {
             ApprovalState::Approved
         } else {
             ApprovalState::Denied
         };
-        let changed = connection.execute(
+        let decided_at_ms = now_ms();
+        let changed = transaction.execute(
             "UPDATE tool_approvals SET state = ?2, decided_at_ms = ?3
              WHERE id = ?1 AND state = 'pending'",
-            params![approval_id, next.as_str(), now_ms()],
+            params![approval_id, next.as_str(), decided_at_ms],
         )?;
         if changed == 0 {
             return Err(StoreError::message(
                 "the Tool Approval is missing or has already been decided",
             ));
         }
-        drop(connection);
-        self.get_tool_approval(approval_id)?
-            .ok_or_else(|| StoreError::message("the Tool Approval no longer exists"))
+        let event_payload = json!({
+            "approvalId": approval.id,
+            "operation": approval.operation,
+            "approved": approved,
+        });
+        let payload_json = serde_json::to_string(&event_payload).map_err(|error| {
+            StoreError::message(format!("failed to encode Tool Approval decision: {error}"))
+        })?;
+        let sequence = next_sequence(&transaction, "task_events", &approval.task_id)?;
+        let event_id = new_id(&transaction);
+        transaction.execute(
+            "INSERT INTO task_events (id, task_id, sequence, kind, payload_json, created_at_ms)
+             VALUES (?1, ?2, ?3, 'approval.decided', ?4, ?5)",
+            params![
+                event_id,
+                approval.task_id,
+                sequence,
+                payload_json,
+                decided_at_ms
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE tasks SET updated_at_ms = ?2 WHERE id = ?1",
+            params![approval.task_id, decided_at_ms],
+        )?;
+        transaction.commit()?;
+        approval.state = next;
+        approval.decided_at_ms = Some(decided_at_ms);
+        Ok(ToolApprovalDecision {
+            event: TaskEvent {
+                id: event_id,
+                task_id: approval.task_id.clone(),
+                sequence,
+                kind: "approval.decided".to_owned(),
+                payload: event_payload,
+                created_at_ms: decided_at_ms,
+            },
+            approval,
+        })
     }
 
     pub fn claim_tool_approval(

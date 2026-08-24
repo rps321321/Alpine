@@ -26,7 +26,7 @@ def invoke(expression: str) -> subprocess.CompletedProcess[str]:
 class SetupTransactionTests(unittest.TestCase):
     def test_native_version_probe_is_powershell_51_safe(self) -> None:
         result = invoke(
-            "$version=Get-NativeVersionText (Join-Path $env:SystemRoot 'System32\\cmd.exe');"
+            "$version=Get-NativeVersionText (Join-Path $env:SystemRoot 'System32\\cmd.exe') '/d /c ver' 5000;"
             "$version"
         )
         self.assertEqual(result.returncode, 0, result.stderr)

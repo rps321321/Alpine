@@ -35,6 +35,13 @@ provenance. A Hugging Face search result cannot become the desktop default until
 that exact repository, immutable revision and filename are present in the
 registry, preventing a remote label from masquerading as a runnable local model.
 
+Desktop Settings schema 4 binds every newly selected default to the exact Model
+Registry identifier and SHA-256 digest as well as repository, immutable revision
+and filename. Imported artifacts use `local/import/<full-sha256>` as their
+machine-local Task identity. The trusted host validates the complete tuple
+against the Registry; the renderer cannot promote an unregistered scan result,
+and two artifacts that share a filename remain distinct.
+
 Every project root is canonicalized before persistence. All workspace commands
 resolve their requested paths against that canonical root and reject traversal
 or symlink escape. Read, list and search operations may execute without a Tool
@@ -42,6 +49,11 @@ Approval. Exact-text edits and shell commands require a pending Tool Approval
 whose decision is persisted before execution. Each approval is bound to one
 Task, operation kind and structured proposal; it cannot authorize later work by
 category alone.
+
+A Tool Approval decision and its `approval.decided` Task Event are committed in
+one SQLite transaction and returned as one typed decision. The renderer no
+longer performs a second event append after deciding, so the approval row and
+durable Task history cannot diverge between those writes.
 
 The Desktop Interface exposes durable project/task operations and normalized
 tool events. The Pi Adapter maps Pi lifecycle events into that interface and

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use store::{
     CreateTask, DesktopProject, DesktopStore, DesktopTask, ModelRegistryEntry, ModelSource,
     NewTaskEvent, NewTaskMessage, NewToolApproval, RegisterModelArtifact, TaskDetail, TaskEvent,
-    TaskMessage, TaskStatus, ToolApproval,
+    TaskMessage, TaskStatus, ToolApproval, ToolApprovalDecision,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use workspace::{
@@ -33,7 +33,7 @@ use workspace::{
     WorkspaceShell, WorkspaceShellResult,
 };
 
-const SETTINGS_SCHEMA: u32 = 3;
+const SETTINGS_SCHEMA: u32 = 4;
 
 fn settings_schema() -> u32 {
     SETTINGS_SCHEMA
@@ -52,6 +52,12 @@ fn local_metrics_default() -> bool {
 struct ModelSelection {
     repo_id: String,
     filename: String,
+    #[serde(default)]
+    registry_id: Option<String>,
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -234,6 +240,7 @@ struct DownloadProgress {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DownloadedModel {
+    registry_id: Option<String>,
     filename: String,
     size_bytes: u64,
     state: &'static str,
@@ -308,6 +315,9 @@ fn default_settings(app: &AppHandle) -> Result<DesktopSettings, String> {
             .map(|filename| ModelSelection {
                 repo_id: "local/alpine-install".to_owned(),
                 filename: filename.to_owned(),
+                registry_id: None,
+                revision: None,
+                sha256: None,
             })
     });
     Ok(DesktopSettings {
@@ -641,8 +651,23 @@ async fn stop_runtime(app: AppHandle) -> Result<RuntimeSnapshot, String> {
 #[tauri::command]
 fn set_default_model(
     app: AppHandle,
-    mut selection: ModelSelection,
+    store: State<'_, Arc<DesktopStore>>,
+    selection: ModelSelection,
 ) -> Result<DesktopSettings, String> {
+    let registered = store
+        .list_model_artifacts()
+        .map_err(|error| error.to_string())?;
+    let selection = registered_default_selection(selection, &registered)?;
+    let mut settings = read_settings(&app)?;
+    settings.default_model = Some(selection);
+    write_settings(&app, &settings)?;
+    Ok(settings)
+}
+
+fn registered_default_selection(
+    mut selection: ModelSelection,
+    registered: &[ModelRegistryEntry],
+) -> Result<ModelSelection, String> {
     if selection.repo_id.trim().is_empty() {
         return Err("the default model must identify an exact GGUF artifact".to_owned());
     }
@@ -652,10 +677,48 @@ fn set_default_model(
         .and_then(|value| value.to_str())
         .ok_or_else(|| "the default model filename is invalid".to_owned())?
         .to_owned();
-    let mut settings = read_settings(&app)?;
-    settings.default_model = Some(selection);
-    write_settings(&app, &settings)?;
-    Ok(settings)
+    let registry_id = selection.registry_id.as_deref().ok_or_else(|| {
+        "the default model must reference a verified Model Registry entry".to_owned()
+    })?;
+    let artifact = registered
+        .iter()
+        .find(|artifact| artifact.id == registry_id)
+        .ok_or_else(|| "the selected Model Registry entry no longer exists".to_owned())?;
+    if artifact.filename != selection.filename {
+        return Err("the selected filename does not match its Model Registry entry".to_owned());
+    }
+    if !selection
+        .sha256
+        .as_deref()
+        .is_some_and(|digest| digest.eq_ignore_ascii_case(&artifact.sha256))
+    {
+        return Err("the selected digest does not match its Model Registry entry".to_owned());
+    }
+    match artifact.source {
+        ModelSource::HuggingFace => {
+            if artifact.repo_id.as_deref() != Some(selection.repo_id.as_str())
+                || artifact.revision != selection.revision
+            {
+                return Err(
+                    "the selected Hugging Face repository or revision does not match its Model Registry entry"
+                        .to_owned(),
+                );
+            }
+        }
+        ModelSource::Import => {
+            let expected = format!("local/import/{}", artifact.sha256);
+            if selection.repo_id != expected || selection.revision.is_some() {
+                return Err(
+                    "the selected imported model identity does not match its Model Registry entry"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    selection.registry_id = Some(artifact.id.clone());
+    selection.revision = artifact.revision.clone();
+    selection.sha256 = Some(artifact.sha256.clone());
+    Ok(selection)
 }
 
 fn resolve_pi_launch_blocking(app: AppHandle) -> Result<PiLaunchConfig, String> {
@@ -1307,6 +1370,7 @@ fn list_downloads(
         .iter()
         .filter(|model| Path::new(&model.local_path).is_file())
         .map(|model| DownloadedModel {
+            registry_id: Some(model.id.clone()),
             filename: model.filename.clone(),
             size_bytes: model.observed_bytes,
             state: "installed",
@@ -1349,6 +1413,7 @@ fn list_downloads(
             return None;
         }
         Some(DownloadedModel {
+            registry_id: None,
             filename,
             size_bytes: metadata.len(),
             state,
@@ -1570,9 +1635,9 @@ fn decide_tool_approval(
     store: State<'_, Arc<DesktopStore>>,
     approval_id: String,
     approved: bool,
-) -> Result<ToolApproval, String> {
+) -> Result<ToolApprovalDecision, String> {
     store
-        .decide_tool_approval(&approval_id, approved)
+        .decide_tool_approval_with_event(&approval_id, approved)
         .map_err(|error| error.to_string())
 }
 
@@ -1702,7 +1767,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_probe_response;
+    use super::{
+        ModelRegistryEntry, ModelSelection, ModelSource, decode_probe_response,
+        registered_default_selection,
+    };
 
     #[test]
     fn runtime_probe_requires_exact_visible_output() {
@@ -1712,5 +1780,79 @@ mod tests {
 
         assert_eq!(decode_probe_response(passing).unwrap(), (true, Some(4)));
         assert_eq!(decode_probe_response(reasoning).unwrap(), (false, Some(9)));
+    }
+
+    fn registered_hugging_face_model() -> ModelRegistryEntry {
+        ModelRegistryEntry {
+            id: "model-1".to_owned(),
+            source: ModelSource::HuggingFace,
+            repo_id: Some("Qwen/Qwen-GGUF".to_owned()),
+            revision: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+            filename: "Qwen-Q4_K_M.gguf".to_owned(),
+            local_path: "C:\\models\\Qwen-Q4_K_M.gguf".to_owned(),
+            observed_bytes: 42,
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            origin_url: None,
+            created_at_ms: 1,
+            verified_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn default_model_requires_exact_registered_identity() {
+        let artifact = registered_hugging_face_model();
+        let exact = ModelSelection {
+            repo_id: artifact.repo_id.clone().unwrap(),
+            filename: artifact.filename.clone(),
+            registry_id: Some(artifact.id.clone()),
+            revision: artifact.revision.clone(),
+            sha256: Some(artifact.sha256.clone()),
+        };
+
+        assert_eq!(
+            registered_default_selection(exact.clone(), std::slice::from_ref(&artifact))
+                .unwrap()
+                .registry_id
+                .as_deref(),
+            Some("model-1")
+        );
+
+        let missing_registry = ModelSelection {
+            registry_id: None,
+            ..exact.clone()
+        };
+        assert!(
+            registered_default_selection(missing_registry, std::slice::from_ref(&artifact))
+                .unwrap_err()
+                .contains("verified Model Registry entry")
+        );
+
+        let mutable_revision = ModelSelection {
+            revision: Some("main".to_owned()),
+            ..exact
+        };
+        assert!(
+            registered_default_selection(mutable_revision, &[artifact])
+                .unwrap_err()
+                .contains("repository or revision")
+        );
+    }
+
+    #[test]
+    fn imported_default_uses_its_full_digest_identity() {
+        let mut artifact = registered_hugging_face_model();
+        artifact.id = "import-1".to_owned();
+        artifact.source = ModelSource::Import;
+        artifact.repo_id = None;
+        artifact.revision = None;
+        let selection = ModelSelection {
+            repo_id: format!("local/import/{}", artifact.sha256),
+            filename: artifact.filename.clone(),
+            registry_id: Some(artifact.id.clone()),
+            revision: None,
+            sha256: Some(artifact.sha256.clone()),
+        };
+
+        assert!(registered_default_selection(selection, &[artifact]).is_ok());
     }
 }

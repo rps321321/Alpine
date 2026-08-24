@@ -73,6 +73,24 @@ duration, time to first text delta, stream duration, current renderer heap and
 client-asset transfer, while approved command results retain their own duration.
 They do not record raw prompts, secrets or private file contents.
 
+The renderer consumes an Alpine-owned Task execution interface rather than Pi
+events or Pi agent state. That module owns launch readiness, Pi construction,
+history restoration, event normalization, ordered persistence, animation-frame
+stream coalescing, cancellation settlement, steering, follow-up and local timing
+marks. The low-level Pi object is private to the adapter; its public descriptor
+reports only the selected model, bound Alpine tools and queue modes. A checked
+capability manifest lists supported and unsupported Pi behavior in Settings so
+experimental adapter status cannot be mistaken for terminal or AgentHarness
+parity.
+
+`apps/desktop/scripts/live-pi-smoke.ts` is the bounded adapter integration
+probe. It accepts the already-resolved loopback endpoint, local credential and
+model identity through process environment, sends one exact-output request
+through the shipped Pi adapter, and reports only adapter/model identity and
+visible character count. Session acquisition, exact-process stop and restoration
+checks remain Alpine control-plane responsibilities; the script never prints the
+credential or promotes this smoke to Harness Qualification.
+
 The Analysis surface separates a bounded exact-output diagnostic from full
 multi-Profile evaluation. The diagnostic is explicitly labelled as such. Full
 analysis copies the versioned repository plan into app-local evidence storage,

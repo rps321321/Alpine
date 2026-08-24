@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "test:sites": "node --test tests/sites-worker.test.mjs",
-    "perf:bundle": "node scripts/report-bundle.mjs"
+    "perf:bundle": "node scripts/report-bundle.mjs",
+    "smoke:pi": "node scripts/live-pi-smoke.ts"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.84.2",

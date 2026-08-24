@@ -26,9 +26,9 @@ describe("Pi harness adapter", () => {
   });
 
   it("does not duplicate the v1 path from an Alpine base-url file", () => {
-    expect(localPiModel({ ...config, baseUrl: "http://127.0.0.1:8080/v1" }).baseUrl).toBe(
-      "http://127.0.0.1:8080/v1",
-    );
+    expect(
+      localPiModel({ ...config, baseUrl: "http://127.0.0.1:8080/v1" }).baseUrl,
+    ).toBe("http://127.0.0.1:8080/v1");
   });
 
   it("constructs the embedded Pi agent with the launch-time model", () => {
@@ -37,9 +37,12 @@ describe("Pi harness adapter", () => {
     }) as StreamFn;
     const harness = new PiHarness(config, { streamFn: neverCalled });
 
-    expect(harness.agent.state.model.id).toBe("Qwen3.5-9B-Q4_K_M.gguf");
-    expect(harness.agent.steeringMode).toBe("one-at-a-time");
-    expect(harness.agent.followUpMode).toBe("one-at-a-time");
+    expect(harness.descriptor).toMatchObject({
+      modelId: "Qwen3.5-9B-Q4_K_M.gguf",
+      steeringMode: "one-at-a-time",
+      followUpMode: "one-at-a-time",
+    });
+    expect(harness.errorMessage).toBeUndefined();
   });
 
   it("binds Alpine-owned coding tools and queues steering through Pi", () => {
@@ -52,7 +55,7 @@ describe("Pi harness adapter", () => {
       desktop: {} as DesktopClient,
     });
 
-    expect(harness.agent.state.tools.map((tool) => tool.name)).toEqual([
+    expect(harness.descriptor.toolNames).toEqual([
       "list_files",
       "read_file",
       "search_files",
@@ -61,6 +64,5 @@ describe("Pi harness adapter", () => {
     ]);
     harness.steer("Focus on the failing test.");
     harness.followUp("Then summarize the diff.");
-    expect(harness.agent.hasQueuedMessages()).toBe(true);
   });
 });

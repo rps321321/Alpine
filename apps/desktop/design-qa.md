@@ -1,35 +1,70 @@
-# Desktop design QA
+# Alpine Desktop design QA — 2026-08-24
 
-## Source and implementation
+## Visual sources
 
-- Source: official Codex product frames inspected on [OpenAI's Codex app page](https://openai.com/index/introducing-the-codex-app/) and launch video on 2026-08-23. The frames establish observable task-composer, project, skills and contextual-workspace anatomy; they are not treated as a private pixel specification.
-- Implementation: Alpine's rebuilt production preview at `http://127.0.0.1:4174/`, inspected in the in-app browser on 2026-08-24.
-- The official composer/task frame and Alpine home screen were emitted together in one comparison input before this judgment. Model Library, model assessment, Settings, contextual Preview, collapsed rails and composer before/after-send states were also captured.
-- Local QA artifacts are retained under the ignored `apps/desktop/.artifacts/design/` directory and are excluded from the proposed public source tree.
+The comparison used these local-only, non-product reference captures:
 
-## Comparison and workflow checks
+- `apps/desktop/design-research/2026-08-24/assets/user-coral-palette.png`
+- `apps/desktop/design-research/2026-08-24/option-1.png`
+- `apps/desktop/design-research/2026-08-24/option-2.png`
+- `apps/desktop/design-research/2026-08-24/option-3.png`
+- Apple Human Interface Guidelines root and the sections recorded in
+  `docs/research/alpine-desktop-ux-research.md`
 
-The implementation preserves the useful source hierarchy: project and task history in a narrow left rail, a quiet central task surface, one bottom-anchored rounded composer with compact runtime/model controls, and an independently toggled contextual panel. Alpine intentionally uses its own dark Windows-first identity and light-teal accent instead of OpenAI assets or marks.
+The final combined comparison input is retained locally at
+`apps/desktop/.artifacts/goal-audit-2026-08-24-v2/reference-vs-implementation-final.png`.
+The source captures remain excluded from the proposed public tree; only the
+runtime mountain raster is shipped, under the digest and size contract in
+`config/public-binary-assets.json`.
 
-Verified in the live production preview:
+## Viewports and states
 
-- Models and Downloads are one Model Library with installed/default, import, search, loading, compatibility, download and error states.
-- Browser is no longer a top-level route. Local Preview, Files, Changes and Terminal remain beside the Task in the Context Panel.
-- Project switching is separate from the composer. The `+` menu contains only request-context capabilities and explains why text-only Pi cannot yet accept images, PDFs or registry-backed skills.
-- The left rail and Context Panel collapse independently and remain collapsed after reload; `Ctrl+B` and `Ctrl+Shift+B` mirror those actions.
-- The composer occupies the same bottom row before and after a task starts. Streaming content scrolls independently, and the action changes to stop/steer without changing composer height.
-- Settings use General, Runtime, Browser, Safety and Privacy disclosure. A model selected for inspection does not leak into unrelated Settings context.
-- Hardware details show OS, architecture, CPU topology, memory, detected CUDA compute devices and driver state without promising an unsupported iGPU/dGPU split.
-- All inspected controls have programmatic labels and visible focus styles. Primary text, muted text, teal accents and accent buttons exceed WCAG 2.2 AA text contrast; meaningful control borders are at least 3:1 against the background. Primary controls meet or exceed the 24 by 24 CSS-pixel target, and reduced-motion mode suppresses nonessential motion.
-- Browser diagnostics contained no warnings or errors; the retained debug entries were Vite connection messages from the local preview. Local evidence reported a 16 ms renderer bootstrap, zero long tasks, a 200 KB transferred client surface, and approximately 10 MB renderer heap in this preview run. Pi request timing in the browser preview reflects the deliberately unavailable local test endpoint and is not a model-performance result.
+- Wide: 1511 by 1272 CSS pixels at device pixel ratio 1 in the selected in-app
+  browser. Checked Home, Model Library, Browser, Settings, an active Task row,
+  and a failed Task alert.
+- Narrow: the built app was loaded in 700 by 900 and 480 by 850 CSS-pixel
+  frames in the same browser. Both overlay panes began closed; the heading,
+  machine summary, model control and bottom composer remained readable without
+  horizontal clipping.
+- Density: Windows Segoe UI Variable at normal display density. Long model names
+  truncate inside bounded selectors instead of resizing the shell.
+- Motion: the implementation includes a reduced-motion override; the inspected
+  machine did not request reduced motion. Pointer/keyboard divider behavior and
+  stable composer geometry are covered by interaction tests.
 
-## Intentional boundaries
+## Comparison result
 
-- The first Pi model descriptor is text-only. Image/PDF actions remain visibly unavailable rather than being silently ignored.
-- Preview is localhost-only and iframe-backed in the browser-preview build. An unrestricted embedded browser still requires an isolated WebView2 profile, clear-data controls and system-browser OAuth.
-- WCAG 2.2 AA is the supported conformance target. Useful AAA outcomes are adopted selectively; no whole-application AAA claim is made.
-- `60fps.design` informed restraint and microinteraction taste only. The release evidence remains WebView frame/long-task data and reduced-motion behavior.
+- Option 1: the implementation retains the persistent left project rail, thin
+  resizable split, Task canvas and separately resizable Context Panel. Settings
+  is integrated into the same shell instead of appearing as a detached dark
+  surface.
+- Option 2: the Model Library uses one selected-default control, a verified local
+  list, GGUF import, immediate Hugging Face search and a dedicated result area.
+  The Browser uses a tab row, Back/Forward/Reload controls and an address field
+  in one clear hierarchy.
+- Option 3: the Task rail contains immediate search, a nearby filter, Today and
+  Earlier grouping, status text and Alpine mountain artwork at the lower edge.
+- Palette: warm cream/blush panes, coral-to-rose primary chrome and deep plum
+  text visibly match the operator palette. Normal text and status tokens pass
+  the automated WCAG AA contrast test.
 
-## Result
+## Findings history
 
-passed
+| Priority | Finding | Resolution |
+| --- | --- | --- |
+| P1 | Quiet and status tokens did not all meet 4.5:1 on the two primary surfaces. | Darkened the semantic tokens and kept the contrast test as a release check. |
+| P1 | The Preview Model Library labeled a row Default while its selector showed Not selected. | Bound the preview default to the same exact Registry identity tuple as the row. |
+| P1 | A persisted wide layout could open both overlays over a 700-pixel Task canvas. | Moved open-state ownership into the layout module and collapse both overlays on compact entry. |
+| P1 | A failed Pi launch could leave only the rail status visible after the user message persisted. | Kept the runtime error in an alert beside the composer and added a regression test. |
+| P2 | The mountain and window edge were weaker than the selected references. | Increased the raster's visual weight and added a restrained coral inset frame. |
+| P2 | Browser chrome exposed Back and Reload but omitted Forward. | Added the existing trusted Forward command to the visible toolbar and covered it through the Desktop Interface mock. |
+| P2 | Quick and full analysis could be launched at the same time, with progress confined to button text. | Enforced a single analysis operation and added a persistent, accessible indeterminate progress region. |
+| P2 | Local-model connection failures gave no next action. | Added plain-language recovery, Retry, Open Settings, and the Control/Command-comma settings shortcut. |
+| P2 | Diagnostic result text visually collided at the value boundary. | Added a wrapping result layout with explicit row and column gaps. |
+
+The detailed component-by-component HIG applicability check is tracked in
+`docs/research/alpine-desktop-hig-audit-2026-08-24.md`.
+
+No unresolved P0, P1 or P2 visual defects were found in the inspected states.
+
+**final result: passed**
