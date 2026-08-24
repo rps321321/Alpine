@@ -1,0 +1,252 @@
+{
+  "schema": 1,
+  "id": "agent-engine-bakeoff-v1",
+  "evidence_identity": {
+    "required_fields": [
+      "hardware",
+      "software",
+      "model",
+      "runtime",
+      "workload",
+      "configuration",
+      "policy"
+    ],
+    "identical_material_inputs": [
+      "model-artifact",
+      "profile",
+      "runtime",
+      "template",
+      "prompt-tool-policy",
+      "task-fixtures",
+      "request-budget",
+      "recovery-scenarios"
+    ]
+  },
+  "inputs": {
+    "profile": "stable-16k",
+    "model_id": "local-qwen",
+    "temperature": 0,
+    "fixture": "benchmarks/agent-engine-bakeoff/public-v1/task.json",
+    "prompt_tool_policy": "read-only-exact-fixture-v1",
+    "template_source": "session-config"
+  },
+  "budget": {
+    "requests": 24,
+    "request_timeout_ms": 120000,
+    "max_input_tokens": 16384,
+    "max_output_tokens": 2048,
+    "max_retries": 2,
+    "max_worker_restarts": 1,
+    "max_event_queue": 128
+  },
+  "required_scenarios": [
+    "streaming",
+    "tools",
+    "steering",
+    "follow-up",
+    "cancellation",
+    "retry",
+    "compaction",
+    "backpressure",
+    "worker-restart",
+    "continuation-recovery",
+    "normalized-errors"
+  ],
+  "supporting_packages": [
+    {
+      "repository": "https://github.com/earendil-works/pi",
+      "version": "0.84.2",
+      "commit": "914cf1472e715297caa30db4b9535d534a9eb718",
+      "package": "@earendil-works/pi-ai",
+      "package_integrity": "sha512-6MzsrYIYNVlE7SfpbL2yYb67Qo58p/7Q+xWG1RZvoX1P80aRCHSod2/13aFpxkow1lPO2LEh3c495J0Gwmyjig==",
+      "license": "MIT",
+      "reviewed_at": "2026-08-23"
+    }
+  ],
+  "candidates": [
+    {
+      "id": "opencode-process",
+      "surface": "repository-supported CLI JSON event stream",
+      "source": {
+        "repository": "https://github.com/anomalyco/opencode",
+        "version": "1.18.21",
+        "commit": "826d9ad46a22bef0294998e08daa3c4904fea28f",
+        "package": "opencode-ai",
+        "package_integrity": "sha512-BxQyxpD0y2X0sXJUKLOooXVmi9QIoeKPtdH68r7QRiqXJ/YulK1MQvSe8KyA8183zoPV0G6JAtgz1OqmE3OGUw==",
+        "license": "MIT",
+        "reviewed_at": "2026-08-23"
+      },
+      "dependencies": {
+        "direct_runtime_dependencies": 99,
+        "locked_package_count": null,
+        "unpacked_size_bytes": null,
+        "runtime_requirement": "bundled platform binary selected by a 12-package optional wrapper matrix",
+        "packaging_cost": "high: bundled Bun application and platform binary closure",
+        "update_cost": "high: fast-moving server, storage, SDK, provider and CLI surface"
+      },
+      "maintenance": {
+        "repository_archived": false,
+        "source_commit_at": "2026-08-21T14:50:55Z",
+        "signals": [
+          "tag v1.18.21 resolves to the reviewed commit",
+          "repository received commits after the reviewed release"
+        ]
+      },
+      "security": {
+        "built_in_sandbox": false,
+        "authority": "runs with the invoking user authority; permissions are UX gates, not isolation",
+        "credential_boundary": "server mode needs explicit authentication and local child credentials must be allowlisted",
+        "known_risks": [
+          "default run creates OpenCode-owned durable Session state",
+          "large provider and tool dependency surface",
+          "no explicit event-consumer backpressure contract"
+        ]
+      },
+      "adapter_boundary": "isolated process with raw JSON events and disposable data/config/cache roots",
+      "smallest_missing_upstream_hook": "an ephemeral no-session run mode with typed transcript import/export and bounded event flow control",
+      "decision": "no-go"
+    },
+    {
+      "id": "pi-sdk-core",
+      "surface": "@earendil-works/pi-agent-core in-memory SDK seam",
+      "source": {
+        "repository": "https://github.com/earendil-works/pi",
+        "version": "0.84.2",
+        "commit": "914cf1472e715297caa30db4b9535d534a9eb718",
+        "package": "@earendil-works/pi-agent-core",
+        "package_integrity": "sha512-8Pn3wSCxj0cfo5I6jxQYVB/3uuQRmHhAlEclyjqpOuMEdQMIODHizRogv56FLdbU+dTiGnybeHQ2N+sV1/L2YA==",
+        "license": "MIT",
+        "reviewed_at": "2026-08-23"
+      },
+      "dependencies": {
+        "direct_runtime_dependencies": 5,
+        "locked_package_count": null,
+        "unpacked_size_bytes": 1908824,
+        "runtime_requirement": "Node.js 22.19 or newer",
+        "packaging_cost": "medium: TypeScript worker plus pi-ai provider closure",
+        "update_cost": "medium: focused core surface but rapid pre-1.0 releases"
+      },
+      "maintenance": {
+        "repository_archived": false,
+        "source_commit_at": "2026-08-14T10:00:00Z",
+        "signals": [
+          "tag v0.84.2 and npm gitHead resolve to the same commit",
+          "repository received commits after the reviewed release"
+        ]
+      },
+      "security": {
+        "built_in_sandbox": false,
+        "authority": "SDK tools and extensions run with the worker process authority",
+        "credential_boundary": "supports injected in-memory credentials but does not isolate the host",
+        "known_risks": [
+          "awaited event listeners allow host pressure but the package does not enforce an Alpine-sized queue",
+          "worker restart restoration from Alpine-owned state is not proven",
+          "provider and tool policy remain caller responsibilities"
+        ]
+      },
+      "adapter_boundary": "in-memory Agent with Alpine-supplied tools, credentials, messages and event normalization",
+      "smallest_missing_upstream_hook": "a versioned typed state import/export contract that survives worker restart without a candidate store",
+      "decision": "conditional-go"
+    },
+    {
+      "id": "pi-process-rpc",
+      "surface": "disposable pi --mode rpc JSONL process",
+      "source": {
+        "repository": "https://github.com/earendil-works/pi",
+        "version": "0.84.2",
+        "commit": "914cf1472e715297caa30db4b9535d534a9eb718",
+        "package": "@earendil-works/pi-coding-agent",
+        "package_integrity": "sha512-l4E+B7hgXKWddRo8bC/eSue2aWZjEgJ9xIpf5p0Og+lq8a2TArCwJ0HCoCPCgaBP/tN4zbYH/wOwvx9pJpeLCA==",
+        "license": "MIT",
+        "reviewed_at": "2026-08-23"
+      },
+      "dependencies": {
+        "direct_runtime_dependencies": 21,
+        "locked_package_count": 140,
+        "unpacked_size_bytes": 13709606,
+        "runtime_requirement": "Node.js 22.19 or newer",
+        "packaging_cost": "high: complete coding-agent CLI and shrinkwrapped provider/tool closure",
+        "update_cost": "medium-high: versioned RPC plus complete CLI behavior"
+      },
+      "maintenance": {
+        "repository_archived": false,
+        "source_commit_at": "2026-08-14T10:00:00Z",
+        "signals": [
+          "tag v0.84.2 and npm gitHead resolve to the same commit",
+          "RPC documentation defines strict LF-delimited JSONL and correlated responses"
+        ]
+      },
+      "security": {
+        "built_in_sandbox": false,
+        "authority": "the RPC worker and built-in tools run with the process user authority",
+        "credential_boundary": "temporary PI_CODING_AGENT_DIR and an allowlisted local API key are required",
+        "known_risks": [
+          "durable recovery conflicts with --no-session disposal",
+          "stdout protocol consumers need their own bounded queue",
+          "complete CLI dependency closure is materially larger than core"
+        ]
+      },
+      "adapter_boundary": "isolated child process with strict JSONL commands/events and no terminal-text parsing",
+      "smallest_missing_upstream_hook": "RPC commands to import and export Alpine-owned typed conversation state without a Pi session file",
+      "decision": "conditional-go"
+    },
+    {
+      "id": "cline-agents",
+      "surface": "stateless @cline/agents AgentRuntime from the Cline SDK",
+      "source": {
+        "repository": "https://github.com/cline/cline",
+        "version": "0.0.78",
+        "commit": "be8b984d10d1ad0e9a3917e051ac697f592587d2",
+        "package": "@cline/agents",
+        "package_integrity": "sha512-wHVVwtkR4uSTQuAayjs68NZSvN4X+W5tquCMN+ONqDjYnCfuG6BaLlbpwil53DmlxumCm+rFuwbnN0RJ24JWxQ==",
+        "license": "Apache-2.0",
+        "reviewed_at": "2026-08-23"
+      },
+      "dependencies": {
+        "direct_runtime_dependencies": 3,
+        "locked_package_count": null,
+        "unpacked_size_bytes": 364877,
+        "runtime_requirement": "Node.js 22 or newer",
+        "packaging_cost": "medium: agents plus llms/shared packages and a caller-supplied tool host",
+        "update_cost": "medium-high: experimental 0.0.x SDK inside a rapidly moving monorepo"
+      },
+      "maintenance": {
+        "repository_archived": false,
+        "source_commit_at": "2026-08-23T09:41:04Z",
+        "signals": [
+          "npm 0.0.78 matches the package version at the reviewed main commit",
+          "repository and SDK workspace received current-day commits"
+        ]
+      },
+      "security": {
+        "built_in_sandbox": false,
+        "authority": "caller-supplied tools execute with the embedding process authority",
+        "credential_boundary": "the stateless package avoids core persistence but provider credentials remain caller-owned",
+        "known_risks": [
+          "no first-class steering or follow-up queue",
+          "only limited overflow compaction retry is visible at this layer",
+          "pre-1.0 package surface and release coupling"
+        ]
+      },
+      "adapter_boundary": "stateless AgentRuntime with Alpine tools, async event hooks, abort and explicit state restore",
+      "smallest_missing_upstream_hook": "a typed steering/follow-up queue with explicit retry and compaction lifecycle control",
+      "decision": "conditional-go"
+    }
+  ],
+  "recommendation": {
+    "decision": "no-go",
+    "rationale_codes": [
+      "live-comparison-shows-policy-and-capability-gaps",
+      "exact-restart-recovery-not-yet-proven",
+      "backpressure-contract-incomplete",
+      "no-engine-boundary-adoption-before-second-engine-value"
+    ]
+  },
+  "privacy": {
+    "publish_raw_prompts": false,
+    "publish_credentials": false,
+    "publish_machine_paths": false,
+    "publish_raw_evidence": false,
+    "publish_model_artifacts": false
+  }
+}

@@ -1072,7 +1072,7 @@ fn slash_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn command_compatible_path(path: &Path) -> PathBuf {
+pub(crate) fn command_compatible_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
         let text = path.to_string_lossy();

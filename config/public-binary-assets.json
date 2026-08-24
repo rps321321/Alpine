@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "assets": [
+    {
+      "path": "apps/desktop/src/assets/alpine-rail-mountain.webp",
+      "sha256": "7d383a9447c5adfab288443143d965191bb45f421bcbdafb6be6923c186af30a",
+      "max_bytes": 65536,
+      "provenance": "Alpine-owned generated task-rail artwork; optimized from the locally retained design source"
+    }
+  ]
+}

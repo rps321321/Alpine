@@ -107,6 +107,18 @@ The context gate uses the server tokenizer to construct a reproducible immutable
 
 The default public-v1 golden-agent gate copies a versioned public fixture into an isolated temporary worktree and checks multi-file repair, exactly one declared failed read followed by successful recovery, and retention of an early exact constraint through context growth. It launches OpenCode directly from Rust with the reviewed minimal policy and a secret-scrubbed child environment, verifies the effective context/safety policy, rejects malformed or conflicting tool effects, runs executable tests, rejects protected-path edits or unexpected files, binds both executable identities and the task-suite hash, and restores the prior Session. Promotion Policy requires this exact public task and capability set. Checked-in tasks are public reproducibility fixtures, not hidden evidence, and the gate does not invoke the PowerShell launcher.
 
+Run the source-pinned bounded agent-engine bake-off from an isolated, package-locked candidate root:
+
+```powershell
+$candidateRoot = Join-Path $env:TEMP "alpine-agent-engine-candidates"
+npm.cmd install --prefix $candidateRoot --ignore-scripts --no-audit --no-fund --save-exact opencode-ai@1.18.21 @earendil-works/pi-agent-core@0.84.2 @earendil-works/pi-ai@0.84.2 @earendil-works/pi-coding-agent@0.84.2 @cline/agents@0.0.78
+cargo run --release --bin alpine -- agent-engine-bakeoff --plan config/agent-engine-bakeoff.json --candidate-root $candidateRoot
+```
+
+The command does not accept caller-authored evidence. Alpine verifies the exact package-lock versions and registry integrity pins, computes complete Evidence Identity once, acquires the pinned Session, invokes every named adapter and scenario itself, measures the bounded child, verifies material Session restoration after every scenario, restores the exact prior Session after every candidate and deletes the candidate data/config/cache root. Native SDK/RPC/JSON events are mapped by the repository-owned adapter into Alpine's typed events and errors; absent proof remains an explicit failure. The public report excludes raw worker text, prompts, credentials, tool arguments, generated content and machine-local paths. The isolated install is not automatic and never mutates global packages, Profiles, model configuration or Deployment Roles. This is architecture evidence only; the current source review recommends no engine-boundary adoption and leaves OpenCode as the v1 Harness. See [ADR 0026](docs/adr/0026-agent-engines-remain-disposable-bakeoff-workers.md) and the [source review](docs/research/agent-engine-bakeoff-2026-08-23.md).
+
+The 2026-08-23 live report completed all scenario accounting and all 44 per-scenario Session restoration checks under one identity. Pi SDK/core demonstrated streaming, exact-read tools, cancellation and normalized errors; Cline agents demonstrated streaming, exact-read tools and cancellation. Process seams that could not enforce the exact shared prompt/tool policy were retained as typed failures rather than launched with broader authority, both embeddable seams exceeded the bounded native-event sink under the backpressure workload, and no engine demonstrated Alpine-owned restart/continuation. The recommendation therefore remains no-go.
+
 The rollback proof transactionally switches to the configured `stable-16k` rollback Profile, verifies its current deployment role and Profile/Session/runtime identities, performs a real 16-token inference smoke, and restores the prior material Session before publishing evidence.
 
 Only the explicitly human production review uses manual attachment. The evidence file is the strict schema documented in `docs/CAPABILITY-REVIEW.md`, not a pass boolean:

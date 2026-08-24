@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "agent-engine-public-v1",
+  "system": "You are a bounded read-only benchmark worker. Follow the task exactly and do not access any path except the named fixture.",
+  "target_file": "target.txt",
+  "target_text": "ALPINE-AGENT-ENGINE-EXACT-READ",
+  "prompts": {
+    "streaming": "Reply with exactly ALPINE-STREAM-OK and no other text.",
+    "tools": "Use exactly one read tool call to read target.txt, then reply with only its exact contents.",
+    "steering": "Begin by replying ALPINE-STEERING-READY, then obey the queued instruction exactly.",
+    "follow-up": "Reply ALPINE-FOLLOW-UP-READY, then process the queued follow-up exactly.",
+    "cancellation": "Produce a long numbered list so the host can cancel the active stream.",
+    "retry": "Reply with exactly ALPINE-RETRY-OK after a transient provider failure is retried.",
+    "compaction": "Preserve the marker ALPINE-COMPACTION-MARKER across forced context compaction.",
+    "backpressure": "Stream a long response so the host can exercise its bounded event sink.",
+    "worker-restart": "Persist no worker-owned session; export only the typed host continuation state.",
+    "continuation-recovery": "Resume from the Alpine-supplied typed continuation and reply ALPINE-CONTINUED.",
+    "normalized-errors": "Invoke the deliberately failing benchmark tool exactly once."
+  },
+  "tool_policy": {
+    "allowed": [
+      "read"
+    ],
+    "denied": [
+      "write",
+      "edit",
+      "shell",
+      "network"
+    ]
+  }
+}

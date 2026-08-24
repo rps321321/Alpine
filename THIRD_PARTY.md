@@ -9,6 +9,16 @@ Project Alpine's Apache-2.0 license applies to Alpine's own source. It does not 
 - NVIDIA CUDA libraries and tools are external software governed by NVIDIA's terms. Alpine v0.1 does not redistribute them.
 - OpenCode is an external program. Alpine integrates through its command-line and configuration interfaces and does not redistribute it in v0.1.
 
+## Evaluated agent-engine candidates
+
+The bounded agent-engine bake-off references but does not copy, vendor, automatically install or redistribute these candidates. An operator may prepare a disposable package-locked root outside Alpine; the runner verifies the reviewed version and registry integrity before use:
+
+- OpenCode 1.18.21 at commit `826d9ad46a22bef0294998e08daa3c4904fea28f` (MIT), through the existing external process boundary.
+- `@earendil-works/pi-agent-core`, its directly imported `@earendil-works/pi-ai` provider package, and `@earendil-works/pi-coding-agent` 0.84.2 at commit `914cf1472e715297caa30db4b9535d534a9eb718` (MIT), as SDK/core and disposable RPC seams.
+- Cline `@cline/agents` 0.0.78 at commit `be8b984d10d1ad0e9a3917e051ac697f592587d2` (Apache-2.0), as the maintained embeddable alternative.
+
+Their package integrity, dependency, maintenance, packaging, update and security review is recorded in `config/agent-engine-bakeoff.json`. The checked-in adapter contains no third-party source. If Alpine later redistributes any candidate or derived code, its exact locked closure, license text, notices and attribution must be reviewed again; this source review is not redistribution approval.
+
 ## Source dependencies
 
 `Cargo.lock` pins the resolved Rust dependency graph. Direct Rust dependencies and the license expressions reported by their locked package metadata are:

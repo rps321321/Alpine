@@ -1,3 +1,4 @@
+mod agent_engine;
 mod clock;
 mod config;
 mod context;
@@ -24,6 +25,12 @@ mod support;
 mod tooling;
 mod tuning;
 
+pub use agent_engine::{
+    AgentEngineBakeoffOptions, AgentEngineBakeoffPlanSummary, AgentEngineBakeoffReport,
+    AgentEngineBudgetObservation, AgentEngineCandidateReport, AgentEngineError,
+    AgentEngineErrorKind, AgentEngineEvent, AgentEngineEventKind, AgentEngineScenario,
+    AgentEngineScenarioOutcome, AgentEngineScenarioReport,
+};
 pub use config::{Profile, ResolvedSession, SessionConfig};
 pub use context::{NearLimitContextOptions, NearLimitContextReport};
 pub use decision::Decision;
@@ -53,7 +60,7 @@ pub use public_evidence::{
     PublicArtifactDigest, PublicEvidenceBundle, PublicEvidenceOptions, PublicQualificationFacts,
 };
 pub use qualification::{
-    EvidencePhase, QualificationCheck, QualificationReport, QualificationRequest,
+    EvidenceIdentity, EvidencePhase, QualificationCheck, QualificationReport, QualificationRequest,
     QualificationTarget, RunQualificationOptions, RunQualificationReport,
 };
 pub use rollback::{RollbackProofOptions, RollbackProofReport};
@@ -86,6 +93,18 @@ pub enum AlpineError {
 pub struct Alpine;
 
 impl Alpine {
+    pub fn inspect_agent_engine_bakeoff_plan(
+        path: &Path,
+    ) -> Result<AgentEngineBakeoffPlanSummary, AlpineError> {
+        agent_engine::inspect_plan(path).map_err(AlpineError::InvalidInput)
+    }
+
+    pub fn run_agent_engine_bakeoff(
+        options: &AgentEngineBakeoffOptions,
+    ) -> Result<AgentEngineBakeoffReport, AlpineError> {
+        agent_engine::run(options).map_err(AlpineError::InvalidInput)
+    }
+
     pub fn run_evaluation(options: &EvaluationOptions) -> Result<EvaluationReport, AlpineError> {
         evaluation::run(options).map_err(AlpineError::InvalidInput)
     }

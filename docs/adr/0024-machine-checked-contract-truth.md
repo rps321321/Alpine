@@ -20,6 +20,25 @@ Profile and Session Config objects fail on unknown fields. `status` is specifica
 
 Golden task schema 2 identifies checked-in fixtures as public and declares their machine-checked capabilities. Golden evidence schema 3 binds the task suite, OpenCode executable and test executable identities. The default `public-v1` fixture adds multi-file TDD repair, required tool-error recovery, and early-constraint retention through context growth. Recovery requires exactly one failed `read` of the declared relative sentinel followed by a successful tool effect; conflicting call-ID reuse and duplicate matching effects fail. Promotion Policy names `public-v1` and its three required capabilities, so a simpler task cannot satisfy Qualification through the generic evidence kind. Public reports retain only structural counts, booleans and digests; prompts, tool input, raw output and final prose are not evidence. The Focus Timer contract is retained only as an explicitly unimplemented experiment outside qualification configuration. The narrow Pi/OpenCode exact-read comparison remains isolated and does not introduce a generalized engine protocol.
 
+The public-tree verifier continues to reject arbitrary binary content. A shipped
+desktop raster is admitted only through `config/public-binary-assets.json`,
+which restricts entries to the desktop asset directory and requires an exact
+lowercase SHA-256, a size ceiling no larger than the source-file limit, and a
+nonempty provenance statement. Missing, changed, oversized, duplicated or
+unlisted binary assets fail verification. Design-reference captures are local
+research inputs, not proposed public-tree content.
+
+Native executable version probes accept an explicit argument contract and have
+a bounded wait before terminating the exact probe process. This keeps the
+release verifier from hanging on a valid executable whose version syntax is not
+`--version`, while llama.cpp probes retain that default.
+
+Test-only subprocess checks retain their exact exit, output and boundary
+assertions but allow up to 30 seconds for cold Windows CI process startup. This
+does not change any production request, benchmark, worker or inference timeout;
+it prevents a busy clean runner from turning executable launch latency into a
+false contract failure.
+
 ## Consequences
 
 Existing benchmark, policy, tuning-report, and golden-agent evidence must be regenerated before it can support a current claim. The stricter contracts may expose configuration mistakes that older adapters ignored; errors are reported before runtime or setup mutation. Checked-in task fixtures are reproducible public tests and must never be described as hidden evaluation evidence. Live GPU, model, and agent runs remain separate evidence and are not implied by source-level verification.

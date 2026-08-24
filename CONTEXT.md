@@ -142,6 +142,26 @@ _Avoid_: OpenCode permissions, Harness Policy Boundary
 The one repository the Harness Policy Boundary binds file and Git rules to. Reachability on disk is not consent.
 _Avoid_: workspace, folder, whatever the model can see
 
+**Desktop Project Record**:
+The Alpine-owned durable identity and canonical root for one Selected Project in Alpine Desktop. It groups Tasks without granting the Agent Runtime access beyond that root.
+_Avoid_: Pi project, recent-folder shortcut, implicit filesystem authority
+
+**Task**:
+An Alpine-owned durable unit of agent work inside one Desktop Project Record. A Task retains its selected model, Profile, status, Messages and typed Task Events independently of the replaceable Agent Runtime Adapter.
+_Avoid_: Pi session, chat tab, transient prompt
+
+**Task Message**:
+An ordered user, assistant or system contribution retained as Task recovery state. Tool lifecycle is recorded as Task Events instead of being encoded into terminal-formatted Messages.
+_Avoid_: provider transcript as authority, console log, rendered markdown state
+
+**Task Event**:
+An ordered typed lifecycle fact for a Task, such as a model launch, text stream boundary, tool request, Tool Approval decision, tool result, cancellation or failure. Its kind and structured payload are application state; rendered terminal text is not.
+_Avoid_: log line, Pi-native event as durable truth, UI toast
+
+**Tool Approval**:
+An explicit Alpine Desktop decision that permits or denies one exact consequential workspace operation for one Task. Approvals are scoped to the proposed operation and are never inferred from filesystem reachability.
+_Avoid_: blanket consent, model permission, prior approval for a different command
+
 **Selected Target**:
 A later Attack Lab concept: an explicit host, IP, range, or lab authorized for active testing. v1 does not implement a destination allowlist. Operator judgment is the only destination control.
 _Avoid_: domain allowlist (for ordinary research), scanning ban, pretending OpenCode enforces target scope
@@ -157,6 +177,50 @@ _Avoid_: hard-coded 8100, scattered ports, mutable marketing names as provenance
 **Harness**:
 OpenCode, pointed at a configurable local OpenAI-compatible endpoint. The only path from model output to host actions.
 _Avoid_: wrapper, frontend, chatbot, Cline, protocol bridge
+
+**Agent Engine Candidate**:
+A source-pinned, untrusted and disposable worker seam evaluated under Alpine-owned Evidence Identity, budgets, typed events/errors and exact Inference Session restoration. Candidate project, session, configuration and transcript stores never become Alpine authority.
+_Avoid_: second Harness, embedded authority, permanent generic protocol, candidate session as recovery truth
+
+**Agent Engine Bake-off**:
+The bounded headless comparison of reviewed Agent Engine Candidates. Alpine launches exact package-locked adapters from disposable roots, owns Evidence Identity and Session restoration, and turns candidate-native SDK/RPC/JSON observations into typed events and errors. Every required scenario is either demonstrated under identical material inputs or retained as an explicit typed failure. It is architecture evidence, not Qualification, Promotion or approval to absorb a dependency.
+_Avoid_: benchmark winner, production engine selection, fork approval, model qualification
+
+**Alpine Desktop**:
+The local-first task application that presents Alpine's model, evidence, Inference Session and agent workflows through one coherent desktop experience. It is a user interface over Alpine authority, not a second control plane.
+_Avoid_: Pi Desktop, wrapper, dashboard, desktop authority
+
+**Desktop Interface**:
+The small typed command-and-event surface between Alpine Desktop and the Rust control plane. Long operations publish typed lifecycle events; formatted terminal text is never application state.
+_Avoid_: frontend API, CLI parsing, Tauri commands as the domain model
+
+**Agent Runtime Adapter**:
+A replaceable implementation of the agent loop inside Alpine Desktop. Pi SDK/core is the first experimental Adapter; Alpine owns its model, policy, tools, task state, credentials and recovery truth.
+_Avoid_: Harness authority, Pi session, permanent engine protocol, embedded control plane
+
+**Graph Context Adapter**:
+An opt-in, replaceable cache builder and bounded query surface that may supply a scoped project subgraph to an Agent Runtime Adapter. It owns no source, Task, permission or recovery truth and may not install hooks or mutate project instructions.
+_Avoid_: automatic Graphify install, graph authority, project index as source truth, ambient CLI access
+
+**Model Registry**:
+The machine-local catalog of exact imported or downloaded model artifacts and their provenance. A Model Registry entry is not evidence that the artifact runs or is qualified.
+_Avoid_: Hugging Face search results, model folder, Qualification database
+
+**Model Assessment**:
+A pre-run compatibility and resource-fit estimate for one exact model artifact on the current host. It may guide a download or conservative first run but is not Experiment or Qualification evidence.
+_Avoid_: benchmark, qualification, guaranteed fit, recommendation without uncertainty
+
+**Browser Surface**:
+The contextual Alpine Desktop panel backed by isolated native child WebViews and one Alpine-owned profile. Loopback pages open directly; each new external host requires a tab-scoped user decision. It is a human-visible surface and grants no Pi, Desktop Interface or host-tool authority.
+_Avoid_: regular browser profile, agent web tool, ambient credentials, URL as consent
+
+**Desktop UI Preference**:
+A non-authoritative machine-local presentation choice such as whether the project rail or Context Panel is open. It may use webview-local storage because it grants no project, model, browser or execution authority.
+_Avoid_: application state, project permission, durable Task fact
+
+**Compute Device Summary**:
+A first-launch inventory of compute devices the trusted host can identify for local-model work. Device presence and capacity may inform a Model Assessment but do not prove placement, speed, model fit or Windows graphics scheduling.
+_Avoid_: GPU recommendation, iGPU assignment, measured placement, Qualification evidence
 
 **Inference Server**:
 The local process that loads weights and serves an OpenAI-compatible API on localhost.
