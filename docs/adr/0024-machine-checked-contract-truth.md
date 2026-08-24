@@ -33,6 +33,12 @@ a bounded wait before terminating the exact probe process. This keeps the
 release verifier from hanging on a valid executable whose version syntax is not
 `--version`, while llama.cpp probes retain that default.
 
+Test-only subprocess checks retain their exact exit, output and boundary
+assertions but allow up to 30 seconds for cold Windows CI process startup. This
+does not change any production request, benchmark, worker or inference timeout;
+it prevents a busy clean runner from turning executable launch latency into a
+false contract failure.
+
 ## Consequences
 
 Existing benchmark, policy, tuning-report, and golden-agent evidence must be regenerated before it can support a current claim. The stricter contracts may expose configuration mistakes that older adapters ignored; errors are reported before runtime or setup mutation. Checked-in task fixtures are reproducible public tests and must never be described as hidden evaluation evidence. Live GPU, model, and agent runs remain separate evidence and are not implied by source-level verification.

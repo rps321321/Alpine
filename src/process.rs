@@ -113,7 +113,9 @@ mod tests {
     #[test]
     fn bounded_runner_captures_without_pipes() {
         let rustc = resolve_executable("rustc").expect("rustc on PATH");
-        let result = run_bounded(&rustc, &[OsStr::new("--version")], Duration::from_secs(5))
+        // Cold Windows CI runners can spend several seconds starting a newly
+        // downloaded executable while the parallel test suite is busy.
+        let result = run_bounded(&rustc, &[OsStr::new("--version")], Duration::from_secs(30))
             .expect("rustc probe succeeds");
         assert!(result.status.success());
         assert!(!result.timed_out);

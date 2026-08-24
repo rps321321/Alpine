@@ -2372,7 +2372,9 @@ mod tests {
             .envs(sanitized_environment())
             .env("ALPINE_BAKEOFF_API_KEY", "test-only");
 
-        let output = run_command_bounded(&mut command, Duration::from_secs(10)).unwrap();
+        // Keep the test bounded while allowing a cold Windows runner to start
+        // Node under the parallel Rust and CodeQL workload.
+        let output = run_command_bounded(&mut command, Duration::from_secs(30)).unwrap();
 
         assert!(
             output.status.success(),
