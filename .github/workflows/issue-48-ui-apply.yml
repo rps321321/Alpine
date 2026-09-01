@@ -1,0 +1,32 @@
+name: apply-issue-48-ui
+
+on:
+  push:
+    branches:
+      - codex/issue-48-task-journal
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Apply typed journal renderer cutover
+        run: python scripts/apply_issue_48_ui.py
+      - name: Generate TypeScript journal contract
+        working-directory: apps/desktop
+        run: node scripts/generate-task-journal-contract.mjs
+      - name: Retire one-shot files
+        run: rm scripts/apply_issue_48_ui.py .github/workflows/issue-48-ui-apply.yml
+      - name: Commit renderer cutover
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: consume typed task journal projections"
+          git push origin HEAD:codex/issue-48-task-journal
