@@ -1,0 +1,29 @@
+name: apply-issue-47-fix
+
+on:
+  push:
+    branches:
+      - codex/issue-47-host-supervisor
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Apply cleanup
+        run: python scripts/fix_issue_47.py
+      - name: Retire one-shot files
+        run: rm scripts/fix_issue_47.py .github/workflows/issue-47-fix.yml
+      - name: Commit cleanup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: tighten worker authority boundary"
+          git push origin HEAD:codex/issue-47-host-supervisor
