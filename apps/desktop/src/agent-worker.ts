@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { ApprovalContinuations } from "./approval-continuations";
 import type {
   TaskMessage,
   ToolApproval,
@@ -68,12 +69,6 @@ type AgentWorkerEvent =
       responseCharacters: number;
     };
 
-type ApprovalWaiter = {
-  resolve: () => void;
-  reject: (error: Error) => void;
-  removeAbortListener: () => void;
-};
-
 type ActiveWorkerRun = {
   taskId: string;
   executionId: string;
@@ -88,7 +83,7 @@ type ActiveWorkerRun = {
   reportFailure: Error | null;
 };
 
-const approvalWaiters = new Map<string, ApprovalWaiter>();
+const approvalContinuations = new ApprovalContinuations();
 let active: ActiveWorkerRun | null = null;
 
 function asError(error: unknown) {
@@ -168,39 +163,15 @@ function handlePiEvent(run: ActiveWorkerRun, event: PiHarnessEvent) {
 }
 
 function rejectApprovals(error: Error) {
-  for (const [approvalId, waiter] of approvalWaiters) {
-    approvalWaiters.delete(approvalId);
-    waiter.removeAbortListener();
-    waiter.reject(error);
-  }
+  approvalContinuations.rejectAll(error);
 }
 
 function settleApproval(approvalId: string, approved: boolean) {
-  const waiter = approvalWaiters.get(approvalId);
-  if (!waiter) return;
-  approvalWaiters.delete(approvalId);
-  waiter.removeAbortListener();
-  if (approved) waiter.resolve();
-  else waiter.reject(new Error("Operator denied the proposed operation"));
+  approvalContinuations.settle(approvalId, approved);
 }
 
 function waitForApproval(approvalId: string, signal?: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error("Tool Approval wait was cancelled"));
-      return;
-    }
-    const onAbort = () => {
-      approvalWaiters.delete(approvalId);
-      reject(new Error("Tool Approval wait was cancelled"));
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    approvalWaiters.set(approvalId, {
-      resolve,
-      reject,
-      removeAbortListener: () => signal?.removeEventListener("abort", onAbort),
-    });
-  });
+  return approvalContinuations.wait(approvalId, signal);
 }
 
 function toolClient(): PiToolClient {

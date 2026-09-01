@@ -282,6 +282,54 @@ fn approvals_messages_and_events_are_bound_to_one_execution() {
 }
 
 #[test]
+fn approval_decision_atomically_resumes_its_waiting_execution() {
+    let (_temporary, store, task_id) = setup();
+    let execution = store
+        .create_execution(CreateExecution {
+            task_id: task_id.clone(),
+            specification: specification('a'),
+        })
+        .unwrap();
+    store
+        .transition_execution(execution.id.as_str(), ExecutionState::Preparing, None)
+        .unwrap();
+    store
+        .transition_execution(execution.id.as_str(), ExecutionState::Running, None)
+        .unwrap();
+    store
+        .transition_execution(
+            execution.id.as_str(),
+            ExecutionState::WaitingForApproval,
+            None,
+        )
+        .unwrap();
+    let approval = store
+        .request_tool_approval(NewToolApproval {
+            task_id,
+            execution_id: execution.id.clone(),
+            tool_call_id: "call-atomic".to_owned(),
+            operation: "shell".to_owned(),
+            proposal: serde_json::json!({"command": "cargo test", "timeoutSeconds": 30}),
+        })
+        .unwrap();
+
+    let decision = store
+        .decide_tool_approval_with_event(&approval.id, true)
+        .unwrap();
+
+    assert_eq!(decision.approval.state, ApprovalState::Approved);
+    assert_eq!(decision.event.execution_id, execution.id);
+    assert_eq!(
+        store
+            .get_execution(execution.id.as_str())
+            .unwrap()
+            .unwrap()
+            .state,
+        ExecutionState::Running
+    );
+}
+
+#[test]
 fn deleting_a_task_cascades_all_execution_owned_records() {
     let (_temporary, store, task_id) = setup();
     let execution = store

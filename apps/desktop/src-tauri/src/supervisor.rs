@@ -562,7 +562,10 @@ pub async fn submit_prompt(
                 return Err(error.to_string());
             }
         };
-        supervisor.activate(&task_id, execution.id.as_str())?;
+        if let Err(error) = supervisor.activate(&task_id, execution.id.as_str()) {
+            let _ = fail_execution(&store, &supervisor, execution.id.as_str(), error.clone());
+            return Err(error);
+        }
         supervisor.broadcast(ExecutionUpdate::Message {
             task_id: task_id.clone(),
             execution_id: execution.id.to_string(),
@@ -728,22 +731,35 @@ pub fn decide_tool_approval(
     approved: bool,
 ) -> Result<ToolApprovalDecision, String> {
     require_webview(&webview, MAIN_WEBVIEW)?;
-    let decision = store
-        .decide_tool_approval_with_event(&approval_id, approved)
-        .map_err(|error| error.to_string())?;
-    let execution_id = decision.approval.execution_id.to_string();
-    let task_id = decision.approval.task_id.clone();
+    let approval = store
+        .get_tool_approval(&approval_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the Tool Approval does not exist".to_owned())?;
+    let execution_id = approval.execution_id.to_string();
+    let task_id = approval.task_id.clone();
     supervisor.verify_active(&task_id, &execution_id)?;
     let current = store
         .get_execution(&execution_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "the Execution does not exist".to_owned())?;
-    if current.state == ExecutionState::WaitingForApproval {
-        let running = store
-            .transition_execution(&execution_id, ExecutionState::Running, None)
-            .map_err(|error| error.to_string())?;
-        supervisor.broadcast(state_update(running));
+    if current.state != ExecutionState::WaitingForApproval {
+        return Err(format!(
+            "Execution {execution_id} is not waiting for this approval"
+        ));
     }
+    let decision = store
+        .decide_tool_approval_with_event(&approval_id, approved)
+        .map_err(|error| error.to_string())?;
+    let running = store
+        .get_execution(&execution_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the Execution no longer exists".to_owned())?;
+    if running.state != ExecutionState::Running {
+        let error = "approval decision did not atomically resume its Execution".to_owned();
+        let _ = fail_execution(&store, &supervisor, &execution_id, error.clone());
+        return Err(error);
+    }
+    supervisor.broadcast(state_update(running));
     supervisor.broadcast(ExecutionUpdate::Event {
         task_id: task_id.clone(),
         execution_id: execution_id.clone(),
@@ -1034,9 +1050,24 @@ pub fn agent_worker_event(
     require_webview(&webview, AGENT_WORKER_WEBVIEW)?;
     let (_, execution_id) = event.identity();
     let execution_id = execution_id.to_owned();
+    let current = store
+        .get_execution(&execution_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the Execution does not exist".to_owned())?;
+    if current.state.is_terminal() {
+        return Ok(());
+    }
+    supervisor.verify_active(&current.task_id, &execution_id)?;
     match handle_worker_event(&store, &supervisor, event) {
         Ok(()) => Ok(()),
         Err(error) => {
+            let current = store
+                .get_execution(&execution_id)
+                .map_err(|cause| cause.to_string())?
+                .ok_or_else(|| "the Execution no longer exists".to_owned())?;
+            if current.state.is_terminal() {
+                return Ok(());
+            }
             let _ = fail_execution(&store, &supervisor, &execution_id, error.clone());
             Err(error)
         }
