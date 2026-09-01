@@ -1,0 +1,85 @@
+name: issue-46-fix
+
+on:
+  push:
+    branches:
+      - codex/issue-46-execution-aggregate
+    paths:
+      - .github/workflows/issue-46-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: codex/issue-46-execution-aggregate
+          fetch-depth: 0
+      - name: Apply renderer fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text(encoding="utf-8")
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected one match in {path}: {old[:80]!r}")
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          app_test = Path("apps/desktop/src/App.test.tsx")
+          replace_once(
+              app_test,
+              '''          id: "message-1",\n          taskId: task.id,\n          sequence: 1,''',
+              '''          id: "message-1",\n          taskId: task.id,\n          executionId: "legacy-execution-task-1",\n          sequence: 1,''',
+          )
+          replace_once(
+              app_test,
+              '''        id: "approval-1",\n        taskId: task.id,\n        toolCallId: "tool-1",''',
+              '''        id: "approval-1",\n        taskId: task.id,\n        executionId: "legacy-execution-task-1",\n        toolCallId: "tool-1",''',
+          )
+
+          execution = Path("apps/desktop/src/task-execution.ts")
+          replace_once(
+              execution,
+              '''      if (this.execution && !this.execution.state.endsWith("ed")) {''',
+              '''      if (this.execution && !isTerminal(this.execution.state)) {''',
+          )
+          replace_once(
+              execution,
+              '''      const next = this.execution.state === "queued" ? "cancelled" : "cancelled";\n      await this.moveTo(next).catch(() => undefined);''',
+              '''      await this.moveTo("cancelled").catch(() => undefined);''',
+          )
+
+          execution_test = Path("apps/desktop/src/task-execution.test.ts")
+          text = execution_test.read_text(encoding="utf-8")
+          marker = '''  it("records failure on the Execution without mutating Task lifecycle fields", async () => {'''
+          if text.count(marker) != 1:
+              raise SystemExit("task execution failure test marker changed")
+          insertion = '''  it("fails a queued Execution when preparation persistence fails", async () => {\n    const desktop = desktopDouble();\n    const transition = vi.mocked(desktop.transitionExecution);\n    transition\n      .mockRejectedValueOnce(new Error("state store unavailable"))\n      .mockResolvedValueOnce(execution("failed"));\n    const createRuntime = vi.fn().mockResolvedValue(runtimeThatEmits([]));\n    const controller = createTaskExecution(\n      { desktop, task: task(), history: [], onUpdate: () => undefined },\n      {\n        createRuntime,\n        scheduleFrame: () => 1,\n        cancelFrame: () => undefined,\n      },\n    );\n\n    const result = await controller.run("Continue");\n\n    expect(createRuntime).not.toHaveBeenCalled();\n    expect(result).toMatchObject({\n      executionId: "execution-1",\n      state: "error",\n      error: "state store unavailable",\n    });\n    expect(transition).toHaveBeenNthCalledWith(\n      2,\n      "execution-1",\n      "failed",\n      "state store unavailable",\n    );\n  });\n\n'''
+          execution_test.write_text(text.replace(marker, insertion + marker, 1), encoding="utf-8")
+          PY
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Verify renderer patch
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+      - name: Commit renderer fixes
+        shell: bash
+        run: |
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop/src/App.test.tsx apps/desktop/src/task-execution.ts apps/desktop/src/task-execution.test.ts
+          git commit -m "fix: harden execution lifecycle integration"
+          git push origin HEAD:codex/issue-46-execution-aggregate
