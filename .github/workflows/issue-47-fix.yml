@@ -17,7 +17,10 @@ jobs:
         with:
           fetch-depth: 0
       - name: Apply cleanup
-        run: python scripts/fix_issue_47.py
+        run: |
+          sed -i '/update("apps\/desktop\/src\/agent-worker.ts", rename_worker_effects)/d' scripts/fix_issue_47.py
+          python scripts/fix_issue_47.py
+          sed -i 's/editProjectFile:/executeApprovedEdit:/g; s/runProjectShell:/executeApprovedShell:/g' apps/desktop/src/agent-worker.ts
       - name: Retire one-shot files
         run: rm scripts/fix_issue_47.py .github/workflows/issue-47-fix.yml
       - name: Commit cleanup
