@@ -49,6 +49,10 @@ outcome. Pi runs in an isolated `agent-worker` webview and reports bounded event
 over a Tauri channel; worker-originated calls are checked against both webview
 identity and the active Task/Execution pair.
 
+The worker proposes an exact effect for approval; it does not expose the
+renderer-era row-mutation API. Approval persistence and state transitions remain
+host-owned.
+
 The desktop architecture gate rejects reintroduction of renderer-side provider
 imports, runtime credentials, row-level task mutation primitives, or direct
 Execution transition APIs.
