@@ -37,3 +37,25 @@ Messages, events, approvals, tool outcomes, metrics, and completion state all ca
 On startup, each unfinished Execution becomes `interrupted` and retains a restart failure detail. Alpine never resumes effects merely because a process restarted.
 
 Schema-3 task history is migrated deterministically to `legacy-execution-<task-id>` and `legacy-spec-<task-id>` when legacy activity can be associated with a Task. Known task-level model/profile fields are retained, while unavailable runtime, adapter, policy, and digest evidence is marked `legacyUnverified` rather than fabricated.
+
+## Host-owned execution authority
+
+The visible React renderer is a projection client. It can submit prompt,
+cancellation, steering, follow-up and approval intents, but it cannot construct
+the provider adapter, receive the runtime credential, append durable task facts
+or transition Execution state. A Rust `TaskSupervisor` reserves local inference
+capacity, creates the immutable Execution and persists every authoritative
+outcome. Pi runs in an isolated `agent-worker` webview and reports bounded events
+over a Tauri channel; worker-originated calls are checked against both webview
+identity and the active Task/Execution pair.
+
+The worker start command boxes its comparatively large launch specification so
+routine steering, cancellation, and approval commands remain small values.
+
+The worker proposes an exact effect for approval; it does not expose the
+renderer-era row-mutation API. Approval persistence and state transitions remain
+host-owned.
+
+The desktop architecture gate rejects reintroduction of renderer-side provider
+imports, runtime credentials, row-level task mutation primitives, or direct
+Execution transition APIs.

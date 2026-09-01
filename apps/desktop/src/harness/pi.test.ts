@@ -1,7 +1,7 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
 import { PiHarness, localPiModel } from "./pi";
-import type { DesktopClient } from "../desktop";
+import type { PiToolClient } from "./pi";
 
 const config = {
   modelId: "Qwen3.5-9B-Q4_K_M.gguf",
@@ -53,7 +53,7 @@ describe("Pi harness adapter", () => {
       streamFn: neverCalled,
       taskId: "task-1",
       executionId: "execution-1",
-      desktop: {} as DesktopClient,
+      tools: {} as PiToolClient,
     });
 
     expect(harness.descriptor.toolNames).toEqual([

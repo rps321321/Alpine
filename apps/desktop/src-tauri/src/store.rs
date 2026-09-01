@@ -788,6 +788,12 @@ impl DesktopStore {
             ],
         )?;
         transaction.execute(
+            "UPDATE executions
+             SET state = 'running', updated_at_ms = ?2
+             WHERE id = ?1 AND state = 'waiting-for-approval'",
+            params![approval.execution_id.as_str(), decided_at_ms],
+        )?;
+        transaction.execute(
             "UPDATE tasks SET updated_at_ms = ?2 WHERE id = ?1",
             params![approval.task_id, decided_at_ms],
         )?;

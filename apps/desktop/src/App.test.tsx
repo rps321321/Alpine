@@ -11,28 +11,15 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { DesktopClient } from "./desktop";
 
-vi.mock("./harness/pi", () => ({
-  PiHarness: class {
-    readonly errorMessage = undefined;
-    subscribe() {
-      return () => undefined;
-    }
-    async prompt() {
-      return undefined;
-    }
-    abort() {
-      return undefined;
-    }
-    steer() {
-      return undefined;
-    }
-    followUp() {
-      return undefined;
-    }
-  },
-}));
 
 function client(): DesktopClient {
+  const executionListeners = new Set<
+    (update: import("./desktop").ExecutionUpdate) => void
+  >();
+  let executionSequence = 0;
+  const emitExecution = (update: import("./desktop").ExecutionUpdate) => {
+    for (const listener of executionListeners) listener(update);
+  };
   return {
     browser: {
       nativeSurface: false,
@@ -174,31 +161,6 @@ function client(): DesktopClient {
       detail: "The runtime is configured and stopped.",
       availableProfiles: ["stable-16k", "turbo-16k"],
     }),
-    resolvePiLaunch: vi.fn().mockResolvedValue({
-      modelId: "Qwen3.5-9B-Q4_K_M.gguf",
-      baseUrl: "http://127.0.0.1:8080",
-      apiKey: "test-local-token",
-      contextWindow: 16_384,
-      maxTokens: 2_048,
-      temperature: 0.2,
-      specification: {
-        modelRegistryId: "model-1",
-        modelRepoId: "Qwen/Qwen3.5-9B-GGUF",
-        modelRevision: "a".repeat(40),
-        modelFilename: "Qwen3.5-9B-Q4_K_M.gguf",
-        modelSha256: "b".repeat(64),
-        sessionConfigSha256: "c".repeat(64),
-        profileName: "stable-16k",
-        profileSha256: "d".repeat(64),
-        runtimeName: "official",
-        runtimeIdentity: "e".repeat(64),
-        adapterIdentity: "pi-agent-core@0.84.2",
-        policyIdentity: "alpine-desktop-project-tools-v1",
-        contextWindow: 16_384,
-        maxTokens: 2_048,
-        temperatureMillis: 200,
-      },
-    }),
     runRuntimeProbe: vi.fn().mockResolvedValue({
       model: "Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf",
       profile: "stable-16k",
@@ -224,32 +186,17 @@ function client(): DesktopClient {
     listTasks: vi.fn().mockResolvedValue([]),
     createTask: vi.fn(),
     loadTask: vi.fn().mockResolvedValue(null),
-    createExecution: vi.fn().mockImplementation(async ({ taskId, specification }) => ({
-      id: "execution-1",
-      taskId,
-      executionSpecId: "spec-1",
-      specification: {
-        id: "spec-1",
-        taskId,
-        ...specification,
-        legacyUnverified: false,
-        createdAtMs: 1,
-      },
-      state: "queued",
-      failure: null,
-      queuedAtMs: 1,
-      startedAtMs: null,
-      finishedAtMs: null,
-      updatedAtMs: 1,
-    })),
-    transitionExecution: vi.fn().mockImplementation(
-      async (executionId, state, failure = null) => ({
+    submitPrompt: vi.fn().mockImplementation(async (taskId, prompt) => {
+      executionSequence += 1;
+      const executionId = `execution-${executionSequence}`;
+      const now = Date.now();
+      const execution: import("./desktop").Execution = {
         id: executionId,
-        taskId: "task-1",
-        executionSpecId: "spec-1",
+        taskId,
+        executionSpecId: `spec-${executionSequence}`,
         specification: {
-          id: "spec-1",
-          taskId: "task-1",
+          id: `spec-${executionSequence}`,
+          taskId,
           modelRegistryId: "model-1",
           modelRepoId: "Qwen/Qwen3.5-9B-GGUF",
           modelRevision: "a".repeat(40),
@@ -266,33 +213,54 @@ function client(): DesktopClient {
           maxTokens: 2_048,
           temperatureMillis: 200,
           legacyUnverified: false,
-          createdAtMs: 1,
+          createdAtMs: now,
         },
-        state,
-        failure,
-        queuedAtMs: 1,
-        startedAtMs: 2,
-        finishedAtMs: ["completed", "cancelled", "failed", "interrupted"].includes(
-          state,
-        )
-          ? 3
-          : null,
-        updatedAtMs: 2,
-      }),
-    ),
+        state: "preparing",
+        failure: null,
+        queuedAtMs: now,
+        startedAtMs: now,
+        finishedAtMs: null,
+        updatedAtMs: now,
+      };
+      const promptMessage: import("./desktop").TaskMessage = {
+        id: `prompt-${executionSequence}`,
+        taskId,
+        executionId,
+        sequence: 1,
+        role: "user",
+        content: prompt,
+        createdAtMs: now,
+      };
+      queueMicrotask(() => {
+        const completed = {
+          ...execution,
+          state: "completed" as const,
+          finishedAtMs: Date.now(),
+        };
+        emitExecution({
+          type: "terminal",
+          taskId,
+          executionId,
+          execution: completed,
+          outcome: "completed",
+          error: null,
+        });
+      });
+      return { execution, promptMessage };
+    }),
+    cancelExecution: vi.fn(),
+    steerExecution: vi.fn(),
+    queueFollowUp: vi.fn(),
+    subscribeExecutionUpdates: vi.fn().mockImplementation(async (listener) => {
+      executionListeners.add(listener);
+      return () => executionListeners.delete(listener);
+    }),
     deleteTask: vi.fn().mockResolvedValue(undefined),
-    appendTaskMessage: vi.fn(),
-    appendTaskEvent: vi.fn(),
-    setTaskStatus: vi.fn(),
-    requestToolApproval: vi.fn(),
-    getToolApproval: vi.fn().mockResolvedValue(null),
     listPendingApprovals: vi.fn().mockResolvedValue([]),
     decideToolApproval: vi.fn(),
     listProjectFiles: vi.fn().mockResolvedValue([]),
     readProjectFile: vi.fn(),
     searchProjectFiles: vi.fn().mockResolvedValue([]),
-    editProjectFile: vi.fn(),
-    runProjectShell: vi.fn(),
   };
 }
 
@@ -340,9 +308,6 @@ describe("Alpine Desktop primary workflow", () => {
       },
     ]);
     vi.mocked(desktop.createTask).mockResolvedValue(task);
-    vi.mocked(desktop.setTaskStatus).mockImplementation(
-      async (_taskId, status) => ({ ...task, status, updatedAtMs: 4 }),
-    );
     vi.mocked(desktop.loadTask).mockResolvedValue({
       task: { ...task, status: "completed" },
       messages: [],
@@ -408,16 +373,8 @@ describe("Alpine Desktop primary workflow", () => {
       },
     ]);
     vi.mocked(desktop.createTask).mockResolvedValue(task);
-    vi.mocked(desktop.resolvePiLaunch).mockRejectedValue(
+    vi.mocked(desktop.submitPrompt).mockRejectedValue(
       new Error("Local runtime is unavailable"),
-    );
-    vi.mocked(desktop.setTaskStatus).mockImplementation(
-      async (_taskId, status, error) => ({
-        ...task,
-        status,
-        error: error ?? null,
-        updatedAtMs: 4,
-      }),
     );
     vi.mocked(desktop.loadTask).mockResolvedValue({
       task: {
@@ -439,7 +396,7 @@ describe("Alpine Desktop primary workflow", () => {
       "The local model session is unavailable. Start it in Settings, then try again.",
     );
     await user.click(within(alert).getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(desktop.resolvePiLaunch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(desktop.submitPrompt).toHaveBeenCalledTimes(2));
   });
 
   it("opens Settings with the platform settings shortcut", async () => {

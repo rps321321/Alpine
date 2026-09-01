@@ -4,6 +4,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   build: {
     outDir: "dist/client",
+    rollupOptions: {
+      input: ["index.html", "agent.html"],
+    },
   },
   optimizeDeps: {
     include: ["react", "react-dom/client"],
@@ -13,7 +16,7 @@ export default defineConfig({
     host: "0.0.0.0",
     allowedHosts: ["terminal.local"],
     warmup: {
-      clientFiles: ["./src/main.tsx"],
+      clientFiles: ["./src/main.tsx", "./src/agent-worker.ts"],
     },
   },
   test: {

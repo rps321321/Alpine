@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "agent-worker",
+  "description": "Allows the hidden Alpine Agent Worker to invoke only application commands explicitly bound to its webview identity.",
+  "windows": [
+    "agent-worker"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}

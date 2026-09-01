@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export interface HardwareProfile {
@@ -106,15 +106,6 @@ export interface RuntimeSnapshot {
   availableProfiles: string[];
 }
 
-export interface PiLaunchConfig {
-  modelId: string;
-  baseUrl: string;
-  apiKey: string;
-  contextWindow: number;
-  maxTokens: number;
-  temperature: number;
-  specification: NewExecutionSpecification;
-}
 
 export interface RuntimeProbeReport {
   model: string;
@@ -296,10 +287,60 @@ export interface Execution {
   updatedAtMs: number;
 }
 
-export interface CreateExecutionInput {
-  taskId: string;
-  specification: NewExecutionSpecification;
+
+
+export interface SubmitPromptResult {
+  execution: Execution;
+  promptMessage: TaskMessage;
 }
+
+export type ExecutionUpdate =
+  | {
+      type: "state";
+      taskId: string;
+      executionId: string;
+      execution: Execution;
+    }
+  | { type: "delta"; taskId: string; executionId: string; delta: string }
+  | {
+      type: "message";
+      taskId: string;
+      executionId: string;
+      message: TaskMessage;
+    }
+  | {
+      type: "event";
+      taskId: string;
+      executionId: string;
+      event: TaskEvent;
+    }
+  | {
+      type: "approval";
+      taskId: string;
+      executionId: string;
+      approval: ToolApproval;
+    }
+  | {
+      type: "inspector";
+      taskId: string;
+      executionId: string;
+      tab: "changes" | "terminal";
+    }
+  | {
+      type: "terminal";
+      taskId: string;
+      executionId: string;
+      execution: Execution;
+      outcome: "completed" | "cancelled" | "failed";
+      error: string | null;
+    }
+  | {
+      type: "error";
+      taskId: string;
+      executionId: string;
+      scope: "persistence" | "run";
+      message: string;
+    };
 
 export interface DesktopTask {
   id: string;
@@ -481,7 +522,6 @@ export interface DesktopClient {
   setDefaultModel(selection: ModelSelection): Promise<DesktopSettings>;
   startRuntime(): Promise<RuntimeSnapshot>;
   stopRuntime(): Promise<RuntimeSnapshot>;
-  resolvePiLaunch(): Promise<PiLaunchConfig>;
   runRuntimeProbe(): Promise<RuntimeProbeReport>;
   runFullEvaluation(scope: EvaluationScope): Promise<FullEvaluationSummary>;
   subscribeEvaluationProgress(
@@ -504,39 +544,15 @@ export interface DesktopClient {
   createProject(name: string, root: string): Promise<DesktopProject>;
   listTasks(projectId: string): Promise<DesktopTask[]>;
   createTask(input: CreateTaskInput): Promise<DesktopTask>;
-  loadTask(taskId: string): Promise<TaskDetail | null>;
-  createExecution(input: CreateExecutionInput): Promise<Execution>;
-  transitionExecution(
-    executionId: string,
-    state: ExecutionState,
-    failure?: string | null,
-  ): Promise<Execution>;
   deleteTask(taskId: string): Promise<void>;
-  appendTaskMessage(input: {
-    taskId: string;
-    executionId: string;
-    role: MessageRole;
-    content: string;
-  }): Promise<TaskMessage>;
-  appendTaskEvent(input: {
-    taskId: string;
-    executionId: string;
-    kind: string;
-    payload: unknown;
-  }): Promise<TaskEvent>;
-  setTaskStatus(
-    taskId: string,
-    status: TaskStatus,
-    error?: string | null,
-  ): Promise<DesktopTask>;
-  requestToolApproval(input: {
-    taskId: string;
-    executionId: string;
-    toolCallId: string;
-    operation: "edit" | "shell";
-    proposal: Record<string, unknown>;
-  }): Promise<ToolApproval>;
-  getToolApproval(approvalId: string): Promise<ToolApproval | null>;
+  loadTask(taskId: string): Promise<TaskDetail | null>;
+  submitPrompt(taskId: string, prompt: string): Promise<SubmitPromptResult>;
+  cancelExecution(executionId: string): Promise<Execution>;
+  steerExecution(executionId: string, text: string): Promise<TaskMessage>;
+  queueFollowUp(executionId: string, text: string): Promise<TaskMessage>;
+  subscribeExecutionUpdates(
+    listener: (update: ExecutionUpdate) => void,
+  ): Promise<() => void>;
   listPendingApprovals(taskId: string): Promise<ToolApproval[]>;
   decideToolApproval(
     approvalId: string,
@@ -554,16 +570,6 @@ export interface DesktopClient {
     query: string,
     limit?: number,
   ): Promise<WorkspaceSearchMatch[]>;
-  editProjectFile(
-    taskId: string,
-    approvalId: string,
-    edit: WorkspaceEdit,
-  ): Promise<WorkspaceEditResult>;
-  runProjectShell(
-    taskId: string,
-    approvalId: string,
-    shell: WorkspaceShell,
-  ): Promise<WorkspaceShellResult>;
 }
 
 const tauriBrowserAdapter: BrowserAdapter = {
@@ -597,7 +603,6 @@ export const tauriDesktopClient: DesktopClient = {
     invoke<DesktopSettings>("set_default_model", { selection }),
   startRuntime: () => invoke<RuntimeSnapshot>("start_runtime"),
   stopRuntime: () => invoke<RuntimeSnapshot>("stop_runtime"),
-  resolvePiLaunch: () => invoke<PiLaunchConfig>("resolve_pi_launch"),
   runRuntimeProbe: () => invoke<RuntimeProbeReport>("run_runtime_probe"),
   runFullEvaluation: (scope) =>
     invoke<FullEvaluationSummary>("run_full_evaluation", { scope }),
@@ -627,21 +632,24 @@ export const tauriDesktopClient: DesktopClient = {
     invoke<DesktopProject>("create_project", { name, root }),
   listTasks: (projectId) => invoke<DesktopTask[]>("list_tasks", { projectId }),
   createTask: (input) => invoke<DesktopTask>("create_task", { input }),
-  loadTask: (taskId) => invoke<TaskDetail | null>("load_task", { taskId }),
-  createExecution: (input) =>
-    invoke<Execution>("create_execution", { input }),
-  transitionExecution: (executionId, state, failure = null) =>
-    invoke<Execution>("transition_execution", { executionId, state, failure }),
   deleteTask: (taskId) => invoke<void>("delete_task", { taskId }),
-  appendTaskMessage: (input) =>
-    invoke<TaskMessage>("append_task_message", { input }),
-  appendTaskEvent: (input) => invoke<TaskEvent>("append_task_event", { input }),
-  setTaskStatus: (taskId, status, error = null) =>
-    invoke<DesktopTask>("set_task_status", { taskId, status, error }),
-  requestToolApproval: (input) =>
-    invoke<ToolApproval>("request_tool_approval", { input }),
-  getToolApproval: (approvalId) =>
-    invoke<ToolApproval | null>("get_tool_approval", { approvalId }),
+  loadTask: (taskId) => invoke<TaskDetail | null>("load_task", { taskId }),
+  submitPrompt: (taskId, prompt) =>
+    invoke<SubmitPromptResult>("submit_prompt", { taskId, prompt }),
+  cancelExecution: (executionId) =>
+    invoke<Execution>("cancel_execution", { executionId }),
+  steerExecution: (executionId, text) =>
+    invoke<TaskMessage>("steer_execution", { executionId, text }),
+  queueFollowUp: (executionId, text) =>
+    invoke<TaskMessage>("queue_follow_up", { executionId, text }),
+  subscribeExecutionUpdates: async (listener) => {
+    const channel = new Channel<ExecutionUpdate>();
+    channel.onmessage = listener;
+    await invoke<void>("subscribe_execution_updates", { channel });
+    return () => {
+      channel.onmessage = () => undefined;
+    };
+  },
   listPendingApprovals: (taskId) =>
     invoke<ToolApproval[]>("list_pending_approvals", { taskId }),
   decideToolApproval: (approvalId, approved) =>
@@ -658,18 +666,6 @@ export const tauriDesktopClient: DesktopClient = {
       taskId,
       query,
       limit,
-    }),
-  editProjectFile: (taskId, approvalId, edit) =>
-    invoke<WorkspaceEditResult>("edit_project_file", {
-      taskId,
-      approvalId,
-      edit,
-    }),
-  runProjectShell: (taskId, approvalId, shell) =>
-    invoke<WorkspaceShellResult>("run_project_shell", {
-      taskId,
-      approvalId,
-      shell,
     }),
 };
 
@@ -688,6 +684,7 @@ const previewProjects: DesktopProject[] = [
 const previewTasks: DesktopTask[] = [];
 const previewDetails = new Map<string, TaskDetail>();
 const previewApprovals = new Map<string, ToolApproval>();
+const previewExecutionListeners = new Set<(update: ExecutionUpdate) => void>();
 let previewSequence = 0;
 
 function previewId(prefix: string) {
@@ -700,6 +697,18 @@ const previewBrowserHosts = new Set(["localhost", "127.0.0.1", "::1"]);
 
 function previewBrowserEvent(event: BrowserEvent) {
   for (const listener of previewBrowserListeners) listener(event);
+}
+
+function previewExecutionUpdate(update: ExecutionUpdate) {
+  for (const listener of previewExecutionListeners) listener(update);
+}
+
+function previewExecution(executionId: string) {
+  for (const detail of previewDetails.values()) {
+    const execution = detail.executions?.find((candidate) => candidate.id === executionId);
+    if (execution) return { detail, execution };
+  }
+  return null;
 }
 
 const previewBrowserAdapter: BrowserAdapter = {
@@ -909,33 +918,6 @@ export const previewDesktopClient: DesktopClient = {
   async updateSettings(update) {
     return { schema: 4, defaultModel: null, ...update };
   },
-  async resolvePiLaunch() {
-    return {
-      modelId: "Qwen3.5-9B-Q4_K_M.gguf",
-      baseUrl: "http://127.0.0.1:8080",
-      apiKey: "preview-local-token",
-      contextWindow: 16_384,
-      maxTokens: 2_048,
-      temperature: 0.2,
-      specification: {
-        modelRegistryId: "preview-model-1",
-        modelRepoId: "Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
-        modelRevision: "0123456789abcdef0123456789abcdef01234567",
-        modelFilename: "Qwen3.5-9B-Q4_K_M.gguf",
-        modelSha256: "a".repeat(64),
-        sessionConfigSha256: "b".repeat(64),
-        profileName: "stable-16k",
-        profileSha256: "c".repeat(64),
-        runtimeName: "official",
-        runtimeIdentity: "d".repeat(64),
-        adapterIdentity: "pi-agent-core@0.84.2",
-        policyIdentity: "alpine-desktop-project-tools-v1",
-        contextWindow: 16_384,
-        maxTokens: 2_048,
-        temperatureMillis: 200,
-      },
-    };
-  },
   async runRuntimeProbe() {
     await new Promise((resolve) => setTimeout(resolve, 600));
     return {
@@ -1098,163 +1080,184 @@ export const previewDesktopClient: DesktopClient = {
     previewDetails.set(task.id, { task, executions: [], messages: [], events: [] });
     return task;
   },
-  async loadTask(taskId) {
-    return previewDetails.get(taskId) ?? null;
-  },
-  async createExecution(input) {
-    const detail = previewDetails.get(input.taskId);
-    if (!detail) throw new Error("Preview task does not exist");
-    if (
-      (detail.executions ?? []).some((execution) =>
-        [
-          "queued",
-          "preparing",
-          "running",
-          "waiting-for-approval",
-          "cancelling",
-        ].includes(execution.state),
-      )
-    )
-      throw new Error("Preview task already has an active Execution");
-    const now = Date.now();
-    const execution: Execution = {
-      id: previewId("execution"),
-      taskId: input.taskId,
-      executionSpecId: previewId("execution-spec"),
-      specification: {
-        id: "",
-        taskId: input.taskId,
-        ...input.specification,
-        modelRegistryId: input.specification.modelRegistryId,
-        modelSha256: input.specification.modelSha256,
-        sessionConfigSha256: input.specification.sessionConfigSha256,
-        profileSha256: input.specification.profileSha256,
-        legacyUnverified: false,
-        createdAtMs: now,
-      },
-      state: "queued",
-      failure: null,
-      queuedAtMs: now,
-      startedAtMs: null,
-      finishedAtMs: null,
-      updatedAtMs: now,
-    };
-    execution.specification.id = execution.executionSpecId;
-    detail.executions = [...(detail.executions ?? []), execution];
-    detail.task.summary = "active";
-    detail.task.status = "running";
-    detail.task.activeExecutionId = execution.id;
-    detail.task.latestExecutionId = execution.id;
-    return execution;
-  },
-  async transitionExecution(executionId, state, failure = null) {
-    const detail = [...previewDetails.values()].find((candidate) =>
-      (candidate.executions ?? []).some((execution) => execution.id === executionId),
-    );
-    const execution = detail?.executions?.find(
-      (candidate) => candidate.id === executionId,
-    );
-    if (!detail || !execution) throw new Error("Preview Execution does not exist");
-    const now = Date.now();
-    execution.state = state;
-    execution.failure = failure;
-    execution.startedAtMs ??= state === "queued" ? null : now;
-    execution.finishedAtMs = [
-      "completed",
-      "cancelled",
-      "failed",
-      "interrupted",
-    ].includes(state)
-      ? now
-      : null;
-    execution.updatedAtMs = now;
-    const active = [
-      "queued",
-      "preparing",
-      "running",
-      "waiting-for-approval",
-      "cancelling",
-    ].includes(state);
-    detail.task.activeExecutionId = active ? execution.id : null;
-    detail.task.latestExecutionId = execution.id;
-    detail.task.summary = active
-      ? "active"
-      : state === "completed"
-        ? "done"
-        : state === "failed" || state === "interrupted"
-          ? "needs-attention"
-          : "ready";
-    detail.task.status = active
-      ? state === "cancelling"
-        ? "cancelling"
-        : "running"
-      : state === "completed"
-        ? "completed"
-        : state === "failed"
-          ? "failed"
-          : state === "interrupted"
-            ? "interrupted"
-            : "cancelled";
-    detail.task.error = failure;
-    return execution;
-  },
   async deleteTask(taskId) {
     const index = previewTasks.findIndex((task) => task.id === taskId);
     if (index >= 0) previewTasks.splice(index, 1);
     previewDetails.delete(taskId);
-    for (const [id, approval] of previewApprovals) {
-      if (approval.taskId === taskId) previewApprovals.delete(id);
-    }
   },
-  async appendTaskMessage(input) {
-    const detail = previewDetails.get(input.taskId);
+  async loadTask(taskId) {
+    return previewDetails.get(taskId) ?? null;
+  },
+  async submitPrompt(taskId, prompt) {
+    const detail = previewDetails.get(taskId);
     if (!detail) throw new Error("Preview task does not exist");
+    if (
+      (detail.executions ?? []).some((execution) =>
+        ["queued", "preparing", "running", "waiting-for-approval", "cancelling"].includes(
+          execution.state,
+        ),
+      )
+    )
+      throw new Error("Preview task already has an active Execution");
+    const now = Date.now();
+    const executionId = previewId("execution");
+    const specificationId = previewId("execution-spec");
+    const execution: Execution = {
+      id: executionId,
+      taskId,
+      executionSpecId: specificationId,
+      specification: {
+        id: specificationId,
+        taskId,
+        modelRegistryId: "preview-model-1",
+        modelRepoId: detail.task.modelRepoId,
+        modelRevision: "0123456789abcdef0123456789abcdef01234567",
+        modelFilename: detail.task.modelFilename,
+        modelSha256: "a".repeat(64),
+        sessionConfigSha256: "b".repeat(64),
+        profileName: detail.task.profile,
+        profileSha256: "c".repeat(64),
+        runtimeName: "official",
+        runtimeIdentity: "d".repeat(64),
+        adapterIdentity: "pi-agent-core@0.84.2",
+        policyIdentity: "alpine-desktop-project-tools-v1",
+        contextWindow: 16_384,
+        maxTokens: 2_048,
+        temperatureMillis: 200,
+        legacyUnverified: false,
+        createdAtMs: now,
+      },
+      state: "preparing",
+      failure: null,
+      queuedAtMs: now,
+      startedAtMs: now,
+      finishedAtMs: null,
+      updatedAtMs: now,
+    };
+    detail.executions = [...(detail.executions ?? []), execution];
+    detail.task.status = "running";
+    detail.task.summary = "active";
+    detail.task.activeExecutionId = execution.id;
+    detail.task.latestExecutionId = execution.id;
+    const promptMessage: TaskMessage = {
+      id: previewId("message"),
+      taskId,
+      executionId,
+      sequence: detail.messages.length + 1,
+      role: "user",
+      content: prompt,
+      createdAtMs: now,
+    };
+    detail.messages.push(promptMessage);
+    previewExecutionUpdate({
+      type: "message",
+      taskId,
+      executionId,
+      message: promptMessage,
+    });
+    previewExecutionUpdate({
+      type: "state",
+      taskId,
+      executionId,
+      execution,
+    });
+    window.setTimeout(() => {
+      if (execution.state !== "preparing") return;
+      execution.state = "running";
+      previewExecutionUpdate({ type: "state", taskId, executionId, execution });
+      const content = "Preview mode accepted the host-owned Execution.";
+      previewExecutionUpdate({ type: "delta", taskId, executionId, delta: content });
+      const assistant: TaskMessage = {
+        id: previewId("message"),
+        taskId,
+        executionId,
+        sequence: detail.messages.length + 1,
+        role: "assistant",
+        content,
+        createdAtMs: Date.now(),
+      };
+      detail.messages.push(assistant);
+      previewExecutionUpdate({
+        type: "message",
+        taskId,
+        executionId,
+        message: assistant,
+      });
+      execution.state = "completed";
+      execution.finishedAtMs = Date.now();
+      execution.updatedAtMs = execution.finishedAtMs;
+      detail.task.status = "completed";
+      detail.task.summary = "done";
+      detail.task.activeExecutionId = null;
+      previewExecutionUpdate({ type: "state", taskId, executionId, execution });
+      previewExecutionUpdate({
+        type: "terminal",
+        taskId,
+        executionId,
+        execution,
+        outcome: "completed",
+        error: null,
+      });
+    }, 10);
+    return { execution, promptMessage };
+  },
+  async cancelExecution(executionId) {
+    const found = previewExecution(executionId);
+    if (!found) throw new Error("Preview Execution does not exist");
+    const { detail, execution } = found;
+    execution.state = "cancelling";
+    execution.updatedAtMs = Date.now();
+    previewExecutionUpdate({
+      type: "state",
+      taskId: execution.taskId,
+      executionId,
+      execution,
+    });
+    window.setTimeout(() => {
+      execution.state = "cancelled";
+      execution.finishedAtMs = Date.now();
+      execution.updatedAtMs = execution.finishedAtMs;
+      detail.task.status = "cancelled";
+      detail.task.summary = "ready";
+      detail.task.activeExecutionId = null;
+      previewExecutionUpdate({
+        type: "terminal",
+        taskId: execution.taskId,
+        executionId,
+        execution,
+        outcome: "cancelled",
+        error: null,
+      });
+    }, 0);
+    return execution;
+  },
+  async steerExecution(executionId, text) {
+    const found = previewExecution(executionId);
+    if (!found) throw new Error("Preview Execution does not exist");
     const message: TaskMessage = {
       id: previewId("message"),
-      ...input,
-      sequence: detail.messages.length + 1,
+      taskId: found.execution.taskId,
+      executionId,
+      sequence: found.detail.messages.length + 1,
+      role: "user",
+      content: text,
       createdAtMs: Date.now(),
     };
-    detail.messages.push(message);
+    found.detail.messages.push(message);
+    previewExecutionUpdate({
+      type: "message",
+      taskId: message.taskId,
+      executionId,
+      message,
+    });
     return message;
   },
-  async appendTaskEvent(input) {
-    const detail = previewDetails.get(input.taskId);
-    if (!detail) throw new Error("Preview task does not exist");
-    const event: TaskEvent = {
-      id: previewId("event"),
-      ...input,
-      sequence: detail.events.length + 1,
-      createdAtMs: Date.now(),
-    };
-    detail.events.push(event);
-    return event;
+  async queueFollowUp(executionId, text) {
+    return this.steerExecution(executionId, text);
   },
-  async setTaskStatus(taskId, status, error = null) {
-    const task = previewTasks.find((candidate) => candidate.id === taskId);
-    if (!task) throw new Error("Preview task does not exist");
-    task.status = status;
-    task.error = error;
-    task.updatedAtMs = Date.now();
-    const detail = previewDetails.get(taskId);
-    if (detail) detail.task = task;
-    return task;
-  },
-  async requestToolApproval(input) {
-    const approval: ToolApproval = {
-      id: previewId("approval"),
-      ...input,
-      state: "pending",
-      detail: null,
-      createdAtMs: Date.now(),
-      decidedAtMs: null,
-      settledAtMs: null,
-    };
-    previewApprovals.set(approval.id, approval);
-    return approval;
-  },
-  async getToolApproval(approvalId) {
-    return previewApprovals.get(approvalId) ?? null;
+  async subscribeExecutionUpdates(listener) {
+    previewExecutionListeners.add(listener);
+    return () => previewExecutionListeners.delete(listener);
   },
   async listPendingApprovals(taskId) {
     return [...previewApprovals.values()].filter(
@@ -1283,6 +1286,12 @@ export const previewDesktopClient: DesktopClient = {
       createdAtMs: approval.decidedAtMs,
     };
     detail.events.push(event);
+    previewExecutionUpdate({
+      type: "event",
+      taskId: approval.taskId,
+      executionId: approval.executionId,
+      event,
+    });
     return { approval, event };
   },
   async listProjectFiles() {
@@ -1306,31 +1315,5 @@ export const previewDesktopClient: DesktopClient = {
   },
   async searchProjectFiles(_taskId, query) {
     return [{ path: "CONTEXT.md", line: 1, preview: `Matched ${query}` }];
-  },
-  async editProjectFile(_taskId, approvalId, edit) {
-    const approval = previewApprovals.get(approvalId);
-    if (approval?.state !== "approved") throw new Error("Edit is not approved");
-    approval.state = "completed";
-    approval.settledAtMs = Date.now();
-    return {
-      path: edit.path,
-      replacements: 1,
-      diff: `--- a/${edit.path}\n+++ b/${edit.path}\n-${edit.oldText}\n+${edit.newText}`,
-    };
-  },
-  async runProjectShell(_taskId, approvalId, shell) {
-    const approval = previewApprovals.get(approvalId);
-    if (approval?.state !== "approved")
-      throw new Error("Shell command is not approved");
-    approval.state = "completed";
-    approval.settledAtMs = Date.now();
-    return {
-      command: shell.command,
-      exitCode: 0,
-      stdout: "All checks passed in preview mode.",
-      stderr: "",
-      durationMs: 842,
-      truncated: false,
-    };
   },
 };

@@ -1,46 +1,16 @@
-import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import { describe, expect, it, vi } from "vitest";
 import type {
   DesktopClient,
   DesktopTask,
   Execution,
-  ExecutionState,
+  ExecutionUpdate,
+  SubmitPromptResult,
   TaskMessage,
-  ToolApproval,
 } from "./desktop";
 import {
   createTaskExecution,
-  type AgentRuntime,
   type TaskExecutionUpdate,
 } from "./task-execution";
-
-const specification = {
-  modelRegistryId: "model-1",
-  modelRepoId: "Qwen/Qwen-GGUF",
-  modelRevision: "a".repeat(40),
-  modelFilename: "Qwen.gguf",
-  modelSha256: "b".repeat(64),
-  sessionConfigSha256: "c".repeat(64),
-  profileName: "stable-16k",
-  profileSha256: "d".repeat(64),
-  runtimeName: "official",
-  runtimeIdentity: "e".repeat(64),
-  adapterIdentity: "pi-agent-core@0.84.2",
-  policyIdentity: "alpine-desktop-project-tools-v1",
-  contextWindow: 16_384,
-  maxTokens: 2_048,
-  temperatureMillis: 200,
-};
-
-const launch = {
-  modelId: "Qwen.gguf",
-  baseUrl: "http://127.0.0.1:8100",
-  apiKey: "local-token",
-  contextWindow: 16_384,
-  maxTokens: 2_048,
-  temperature: 0.2,
-  specification,
-};
 
 function task(): DesktopTask {
   return {
@@ -60,7 +30,7 @@ function task(): DesktopTask {
   };
 }
 
-function execution(state: ExecutionState = "queued"): Execution {
+function execution(state: Execution["state"] = "preparing"): Execution {
   return {
     id: "execution-1",
     taskId: "task-1",
@@ -68,406 +38,216 @@ function execution(state: ExecutionState = "queued"): Execution {
     specification: {
       id: "spec-1",
       taskId: "task-1",
-      ...specification,
-      modelRegistryId: specification.modelRegistryId,
-      modelSha256: specification.modelSha256,
-      sessionConfigSha256: specification.sessionConfigSha256,
-      profileSha256: specification.profileSha256,
+      modelRegistryId: "model-1",
+      modelRepoId: "local/Qwen",
+      modelRevision: null,
+      modelFilename: "Qwen.gguf",
+      modelSha256: "a".repeat(64),
+      sessionConfigSha256: "b".repeat(64),
+      profileName: "stable-16k",
+      profileSha256: "c".repeat(64),
+      runtimeName: "official",
+      runtimeIdentity: "d".repeat(64),
+      adapterIdentity: "pi-agent-core@0.84.2",
+      policyIdentity: "alpine-desktop-project-tools-v1",
+      contextWindow: 16_384,
+      maxTokens: 2_048,
+      temperatureMillis: 200,
       legacyUnverified: false,
       createdAtMs: 1,
     },
     state,
     failure: null,
     queuedAtMs: 1,
-    startedAtMs: state === "queued" ? null : 2,
-    finishedAtMs: ["completed", "cancelled", "failed", "interrupted"].includes(
-      state,
-    )
-      ? 3
-      : null,
+    startedAtMs: state === "preparing" ? 2 : null,
+    finishedAtMs: null,
     updatedAtMs: 2,
   };
 }
 
-function desktopDouble() {
-  let messageSequence = 0;
-  let eventSequence = 0;
-  let current = execution();
-  const client = {
-    resolvePiLaunch: vi.fn().mockResolvedValue(launch),
-    createExecution: vi.fn(async () => current) as DesktopClient["createExecution"],
-    transitionExecution: vi.fn(async (_executionId, state, failure = null) => {
-      current = {
-        ...current,
-        state,
-        failure,
-        startedAtMs: current.startedAtMs ?? Date.now(),
-        finishedAtMs: ["completed", "cancelled", "failed", "interrupted"].includes(
-          state,
-        )
-          ? Date.now()
-          : null,
-      };
-      return current;
-    }) as DesktopClient["transitionExecution"],
-    appendTaskMessage: vi.fn(async ({ taskId, executionId, role, content }) => ({
-      id: `message-${++messageSequence}`,
-      taskId,
-      executionId,
-      sequence: messageSequence,
-      role,
-      content,
-      createdAtMs: messageSequence,
-    })) as DesktopClient["appendTaskMessage"],
-    appendTaskEvent: vi.fn(async ({ taskId, executionId, kind, payload }) => ({
-      id: `event-${++eventSequence}`,
-      taskId,
-      executionId,
-      sequence: eventSequence,
-      kind,
-      payload,
-      createdAtMs: eventSequence,
-    })) as DesktopClient["appendTaskEvent"],
-  } as unknown as DesktopClient;
-  return client;
-}
-
-function runtimeThatEmits(
-  events: AgentEvent[],
-  errorMessage?: string,
-): AgentRuntime {
-  const listeners: Array<(event: AgentEvent) => void | Promise<void>> = [];
+function promptMessage(): TaskMessage {
   return {
-    errorMessage,
-    subscribe(listener) {
-      listeners.push(listener);
-      return () => undefined;
-    },
-    async prompt() {
-      for (const event of events) {
-        for (const listener of listeners) await listener(event);
-      }
-    },
-    abort: vi.fn(),
-    steer: vi.fn(),
-    followUp: vi.fn(),
+    id: "message-user",
+    taskId: "task-1",
+    executionId: "execution-1",
+    sequence: 1,
+    role: "user",
+    content: "Inspect the project",
+    createdAtMs: 2,
   };
 }
 
-describe("Task execution", () => {
-  it("creates one durable Execution and binds streaming history to its identity", async () => {
-    const desktop = desktopDouble();
-    const assistantMessage: AgentMessage = {
-      role: "assistant",
-      content: [{ type: "text", text: "Done." }],
-      api: "openai-completions",
-      provider: "alpine-local",
-      model: "Qwen.gguf",
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
-      stopReason: "stop",
-      timestamp: 2,
-    };
-    const runtime = runtimeThatEmits([
-      { type: "agent_start" } as AgentEvent,
-      {
-        type: "message_update",
-        message: assistantMessage,
-        assistantMessageEvent: {
-          type: "text_delta",
-          contentIndex: 0,
-          delta: "Done.",
-        },
-      } as AgentEvent,
-      { type: "message_end", message: assistantMessage } as AgentEvent,
-      { type: "agent_end", messages: [assistantMessage] } as AgentEvent,
-    ]);
+function desktopDouble() {
+  const listeners = new Set<(update: ExecutionUpdate) => void>();
+  const emit = (update: ExecutionUpdate) => {
+    for (const listener of listeners) listener(update);
+  };
+  const accepted: SubmitPromptResult = {
+    execution: execution(),
+    promptMessage: promptMessage(),
+  };
+  const client = {
+    subscribeExecutionUpdates: vi.fn(async (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }),
+    submitPrompt: vi.fn().mockResolvedValue(accepted),
+    cancelExecution: vi.fn().mockResolvedValue(execution("cancelling")),
+    steerExecution: vi.fn().mockResolvedValue(promptMessage()),
+    queueFollowUp: vi.fn().mockResolvedValue(promptMessage()),
+  } as unknown as DesktopClient;
+  return { client, emit, accepted };
+}
+
+const immediateFrames = {
+  scheduleFrame(callback: () => void) {
+    callback();
+    return 1;
+  },
+  cancelFrame() {},
+};
+
+describe("Task execution renderer proxy", () => {
+  it("submits intent and renders host-owned updates", async () => {
+    const { client, emit } = desktopDouble();
     const updates: TaskExecutionUpdate[] = [];
-    const executionController = createTaskExecution(
+    const proxy = createTaskExecution(
       {
-        desktop,
+        desktop: client,
         task: task(),
         history: [],
         onUpdate: (update) => updates.push(update),
       },
-      {
-        createRuntime: vi.fn().mockResolvedValue(runtime),
-        scheduleFrame: (callback) => {
-          callback();
-          return 1;
-        },
-        cancelFrame: () => undefined,
-      },
+      immediateFrames,
     );
 
-    const result = await executionController.run("Inspect the project");
-
-    expect(result).toMatchObject({
+    const run = proxy.run("Inspect the project");
+    await vi.waitFor(() => expect(client.submitPrompt).toHaveBeenCalled());
+    emit({
+      type: "state",
       taskId: "task-1",
       executionId: "execution-1",
+      execution: execution("running"),
+    });
+    emit({
+      type: "delta",
+      taskId: "task-1",
+      executionId: "execution-1",
+      delta: "Done.",
+    });
+    const assistant: TaskMessage = {
+      id: "message-assistant",
+      taskId: "task-1",
+      executionId: "execution-1",
+      sequence: 2,
+      role: "assistant",
+      content: "Done.",
+      createdAtMs: 3,
+    };
+    emit({
+      type: "message",
+      taskId: "task-1",
+      executionId: "execution-1",
+      message: assistant,
+    });
+    emit({
+      type: "terminal",
+      taskId: "task-1",
+      executionId: "execution-1",
+      execution: { ...execution("completed"), finishedAtMs: 4 },
+      outcome: "completed",
+      error: null,
+    });
+
+    await expect(run).resolves.toEqual({
+      taskId: "task-1",
+      executionId: "execution-1",
+      prompt: "Inspect the project",
       response: "Done.",
       state: "done",
     });
-    expect(desktop.createExecution).toHaveBeenCalledWith({
-      taskId: "task-1",
-      specification,
-    });
-    expect(desktop.transitionExecution).toHaveBeenNthCalledWith(
-      1,
-      "execution-1",
-      "preparing",
-      null,
+    expect(client.submitPrompt).toHaveBeenCalledWith(
+      "task-1",
+      "Inspect the project",
     );
-    expect(desktop.transitionExecution).toHaveBeenCalledWith(
-      "execution-1",
-      "completed",
-      null,
-    );
-    expect(desktop.appendTaskMessage).toHaveBeenCalledWith({
-      taskId: "task-1",
-      executionId: "execution-1",
-      role: "assistant",
-      content: "Done.",
-    });
-    expect(desktop.appendTaskEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        taskId: "task-1",
-        executionId: "execution-1",
-        kind: "agent.started",
+    expect(
+      updates.some(
+        (update) => update.type === "response" && update.response === "Done.",
+      ),
+    ).toBe(true);
+    expect(
+      updates.some(
+        (update) =>
+          update.type === "message" && update.message.id === assistant.id,
+      ),
+    ).toBe(true);
+  });
+
+  it("settles cancellation requested while host acceptance is pending", async () => {
+    const { client, emit, accepted } = desktopDouble();
+    let accept!: (value: SubmitPromptResult) => void;
+    vi.mocked(client.submitPrompt).mockReturnValue(
+      new Promise<SubmitPromptResult>((resolve) => {
+        accept = resolve;
       }),
     );
-    expect(updates.some((update) => update.type === "message")).toBe(true);
-  });
+    const proxy = createTaskExecution(
+      {
+        desktop: client,
+        task: task(),
+        history: [],
+        onUpdate: () => undefined,
+      },
+      immediateFrames,
+    );
 
-  it("returns the Execution to running after a Tool Approval settles", async () => {
-    const desktop = desktopDouble();
-    const pending: ToolApproval = {
-      id: "approval-1",
+    const run = proxy.run("Wait for host");
+    proxy.cancel();
+    accept(accepted);
+    await vi.waitFor(() =>
+      expect(client.cancelExecution).toHaveBeenCalledWith("execution-1"),
+    );
+    emit({
+      type: "terminal",
       taskId: "task-1",
       executionId: "execution-1",
-      toolCallId: "tool-1",
-      operation: "shell",
-      proposal: { command: "cargo test" },
-      state: "pending",
-      detail: null,
-      createdAtMs: 1,
-      decidedAtMs: null,
-      settledAtMs: null,
-    };
-    const approved: ToolApproval = {
-      ...pending,
-      state: "approved",
-      decidedAtMs: 2,
-    };
-    const createRuntime = vi.fn(async (_config, dependencies) => ({
-      subscribe: () => () => undefined,
-      async prompt() {
-        await dependencies.onApproval?.(pending);
-        await dependencies.onApprovalSettled?.(approved);
-      },
-      abort: vi.fn(),
-      steer: vi.fn(),
-      followUp: vi.fn(),
-    }));
-    const controller = createTaskExecution(
-      { desktop, task: task(), history: [], onUpdate: () => undefined },
-      {
-        createRuntime,
-        scheduleFrame: () => 1,
-        cancelFrame: () => undefined,
-      },
-    );
-
-    await expect(controller.run("Run the tests")).resolves.toMatchObject({
-      executionId: "execution-1",
-      state: "done",
+      execution: { ...execution("cancelled"), finishedAtMs: 4 },
+      outcome: "cancelled",
+      error: null,
     });
-    const transition = vi.mocked(desktop.transitionExecution);
-    expect(transition).toHaveBeenNthCalledWith(
-      1,
-      "execution-1",
-      "preparing",
-      null,
-    );
-    expect(transition).toHaveBeenNthCalledWith(
-      2,
-      "execution-1",
-      "running",
-      null,
-    );
-    expect(transition).toHaveBeenNthCalledWith(
-      3,
-      "execution-1",
-      "waiting-for-approval",
-      null,
-    );
-    expect(transition).toHaveBeenNthCalledWith(
-      4,
-      "execution-1",
-      "running",
-      null,
-    );
-    expect(transition).toHaveBeenNthCalledWith(
-      5,
-      "execution-1",
-      "completed",
-      null,
-    );
-  });
-
-  it("settles cancellation against the exact active Execution", async () => {
-    const desktop = desktopDouble();
-    let releaseLaunch!: (runtime: AgentRuntime) => void;
-    const runtimePromise = new Promise<AgentRuntime>((resolve) => {
-      releaseLaunch = resolve;
-    });
-    const controller = createTaskExecution(
-      { desktop, task: task(), history: [], onUpdate: () => undefined },
-      {
-        createRuntime: () => runtimePromise,
-        scheduleFrame: () => 1,
-        cancelFrame: () => undefined,
-      },
-    );
-
-    const run = controller.run("Wait for launch");
-    await vi.waitFor(() => expect(desktop.createExecution).toHaveBeenCalled());
-    controller.cancel();
-    releaseLaunch(runtimeThatEmits([]));
 
     await expect(run).resolves.toMatchObject({
       executionId: "execution-1",
       state: "cancelled",
     });
-    expect(desktop.transitionExecution).toHaveBeenCalledWith(
-      "execution-1",
-      "cancelling",
-      null,
-    );
-    expect(desktop.transitionExecution).toHaveBeenCalledWith(
-      "execution-1",
-      "cancelled",
-      null,
-    );
   });
 
-  it("does not claim cancellation when its durable transition fails", async () => {
-    const desktop = desktopDouble();
-    let releaseLaunch!: (runtime: AgentRuntime) => void;
-    const runtimePromise = new Promise<AgentRuntime>((resolve) => {
-      releaseLaunch = resolve;
-    });
-    const createRuntime = vi.fn(() => runtimePromise);
-    const controller = createTaskExecution(
-      { desktop, task: task(), history: [], onUpdate: () => undefined },
+  it("reports host submission failures without importing provider state", async () => {
+    const { client } = desktopDouble();
+    vi.mocked(client.submitPrompt).mockRejectedValue(
+      new Error("Local runtime is unavailable"),
+    );
+    const updates: TaskExecutionUpdate[] = [];
+    const proxy = createTaskExecution(
       {
-        createRuntime,
-        scheduleFrame: () => 1,
-        cancelFrame: () => undefined,
+        desktop: client,
+        task: task(),
+        history: [],
+        onUpdate: (update) => updates.push(update),
       },
+      immediateFrames,
     );
 
-    const run = controller.run("Wait for launch");
-    await vi.waitFor(() => expect(createRuntime).toHaveBeenCalled());
-    vi.mocked(desktop.transitionExecution).mockRejectedValueOnce(
-      new Error("state store unavailable"),
-    );
-    controller.cancel();
-    releaseLaunch(runtimeThatEmits([]));
-
-    await expect(run).resolves.toMatchObject({
-      executionId: "execution-1",
+    await expect(proxy.run("Continue")).resolves.toMatchObject({
       state: "error",
-      error: "Cancellation state could not be saved: state store unavailable",
+      error: "Local runtime is unavailable",
     });
-    expect(desktop.transitionExecution).toHaveBeenCalledWith(
-      "execution-1",
-      "cancelling",
-      null,
-    );
-    expect(desktop.transitionExecution).toHaveBeenCalledWith(
-      "execution-1",
-      "failed",
-      "Cancellation state could not be saved: state store unavailable",
-    );
-    expect(desktop.transitionExecution).not.toHaveBeenCalledWith(
-      "execution-1",
-      "cancelled",
-      null,
-    );
-  });
-
-  it("fails a queued Execution when preparation persistence fails", async () => {
-    const desktop = desktopDouble();
-    const transition = vi.mocked(desktop.transitionExecution);
-    transition
-      .mockRejectedValueOnce(new Error("state store unavailable"))
-      .mockResolvedValueOnce(execution("failed"));
-    const createRuntime = vi.fn().mockResolvedValue(runtimeThatEmits([]));
-    const controller = createTaskExecution(
-      { desktop, task: task(), history: [], onUpdate: () => undefined },
-      {
-        createRuntime,
-        scheduleFrame: () => 1,
-        cancelFrame: () => undefined,
-      },
-    );
-
-    const result = await controller.run("Continue");
-
-    expect(createRuntime).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      executionId: "execution-1",
-      state: "error",
-      error: "state store unavailable",
-    });
-    expect(transition).toHaveBeenNthCalledWith(
-      2,
-      "execution-1",
-      "failed",
-      "state store unavailable",
-    );
-  });
-
-  it("records failure on the Execution without mutating Task lifecycle fields", async () => {
-    const desktop = desktopDouble();
-    const history: TaskMessage[] = [];
-    const runtime = runtimeThatEmits([], "Local model rejected the request");
-    const createRuntime = vi.fn().mockResolvedValue(runtime);
-    const controller = createTaskExecution(
-      { desktop, task: task(), history, onUpdate: () => undefined },
-      {
-        createRuntime,
-        scheduleFrame: () => 1,
-        cancelFrame: () => undefined,
-      },
-    );
-
-    const result = await controller.run("Continue");
-
-    expect(createRuntime).toHaveBeenCalledWith(
-      launch,
-      expect.objectContaining({
-        taskId: "task-1",
-        executionId: "execution-1",
-        history,
-      }),
-    );
-    expect(result).toMatchObject({
-      executionId: "execution-1",
-      state: "error",
-      error: "Local model rejected the request",
-    });
-    expect(desktop.transitionExecution).toHaveBeenCalledWith(
-      "execution-1",
-      "failed",
-      "Local model rejected the request",
-    );
+    expect(
+      updates.some(
+        (update) =>
+          update.type === "error" &&
+          update.message === "Local runtime is unavailable",
+      ),
+    ).toBe(true);
   });
 });
