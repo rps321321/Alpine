@@ -297,7 +297,10 @@ class SessionConfigTests(unittest.TestCase):
                 text=True,
             )
             try:
-                deadline = time.monotonic() + 10
+                # Cold PowerShell startup on a clean Windows runner can exceed
+                # ten seconds. ADR 0024 permits up to 30 seconds for test-only
+                # subprocess probes without changing production lock timeouts.
+                deadline = time.monotonic() + 30
                 while not ready.exists() and time.monotonic() < deadline:
                     time.sleep(0.02)
                 self.assertTrue(ready.exists(), f"setup-lock owner exited with {owner.poll()}")
