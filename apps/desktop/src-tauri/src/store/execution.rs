@@ -207,12 +207,8 @@ pub(super) fn validate_new_specification(
         .map(|value| validate_optional_identifier("model revision", Some(value), 160))
         .transpose()?
         .flatten();
-    let model_filename = validate_nonempty(
-        "model filename",
-        &specification.model_filename,
-        240,
-    )?
-    .to_owned();
+    let model_filename =
+        validate_nonempty("model filename", &specification.model_filename, 240)?.to_owned();
     let model_sha256 = validate_sha256("model digest", &specification.model_sha256)?;
     let session_config_sha256 = validate_sha256(
         "Session Config digest",
@@ -225,18 +221,10 @@ pub(super) fn validate_new_specification(
         validate_nonempty("runtime name", &specification.runtime_name, 96)?.to_owned();
     let runtime_identity =
         validate_sha256("runtime binary digest", &specification.runtime_identity)?;
-    let adapter_identity = validate_nonempty(
-        "adapter identity",
-        &specification.adapter_identity,
-        160,
-    )?
-    .to_owned();
-    let policy_identity = validate_nonempty(
-        "policy identity",
-        &specification.policy_identity,
-        160,
-    )?
-    .to_owned();
+    let adapter_identity =
+        validate_nonempty("adapter identity", &specification.adapter_identity, 160)?.to_owned();
+    let policy_identity =
+        validate_nonempty("policy identity", &specification.policy_identity, 160)?.to_owned();
     if specification.context_window == 0 || specification.max_tokens == 0 {
         return Err(StoreError::message(
             "Execution specification token limits must be positive",
@@ -324,11 +312,7 @@ pub(super) fn load_execution(
 fn execution_from_joined_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Execution> {
     let state: String = row.get(3)?;
     let state = ExecutionState::parse(&state).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            3,
-            rusqlite::types::Type::Text,
-            Box::new(error),
-        )
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
     })?;
     let context_window: i64 = row.get(23)?;
     let context_window = u32::try_from(context_window).map_err(|error| {
