@@ -220,7 +220,7 @@ function toolClient(): PiToolClient {
         query,
         limit,
       }),
-    requestToolApproval: (input) =>
+    proposeEffectApproval: (input) =>
       invoke<ToolApproval>("agent_request_tool_approval", { input }),
     waitForApproval,
     executeApprovedEdit: (taskId, executionId, approvalId, edit: WorkspaceEdit) =>

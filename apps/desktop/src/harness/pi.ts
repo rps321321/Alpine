@@ -43,7 +43,7 @@ export interface PiToolClient {
     query: string,
     limit: number,
   ): Promise<WorkspaceSearchMatch[]>;
-  requestToolApproval(input: {
+  proposeEffectApproval(input: {
     taskId: string;
     executionId: string;
     toolCallId: string;
@@ -270,7 +270,7 @@ function createProjectTools(
         oldText: edit.oldText,
         newText: edit.newText,
       };
-      const approval = await tools.requestToolApproval({
+      const approval = await tools.proposeEffectApproval({
         taskId,
         executionId,
         toolCallId,
@@ -304,7 +304,7 @@ function createProjectTools(
         command: input.command,
         timeoutSeconds: input.timeoutSeconds ?? 120,
       };
-      const approval = await tools.requestToolApproval({
+      const approval = await tools.proposeEffectApproval({
         taskId,
         executionId,
         toolCallId,
