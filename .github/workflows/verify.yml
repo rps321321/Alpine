@@ -49,6 +49,9 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
+      - name: Verify generated Task Journal contract
+        working-directory: apps/desktop
+        run: npm run check:journal
       - name: Test renderer
         working-directory: apps/desktop
         run: npm test
