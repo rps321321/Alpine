@@ -1,20 +1,26 @@
-//! Alpine-owned durable state for Projects, Tasks, Executions, Messages, and Events.
+//! Alpine-owned durable state with a typed append-only Task journal.
 
 mod execution;
+mod journal;
 pub use execution::{
-    CreateExecution, Execution, ExecutionId, ExecutionSpecification, ExecutionState,
-    NewExecutionSpecification, TaskSummary,
+    Execution, ExecutionId, ExecutionSpecification, ExecutionState, NewExecutionSpecification,
+    TaskSummary,
+};
+pub use journal::{
+    ExecutionOutcome, ExecutionTransitionOutcome, LegacyCausalOrder, LegacySource,
+    TASK_JOURNAL_VERSION, TaskJournalEvent, ToolOperation, ToolProposal, ToolResult,
+    ToolSettlementState, UserDirection,
 };
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const RESTART_ERROR: &str = "Alpine Desktop restarted while the execution was active";
 
 #[derive(Debug)]
@@ -163,34 +169,16 @@ pub struct TaskMessage {
     pub created_at_ms: i64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NewTaskMessage {
-    pub task_id: String,
-    pub execution_id: ExecutionId,
-    pub role: MessageRole,
-    pub content: String,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskEvent {
     pub id: String,
     pub task_id: String,
-    pub execution_id: ExecutionId,
+    pub execution_id: Option<ExecutionId>,
     pub sequence: i64,
-    pub kind: String,
-    pub payload: Value,
+    pub version: u16,
+    pub event: TaskJournalEvent,
     pub created_at_ms: i64,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NewTaskEvent {
-    pub task_id: String,
-    pub execution_id: ExecutionId,
-    pub kind: String,
-    pub payload: Value,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -263,7 +251,8 @@ pub struct ToolApproval {
 #[serde(rename_all = "camelCase")]
 pub struct ToolApprovalDecision {
     pub approval: ToolApproval,
-    pub event: TaskEvent,
+    pub execution: Execution,
+    pub records: Vec<TaskEvent>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -272,8 +261,7 @@ pub struct NewToolApproval {
     pub task_id: String,
     pub execution_id: ExecutionId,
     pub tool_call_id: String,
-    pub operation: String,
-    pub proposal: Value,
+    pub proposal: ToolProposal,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -342,17 +330,11 @@ impl DesktopStore {
                 StoreError::message(format!("failed to create {}: {error}", parent.display()))
             })?;
         }
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         migrate(&connection)?;
-        execution::interrupt_unsettled(&connection, RESTART_ERROR)?;
-        connection.execute(
-            "UPDATE tool_approvals
-             SET state = 'interrupted', detail = ?1, settled_at_ms = ?2
-             WHERE state IN ('pending', 'approved', 'executing')",
-            params![RESTART_ERROR, now_ms()],
-        )?;
+        journal::interrupt_after_restart(&mut connection, RESTART_ERROR)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -517,109 +499,13 @@ impl DesktopStore {
         let messages = message_statement
             .query_map([task_id], message_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        let mut event_statement = connection.prepare(
-            "SELECT id, task_id, execution_id, sequence, kind, payload_json, created_at_ms
-             FROM task_events WHERE task_id = ?1 ORDER BY sequence",
-        )?;
-        let events = event_statement
-            .query_map([task_id], event_from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
+        let events = journal::list_records(&connection, task_id)?;
         Ok(Some(TaskDetail {
             task,
             executions,
             messages,
             events,
         }))
-    }
-
-    pub fn append_message(&self, input: NewTaskMessage) -> Result<TaskMessage, StoreError> {
-        let content = validate_nonempty("message content", &input.content, 4 * 1024 * 1024)?;
-        let mut connection = self.connection()?;
-        execution::ensure_execution_for_task(
-            &connection,
-            &input.task_id,
-            input.execution_id.as_str(),
-        )?;
-        let transaction = connection.transaction()?;
-        let sequence = next_sequence(&transaction, "task_messages", &input.task_id)?;
-        let id = new_id(&transaction);
-        let created_at_ms = now_ms();
-        transaction.execute(
-            "INSERT INTO task_messages
-             (id, task_id, execution_id, sequence, role, content, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                id,
-                input.task_id,
-                input.execution_id.as_str(),
-                sequence,
-                input.role.as_str(),
-                content,
-                created_at_ms
-            ],
-        )?;
-        transaction.execute(
-            "UPDATE tasks SET updated_at_ms = ?2 WHERE id = ?1",
-            params![input.task_id, created_at_ms],
-        )?;
-        transaction.commit()?;
-        Ok(TaskMessage {
-            id,
-            task_id: input.task_id,
-            execution_id: input.execution_id,
-            sequence,
-            role: input.role,
-            content: content.to_owned(),
-            created_at_ms,
-        })
-    }
-
-    pub fn append_event(&self, input: NewTaskEvent) -> Result<TaskEvent, StoreError> {
-        let kind = validate_event_kind(&input.kind)?;
-        let payload_json = serde_json::to_string(&input.payload).map_err(|error| {
-            StoreError::message(format!("failed to encode Task Event: {error}"))
-        })?;
-        if payload_json.len() > 1024 * 1024 {
-            return Err(StoreError::message("Task Event payload exceeds 1 MiB"));
-        }
-        let mut connection = self.connection()?;
-        execution::ensure_execution_for_task(
-            &connection,
-            &input.task_id,
-            input.execution_id.as_str(),
-        )?;
-        let transaction = connection.transaction()?;
-        let sequence = next_sequence(&transaction, "task_events", &input.task_id)?;
-        let id = new_id(&transaction);
-        let created_at_ms = now_ms();
-        transaction.execute(
-            "INSERT INTO task_events
-             (id, task_id, execution_id, sequence, kind, payload_json, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                id,
-                input.task_id,
-                input.execution_id.as_str(),
-                sequence,
-                kind,
-                payload_json,
-                created_at_ms
-            ],
-        )?;
-        transaction.execute(
-            "UPDATE tasks SET updated_at_ms = ?2 WHERE id = ?1",
-            params![input.task_id, created_at_ms],
-        )?;
-        transaction.commit()?;
-        Ok(TaskEvent {
-            id,
-            task_id: input.task_id,
-            execution_id: input.execution_id,
-            sequence,
-            kind: kind.to_owned(),
-            payload: input.payload,
-            created_at_ms,
-        })
     }
 
     pub fn set_task_status(
@@ -654,46 +540,6 @@ impl DesktopStore {
             .map_err(Into::into)
     }
 
-    pub fn request_tool_approval(
-        &self,
-        input: NewToolApproval,
-    ) -> Result<ToolApproval, StoreError> {
-        let tool_call_id = validate_nonempty("tool call identifier", &input.tool_call_id, 160)?;
-        let operation = validate_operation(&input.operation)?;
-        let proposal_json = serde_json::to_string(&input.proposal).map_err(|error| {
-            StoreError::message(format!("failed to encode Tool Approval: {error}"))
-        })?;
-        if proposal_json.len() > 1024 * 1024 {
-            return Err(StoreError::message("Tool Approval proposal exceeds 1 MiB"));
-        }
-        let connection = self.connection()?;
-        execution::ensure_execution_for_task(
-            &connection,
-            &input.task_id,
-            input.execution_id.as_str(),
-        )?;
-        let id = new_id(&connection);
-        let created_at_ms = now_ms();
-        connection.execute(
-            "INSERT INTO tool_approvals
-             (id, task_id, execution_id, tool_call_id, operation, proposal_json, state, detail,
-              created_at_ms, decided_at_ms, settled_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', NULL, ?7, NULL, NULL)",
-            params![
-                id,
-                input.task_id,
-                input.execution_id.as_str(),
-                tool_call_id,
-                operation,
-                proposal_json,
-                created_at_ms
-            ],
-        )?;
-        drop(connection);
-        self.get_tool_approval(&id)?
-            .ok_or_else(|| StoreError::message("the Tool Approval was not persisted"))
-    }
-
     pub fn get_tool_approval(&self, approval_id: &str) -> Result<Option<ToolApproval>, StoreError> {
         let connection = self.connection()?;
         connection
@@ -720,166 +566,6 @@ impl DesktopStore {
             .query_map([task_id], approval_from_row)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
-    }
-
-    pub fn decide_tool_approval(
-        &self,
-        approval_id: &str,
-        approved: bool,
-    ) -> Result<ToolApproval, StoreError> {
-        self.decide_tool_approval_with_event(approval_id, approved)
-            .map(|decision| decision.approval)
-    }
-
-    pub fn decide_tool_approval_with_event(
-        &self,
-        approval_id: &str,
-        approved: bool,
-    ) -> Result<ToolApprovalDecision, StoreError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let mut approval = transaction
-            .query_row(
-                "SELECT id, task_id, execution_id, tool_call_id, operation, proposal_json, state,
-                        detail, created_at_ms, decided_at_ms, settled_at_ms
-                 FROM tool_approvals WHERE id = ?1",
-                [approval_id],
-                approval_from_row,
-            )
-            .optional()?
-            .ok_or_else(|| StoreError::message("the Tool Approval does not exist"))?;
-        let next = if approved {
-            ApprovalState::Approved
-        } else {
-            ApprovalState::Denied
-        };
-        let decided_at_ms = now_ms();
-        let changed = transaction.execute(
-            "UPDATE tool_approvals SET state = ?2, decided_at_ms = ?3
-             WHERE id = ?1 AND state = 'pending'",
-            params![approval_id, next.as_str(), decided_at_ms],
-        )?;
-        if changed == 0 {
-            return Err(StoreError::message(
-                "the Tool Approval is missing or has already been decided",
-            ));
-        }
-        let event_payload = json!({
-            "approvalId": approval.id,
-            "operation": approval.operation,
-            "approved": approved,
-        });
-        let payload_json = serde_json::to_string(&event_payload).map_err(|error| {
-            StoreError::message(format!("failed to encode Tool Approval decision: {error}"))
-        })?;
-        let sequence = next_sequence(&transaction, "task_events", &approval.task_id)?;
-        let event_id = new_id(&transaction);
-        transaction.execute(
-            "INSERT INTO task_events
-             (id, task_id, execution_id, sequence, kind, payload_json, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, 'approval.decided', ?5, ?6)",
-            params![
-                event_id,
-                approval.task_id,
-                approval.execution_id.as_str(),
-                sequence,
-                payload_json,
-                decided_at_ms
-            ],
-        )?;
-        transaction.execute(
-            "UPDATE executions
-             SET state = 'running', updated_at_ms = ?2
-             WHERE id = ?1 AND state = 'waiting-for-approval'",
-            params![approval.execution_id.as_str(), decided_at_ms],
-        )?;
-        transaction.execute(
-            "UPDATE tasks SET updated_at_ms = ?2 WHERE id = ?1",
-            params![approval.task_id, decided_at_ms],
-        )?;
-        transaction.commit()?;
-        approval.state = next;
-        approval.decided_at_ms = Some(decided_at_ms);
-        Ok(ToolApprovalDecision {
-            event: TaskEvent {
-                id: event_id,
-                task_id: approval.task_id.clone(),
-                execution_id: approval.execution_id.clone(),
-                sequence,
-                kind: "approval.decided".to_owned(),
-                payload: event_payload,
-                created_at_ms: decided_at_ms,
-            },
-            approval,
-        })
-    }
-
-    pub fn claim_tool_approval(
-        &self,
-        approval_id: &str,
-        operation: &str,
-        proposal: &Value,
-    ) -> Result<ToolApproval, StoreError> {
-        let operation = validate_operation(operation)?;
-        let connection = self.connection()?;
-        let approval = connection
-            .query_row(
-                "SELECT id, task_id, execution_id, tool_call_id, operation, proposal_json, state,
-                        detail, created_at_ms, decided_at_ms, settled_at_ms
-                 FROM tool_approvals WHERE id = ?1",
-                [approval_id],
-                approval_from_row,
-            )
-            .optional()?
-            .ok_or_else(|| StoreError::message("the Tool Approval does not exist"))?;
-        if approval.operation != operation || approval.proposal != *proposal {
-            return Err(StoreError::message(
-                "the Tool Approval does not match the exact proposed operation",
-            ));
-        }
-        let changed = connection.execute(
-            "UPDATE tool_approvals SET state = 'executing'
-             WHERE id = ?1 AND state = 'approved'",
-            [approval_id],
-        )?;
-        if changed == 0 {
-            return Err(StoreError::message(
-                "the Tool Approval is not approved or has already been claimed",
-            ));
-        }
-        drop(connection);
-        self.get_tool_approval(approval_id)?
-            .ok_or_else(|| StoreError::message("the Tool Approval no longer exists"))
-    }
-
-    pub fn settle_tool_approval(
-        &self,
-        approval_id: &str,
-        succeeded: bool,
-        detail: Option<&str>,
-    ) -> Result<ToolApproval, StoreError> {
-        if detail.is_some_and(|value| value.len() > 64 * 1024) {
-            return Err(StoreError::message("Tool Approval result exceeds 64 KiB"));
-        }
-        let connection = self.connection()?;
-        let state = if succeeded {
-            ApprovalState::Completed
-        } else {
-            ApprovalState::Failed
-        };
-        let changed = connection.execute(
-            "UPDATE tool_approvals SET state = ?2, detail = ?3, settled_at_ms = ?4
-             WHERE id = ?1 AND state = 'executing'",
-            params![approval_id, state.as_str(), detail, now_ms()],
-        )?;
-        if changed == 0 {
-            return Err(StoreError::message(
-                "the Tool Approval is not executing or has already settled",
-            ));
-        }
-        drop(connection);
-        self.get_tool_approval(approval_id)?
-            .ok_or_else(|| StoreError::message("the Tool Approval no longer exists"))
     }
 
     pub fn register_model_artifact(
@@ -1116,6 +802,14 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
     if version == 3 {
         execution::migrate_v4(connection)?;
     }
+    let version: i64 = connection.query_row(
+        "SELECT version FROM desktop_schema WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if version == 4 {
+        journal::migrate_v5(connection)?;
+    }
     Ok(())
 }
 
@@ -1127,24 +821,6 @@ fn validate_nonempty<'a>(label: &str, value: &'a str, max: usize) -> Result<&'a 
         )));
     }
     Ok(value)
-}
-
-fn validate_event_kind(value: &str) -> Result<&str, StoreError> {
-    let value = validate_nonempty("Task Event kind", value, 96)?;
-    if value.bytes().all(|byte| {
-        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
-    }) {
-        Ok(value)
-    } else {
-        Err(StoreError::message("Task Event kind is invalid"))
-    }
-}
-
-fn validate_operation(value: &str) -> Result<&str, StoreError> {
-    match value {
-        "edit" | "shell" => Ok(value),
-        _ => Err(StoreError::message("Tool Approval operation is invalid")),
-    }
 }
 
 fn validate_model_filename(value: &str) -> Result<&str, StoreError> {
@@ -1212,27 +888,6 @@ fn now_ms() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-fn next_sequence(
-    transaction: &Transaction<'_>,
-    table: &str,
-    task_id: &str,
-) -> Result<i64, StoreError> {
-    debug_assert!(matches!(table, "task_messages" | "task_events"));
-    let task_exists: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
-        [task_id],
-        |row| row.get(0),
-    )?;
-    if !task_exists {
-        return Err(StoreError::message("the Task does not exist"));
-    }
-    let statement =
-        format!("SELECT COALESCE(MAX(sequence), 0) + 1 FROM {table} WHERE task_id = ?1");
-    transaction
-        .query_row(&statement, [task_id], |row| row.get(0))
-        .map_err(Into::into)
-}
-
 fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DesktopProject> {
     Ok(DesktopProject {
         id: row.get(0)?,
@@ -1277,22 +932,6 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskMessage> {
         sequence: row.get(3)?,
         role,
         content: row.get(5)?,
-        created_at_ms: row.get(6)?,
-    })
-}
-
-fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEvent> {
-    let payload_json: String = row.get(5)?;
-    let payload = serde_json::from_str(&payload_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
-    })?;
-    Ok(TaskEvent {
-        id: row.get(0)?,
-        task_id: row.get(1)?,
-        execution_id: ExecutionId(row.get(2)?),
-        sequence: row.get(3)?,
-        kind: row.get(4)?,
-        payload,
         created_at_ms: row.get(6)?,
     })
 }

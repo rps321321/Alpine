@@ -337,12 +337,8 @@ impl DesktopStore {
             timestamp,
             None,
         )?;
-        let prompt_message = insert_message_projection(
-            &transaction,
-            &prompt_record,
-            MessageRole::User,
-            &prompt,
-        )?;
+        let prompt_message =
+            insert_message_projection(&transaction, &prompt_record, MessageRole::User, &prompt)?;
         let queued_record = append_record(
             &transaction,
             &task_id,
@@ -527,12 +523,9 @@ impl DesktopStore {
         })
     }
 
-    pub fn propose_tool(
-        &self,
-        input: NewToolApproval,
-    ) -> Result<ToolProposalOutcome, StoreError> {
-        let tool_call_id = validate_nonempty("tool call identifier", &input.tool_call_id, 160)?
-            .to_owned();
+    pub fn propose_tool(&self, input: NewToolApproval) -> Result<ToolProposalOutcome, StoreError> {
+        let tool_call_id =
+            validate_nonempty("tool call identifier", &input.tool_call_id, 160)?.to_owned();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let execution = execution::load_execution(&transaction, input.execution_id.as_str())?
@@ -683,9 +676,10 @@ impl DesktopStore {
                 "the Tool Approval is not approved or has already been claimed",
             ));
         }
-        let stored: ToolProposal = serde_json::from_value(approval.proposal.clone()).map_err(|error| {
-            StoreError::message(format!("stored Tool Approval proposal is invalid: {error}"))
-        })?;
+        let stored: ToolProposal =
+            serde_json::from_value(approval.proposal.clone()).map_err(|error| {
+                StoreError::message(format!("stored Tool Approval proposal is invalid: {error}"))
+            })?;
         if &stored != proposal {
             return Err(StoreError::message(
                 "the Tool Approval does not match the exact proposed operation",
@@ -697,7 +691,9 @@ impl DesktopStore {
             [approval_id],
         )?;
         if changed != 1 {
-            return Err(StoreError::message("the Tool Approval changed concurrently"));
+            return Err(StoreError::message(
+                "the Tool Approval changed concurrently",
+            ));
         }
         let record = append_record(
             &transaction,
@@ -766,7 +762,9 @@ impl DesktopStore {
             params![approval_id, state.as_str(), detail, timestamp],
         )?;
         if changed != 1 {
-            return Err(StoreError::message("the Tool Approval changed concurrently"));
+            return Err(StoreError::message(
+                "the Tool Approval changed concurrently",
+            ));
         }
         let settled_record = append_record(
             &transaction,
@@ -818,7 +816,8 @@ pub(super) fn migrate_v5(connection: &Connection) -> Result<(), StoreError> {
 
     let transaction = connection.unchecked_transaction()?;
     let task_ids = {
-        let mut statement = transaction.prepare("SELECT id FROM tasks ORDER BY created_at_ms, id")?;
+        let mut statement =
+            transaction.prepare("SELECT id FROM tasks ORDER BY created_at_ms, id")?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?
@@ -826,6 +825,27 @@ pub(super) fn migrate_v5(connection: &Connection) -> Result<(), StoreError> {
     for task_id in task_ids {
         migrate_legacy_task(&transaction, &task_id)?;
     }
+    transaction.execute_batch(
+        "ALTER TABLE task_messages RENAME TO task_messages_v4_projection;
+         CREATE TABLE task_messages (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+            content TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            UNIQUE(task_id, sequence)
+         );
+         INSERT INTO task_messages
+            (id, task_id, execution_id, sequence, role, content, created_at_ms)
+         SELECT m.id, m.task_id, m.execution_id, j.sequence, m.role, m.content, m.created_at_ms
+         FROM task_messages_v4_projection m
+         INNER JOIN task_journal j
+           ON j.task_id = m.task_id
+          AND j.source_key = 'legacy:message:' || m.id;
+         DROP TABLE task_messages_v4_projection;",
+    )?;
     transaction.execute("DROP TABLE task_events", [])?;
     transaction.execute(
         "UPDATE desktop_schema SET version = 5 WHERE singleton = 1",
@@ -847,7 +867,9 @@ pub(super) fn interrupt_after_restart(
              ORDER BY queued_at_ms, id",
         )?;
         statement
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?
     };
     for (execution_id, task_id) in active {
@@ -1276,11 +1298,7 @@ pub(super) fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskE
     }
     let event_json: String = row.get(5)?;
     let event = serde_json::from_str::<TaskJournalEvent>(&event_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            5,
-            rusqlite::types::Type::Text,
-            Box::new(error),
-        )
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
     })?;
     Ok(TaskEvent {
         id: row.get(0)?,
@@ -1304,10 +1322,7 @@ struct LegacyEnvelope {
     data: Value,
 }
 
-fn migrate_legacy_task(
-    transaction: &Transaction<'_>,
-    task_id: &str,
-) -> Result<(), StoreError> {
+fn migrate_legacy_task(transaction: &Transaction<'_>, task_id: &str) -> Result<(), StoreError> {
     let mut rows = Vec::new();
     {
         let mut statement = transaction.prepare(
@@ -1512,7 +1527,12 @@ fn apply_record_projection(
                  (id, task_id, execution_spec_id, state, failure, queued_at_ms, started_at_ms,
                   finished_at_ms, updated_at_ms)
                  VALUES (?1, ?2, ?3, 'queued', NULL, ?4, NULL, NULL, ?4)",
-                params![execution_id, record.task_id, execution_spec_id, record.created_at_ms],
+                params![
+                    execution_id,
+                    record.task_id,
+                    execution_spec_id,
+                    record.created_at_ms
+                ],
             )?;
         }
         TaskJournalEvent::ExecutionPreparing => {
@@ -1625,7 +1645,7 @@ fn apply_record_projection(
                 &record.task_id,
                 execution_id,
                 source_id,
-                *source_sequence,
+                record.sequence,
                 *source_occurred_at_ms,
                 data,
             )?,
@@ -1650,8 +1670,9 @@ fn rebuild_execution_state(
     record: &TaskEvent,
     failure: Option<&str>,
 ) -> Result<(), StoreError> {
-    let execution_id = execution_id
-        .ok_or_else(|| StoreError::message("Execution Journal record is missing an Execution ID"))?;
+    let execution_id = execution_id.ok_or_else(|| {
+        StoreError::message("Execution Journal record is missing an Execution ID")
+    })?;
     let terminal = matches!(state, "completed" | "cancelled" | "failed" | "interrupted");
     transaction.execute(
         "UPDATE executions
@@ -1663,13 +1684,7 @@ fn rebuild_execution_state(
              finished_at_ms = CASE WHEN ?5 THEN ?4 ELSE NULL END,
              updated_at_ms = ?4
          WHERE id = ?1",
-        params![
-            execution_id,
-            state,
-            failure,
-            record.created_at_ms,
-            terminal,
-        ],
+        params![execution_id, state, failure, record.created_at_ms, terminal,],
     )?;
     Ok(())
 }
@@ -1708,7 +1723,7 @@ fn rebuild_legacy_message(
     task_id: &str,
     execution_id: Option<&str>,
     source_id: &str,
-    source_sequence: Option<i64>,
+    journal_sequence: i64,
     occurred_at_ms: i64,
     data: &Value,
 ) -> Result<(), StoreError> {
@@ -1724,7 +1739,7 @@ fn rebuild_legacy_message(
             source_id,
             task_id,
             execution_id,
-            source_sequence.unwrap_or(0),
+            journal_sequence,
             role,
             json_string(data, "content")?,
             occurred_at_ms,
@@ -1790,9 +1805,10 @@ fn json_optional_string(value: &Value, key: &str) -> Result<Option<String>, Stor
 fn json_i64(value: &Value, key: &str) -> Result<Option<i64>, StoreError> {
     match value.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(value)) => value.as_i64().map(Some).ok_or_else(|| {
-            StoreError::message(format!("legacy Journal field '{key}' is invalid"))
-        }),
+        Some(Value::Number(value)) => value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| StoreError::message(format!("legacy Journal field '{key}' is invalid"))),
         _ => Err(StoreError::message(format!(
             "legacy Journal field '{key}' is invalid"
         ))),

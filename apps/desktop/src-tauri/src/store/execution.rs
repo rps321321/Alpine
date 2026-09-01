@@ -1,7 +1,7 @@
 //! Durable execution identity, specification, lifecycle, and task projections.
 
 use super::{
-    DesktopStore, DesktopTask, StoreError, TaskStatus, new_id, now_ms, validate_nonempty,
+    DesktopStore, DesktopTask, StoreError, TaskStatus, validate_nonempty,
     validate_optional_identifier,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -108,39 +108,6 @@ impl ExecutionState {
             Self::Completed | Self::Cancelled | Self::Failed | Self::Interrupted
         )
     }
-
-    fn allows(self, next: Self) -> bool {
-        match self {
-            Self::Queued => matches!(
-                next,
-                Self::Preparing
-                    | Self::Cancelling
-                    | Self::Cancelled
-                    | Self::Failed
-                    | Self::Interrupted
-            ),
-            Self::Preparing => matches!(
-                next,
-                Self::Running | Self::Cancelling | Self::Failed | Self::Interrupted
-            ),
-            Self::Running => matches!(
-                next,
-                Self::WaitingForApproval
-                    | Self::Cancelling
-                    | Self::Completed
-                    | Self::Failed
-                    | Self::Interrupted
-            ),
-            Self::WaitingForApproval => matches!(
-                next,
-                Self::Running | Self::Cancelling | Self::Failed | Self::Interrupted
-            ),
-            Self::Cancelling => {
-                matches!(next, Self::Cancelled | Self::Failed | Self::Interrupted)
-            }
-            Self::Completed | Self::Cancelled | Self::Failed | Self::Interrupted => false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -210,87 +177,6 @@ pub struct Execution {
 }
 
 impl DesktopStore {
-    pub fn create_execution(&self, input: CreateExecution) -> Result<Execution, StoreError> {
-        let task_id = validate_nonempty("Task identifier", &input.task_id, 160)?;
-        let specification = validate_new_specification(input.specification)?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let task_exists: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
-            [task_id],
-            |row| row.get(0),
-        )?;
-        if !task_exists {
-            return Err(StoreError::message("the Task does not exist"));
-        }
-        let active_exists: bool = transaction.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM executions
-                WHERE task_id = ?1
-                  AND state IN ('queued','preparing','running','waiting-for-approval','cancelling')
-             )",
-            [task_id],
-            |row| row.get(0),
-        )?;
-        if active_exists {
-            return Err(StoreError::message(
-                "the Task already has an active Execution",
-            ));
-        }
-        let execution_id = ExecutionId(new_id(&transaction));
-        let specification_id = new_id(&transaction);
-        let created_at_ms = now_ms();
-        transaction.execute(
-            "INSERT INTO execution_specs
-             (id, task_id, model_registry_id, model_repo_id, model_revision, model_filename,
-              model_sha256, session_config_sha256, profile_name, profile_sha256, runtime_name,
-              runtime_identity, adapter_identity, policy_identity, context_window, max_tokens,
-              temperature_millis, legacy_unverified, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                     ?15, ?16, ?17, 0, ?18)",
-            params![
-                specification_id,
-                task_id,
-                specification.model_registry_id,
-                specification.model_repo_id,
-                specification.model_revision,
-                specification.model_filename,
-                specification.model_sha256,
-                specification.session_config_sha256,
-                specification.profile_name,
-                specification.profile_sha256,
-                specification.runtime_name,
-                specification.runtime_identity,
-                specification.adapter_identity,
-                specification.policy_identity,
-                i64::from(specification.context_window),
-                i64::from(specification.max_tokens),
-                specification.temperature_millis,
-                created_at_ms,
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO executions
-             (id, task_id, execution_spec_id, state, failure, queued_at_ms, started_at_ms,
-              finished_at_ms, updated_at_ms)
-             VALUES (?1, ?2, ?3, 'queued', NULL, ?4, NULL, NULL, ?4)",
-            params![
-                execution_id.as_str(),
-                task_id,
-                specification_id,
-                created_at_ms
-            ],
-        )?;
-        transaction.execute(
-            "UPDATE tasks SET updated_at_ms = ?2 WHERE id = ?1",
-            params![task_id, created_at_ms],
-        )?;
-        let execution = load_execution(&transaction, execution_id.as_str())?
-            .ok_or_else(|| StoreError::message("the Execution was not persisted"))?;
-        transaction.commit()?;
-        Ok(execution)
-    }
-
     pub fn get_execution(&self, execution_id: &str) -> Result<Option<Execution>, StoreError> {
         let connection = self.connection()?;
         load_execution(&connection, execution_id)
@@ -299,61 +185,6 @@ impl DesktopStore {
     pub fn list_executions(&self, task_id: &str) -> Result<Vec<Execution>, StoreError> {
         let connection = self.connection()?;
         list_task_executions(&connection, task_id)
-    }
-
-    pub fn transition_execution(
-        &self,
-        execution_id: &str,
-        next: ExecutionState,
-        failure: Option<&str>,
-    ) -> Result<Execution, StoreError> {
-        let execution_id = validate_nonempty("Execution identifier", execution_id, 160)?;
-        let failure = validate_transition_failure(next, failure)?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let current = load_execution(&transaction, execution_id)?
-            .ok_or_else(|| StoreError::message("the Execution does not exist"))?;
-        if !current.state.allows(next) {
-            return Err(StoreError::message(format!(
-                "invalid Execution transition from '{}' to '{}'",
-                current.state.as_str(),
-                next.as_str()
-            )));
-        }
-        let timestamp = now_ms();
-        let started_at_ms = current.started_at_ms.or_else(|| {
-            (!matches!(next, ExecutionState::Queued | ExecutionState::Cancelled))
-                .then_some(timestamp)
-        });
-        let finished_at_ms = next.is_terminal().then_some(timestamp);
-        let changed = transaction.execute(
-            "UPDATE executions
-             SET state = ?2, failure = ?3, started_at_ms = ?4, finished_at_ms = ?5,
-                 updated_at_ms = ?6
-             WHERE id = ?1 AND state = ?7",
-            params![
-                execution_id,
-                next.as_str(),
-                failure,
-                started_at_ms,
-                finished_at_ms,
-                timestamp,
-                current.state.as_str(),
-            ],
-        )?;
-        if changed != 1 {
-            return Err(StoreError::message(
-                "the Execution changed concurrently; reload it before retrying",
-            ));
-        }
-        transaction.execute(
-            "UPDATE tasks SET updated_at_ms = ?2 WHERE id = ?1",
-            params![current.task_id, timestamp],
-        )?;
-        let execution = load_execution(&transaction, execution_id)?
-            .ok_or_else(|| StoreError::message("the Execution no longer exists"))?;
-        transaction.commit()?;
-        Ok(execution)
     }
 
     pub fn delete_task(&self, task_id: &str) -> Result<(), StoreError> {
@@ -366,7 +197,7 @@ impl DesktopStore {
     }
 }
 
-fn validate_new_specification(
+pub(super) fn validate_new_specification(
     mut specification: NewExecutionSpecification,
 ) -> Result<NewExecutionSpecification, StoreError> {
     specification.model_registry_id = validate_nonempty(
@@ -441,25 +272,6 @@ fn validate_sha256<'a>(label: &str, value: &'a str) -> Result<&'a str, StoreErro
         Ok(value)
     } else {
         Err(StoreError::message(format!("{label} is invalid")))
-    }
-}
-
-fn validate_transition_failure(
-    next: ExecutionState,
-    failure: Option<&str>,
-) -> Result<Option<&str>, StoreError> {
-    match next {
-        ExecutionState::Failed | ExecutionState::Interrupted => failure
-            .map(|value| validate_nonempty("Execution failure", value, 64 * 1024))
-            .transpose()?
-            .ok_or_else(|| {
-                StoreError::message("failed and interrupted Executions require a failure detail")
-            })
-            .map(Some),
-        _ if failure.is_some() => Err(StoreError::message(
-            "only failed or interrupted Executions may record a failure detail",
-        )),
-        _ => Ok(None),
     }
 }
 
@@ -576,28 +388,6 @@ pub(super) fn project_task(
     Ok(task)
 }
 
-pub(super) fn interrupt_unsettled(
-    connection: &Connection,
-    failure: &str,
-) -> Result<(), StoreError> {
-    let timestamp = now_ms();
-    connection.execute(
-        "UPDATE executions
-         SET state = 'interrupted', failure = ?1, finished_at_ms = ?2, updated_at_ms = ?2
-         WHERE state IN ('queued','preparing','running','waiting-for-approval','cancelling')",
-        params![failure, timestamp],
-    )?;
-    connection.execute(
-        "UPDATE tasks SET updated_at_ms = ?1
-         WHERE id IN (
-            SELECT task_id FROM executions
-            WHERE state = 'interrupted' AND updated_at_ms = ?1
-         )",
-        [timestamp],
-    )?;
-    Ok(())
-}
-
 pub(super) fn list_task_executions(
     connection: &Connection,
     task_id: &str,
@@ -610,7 +400,7 @@ pub(super) fn list_task_executions(
         .map_err(Into::into)
 }
 
-fn load_execution(
+pub(super) fn load_execution(
     connection: &Connection,
     execution_id: &str,
 ) -> Result<Option<Execution>, StoreError> {

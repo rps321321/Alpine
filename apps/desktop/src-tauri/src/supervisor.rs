@@ -574,7 +574,8 @@ pub async fn submit_prompt(
             execution_id: execution_id.clone(),
             message: accepted.prompt_message.clone(),
         });
-        let preparing = match store.record_execution_state(&execution_id, ExecutionState::Preparing) {
+        let preparing = match store.record_execution_state(&execution_id, ExecutionState::Preparing)
+        {
             Ok(value) => value,
             Err(error) => {
                 let _ = fail_execution(&store, &supervisor, &execution_id, error.to_string());
@@ -763,7 +764,9 @@ pub fn agent_request_tool_approval(
 ) -> Result<ToolApproval, String> {
     require_webview(&webview, AGENT_WORKER_WEBVIEW)?;
     supervisor.verify_active(&input.task_id, input.execution_id.as_str())?;
-    let outcome = store.propose_tool(input).map_err(|error| error.to_string())?;
+    let outcome = store
+        .propose_tool(input)
+        .map_err(|error| error.to_string())?;
     broadcast_records(&supervisor, &outcome.records);
     supervisor.broadcast(state_update(outcome.execution));
     supervisor.broadcast(ExecutionUpdate::Approval {
