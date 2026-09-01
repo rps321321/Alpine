@@ -1,4 +1,10 @@
-//! Alpine-owned durable state for Desktop Projects, Tasks, Messages, and Events.
+//! Alpine-owned durable state for Projects, Tasks, Executions, Messages, and Events.
+
+mod execution;
+pub use execution::{
+    CreateExecution, Execution, ExecutionId, ExecutionSpecification, ExecutionState,
+    NewExecutionSpecification, TaskSummary,
+};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -8,8 +14,8 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: i64 = 3;
-const RESTART_ERROR: &str = "Alpine Desktop restarted while the task was active";
+const SCHEMA_VERSION: i64 = 4;
+const RESTART_ERROR: &str = "Alpine Desktop restarted while the execution was active";
 
 #[derive(Debug)]
 pub struct StoreError(String);
@@ -92,6 +98,12 @@ pub struct DesktopTask {
     pub project_id: String,
     pub title: String,
     pub status: TaskStatus,
+    #[serde(default)]
+    pub summary: TaskSummary,
+    #[serde(default)]
+    pub active_execution_id: Option<ExecutionId>,
+    #[serde(default)]
+    pub latest_execution_id: Option<ExecutionId>,
     pub model_repo_id: String,
     pub model_filename: String,
     pub profile: String,
@@ -144,6 +156,7 @@ impl MessageRole {
 pub struct TaskMessage {
     pub id: String,
     pub task_id: String,
+    pub execution_id: ExecutionId,
     pub sequence: i64,
     pub role: MessageRole,
     pub content: String,
@@ -154,6 +167,7 @@ pub struct TaskMessage {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NewTaskMessage {
     pub task_id: String,
+    pub execution_id: ExecutionId,
     pub role: MessageRole,
     pub content: String,
 }
@@ -163,6 +177,7 @@ pub struct NewTaskMessage {
 pub struct TaskEvent {
     pub id: String,
     pub task_id: String,
+    pub execution_id: ExecutionId,
     pub sequence: i64,
     pub kind: String,
     pub payload: Value,
@@ -173,6 +188,7 @@ pub struct TaskEvent {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NewTaskEvent {
     pub task_id: String,
+    pub execution_id: ExecutionId,
     pub kind: String,
     pub payload: Value,
 }
@@ -181,6 +197,7 @@ pub struct NewTaskEvent {
 #[serde(rename_all = "camelCase")]
 pub struct TaskDetail {
     pub task: DesktopTask,
+    pub executions: Vec<Execution>,
     pub messages: Vec<TaskMessage>,
     pub events: Vec<TaskEvent>,
 }
@@ -231,6 +248,7 @@ impl ApprovalState {
 pub struct ToolApproval {
     pub id: String,
     pub task_id: String,
+    pub execution_id: ExecutionId,
     pub tool_call_id: String,
     pub operation: String,
     pub proposal: Value,
@@ -252,6 +270,7 @@ pub struct ToolApprovalDecision {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NewToolApproval {
     pub task_id: String,
+    pub execution_id: ExecutionId,
     pub tool_call_id: String,
     pub operation: String,
     pub proposal: Value,
@@ -327,11 +346,7 @@ impl DesktopStore {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         migrate(&connection)?;
-        connection.execute(
-            "UPDATE tasks SET status = 'interrupted', error = ?1, updated_at_ms = ?2
-             WHERE status IN ('running', 'cancelling')",
-            params![RESTART_ERROR, now_ms()],
-        )?;
+        execution::interrupt_unsettled(&connection, RESTART_ERROR)?;
         connection.execute(
             "UPDATE tool_approvals
              SET state = 'interrupted', detail = ?1, settled_at_ms = ?2
@@ -434,6 +449,9 @@ impl DesktopStore {
             project_id: input.project_id,
             title: title.to_owned(),
             status: TaskStatus::Draft,
+            summary: TaskSummary::Ready,
+            active_execution_id: None,
+            latest_execution_id: None,
             model_repo_id: model_repo_id.to_owned(),
             model_filename: model_filename.to_owned(),
             profile: profile.to_owned(),
@@ -450,9 +468,14 @@ impl DesktopStore {
                     created_at_ms, updated_at_ms
              FROM tasks WHERE project_id = ?1 ORDER BY updated_at_ms DESC, created_at_ms DESC",
         )?;
-        let rows = statement.query_map([project_id], task_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        let tasks = statement
+            .query_map([project_id], task_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        tasks
+            .into_iter()
+            .map(|task| execution::project_task(&connection, task))
+            .collect()
     }
 
     pub fn project_for_task(&self, task_id: &str) -> Result<DesktopProject, StoreError> {
@@ -485,15 +508,17 @@ impl DesktopStore {
         let Some(task) = task else {
             return Ok(None);
         };
+        let task = execution::project_task(&connection, task)?;
+        let executions = execution::list_task_executions(&connection, task_id)?;
         let mut message_statement = connection.prepare(
-            "SELECT id, task_id, sequence, role, content, created_at_ms
+            "SELECT id, task_id, execution_id, sequence, role, content, created_at_ms
              FROM task_messages WHERE task_id = ?1 ORDER BY sequence",
         )?;
         let messages = message_statement
             .query_map([task_id], message_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         let mut event_statement = connection.prepare(
-            "SELECT id, task_id, sequence, kind, payload_json, created_at_ms
+            "SELECT id, task_id, execution_id, sequence, kind, payload_json, created_at_ms
              FROM task_events WHERE task_id = ?1 ORDER BY sequence",
         )?;
         let events = event_statement
@@ -501,6 +526,7 @@ impl DesktopStore {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(TaskDetail {
             task,
+            executions,
             messages,
             events,
         }))
@@ -509,16 +535,23 @@ impl DesktopStore {
     pub fn append_message(&self, input: NewTaskMessage) -> Result<TaskMessage, StoreError> {
         let content = validate_nonempty("message content", &input.content, 4 * 1024 * 1024)?;
         let mut connection = self.connection()?;
+        execution::ensure_execution_for_task(
+            &connection,
+            &input.task_id,
+            input.execution_id.as_str(),
+        )?;
         let transaction = connection.transaction()?;
         let sequence = next_sequence(&transaction, "task_messages", &input.task_id)?;
         let id = new_id(&transaction);
         let created_at_ms = now_ms();
         transaction.execute(
-            "INSERT INTO task_messages (id, task_id, sequence, role, content, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO task_messages
+             (id, task_id, execution_id, sequence, role, content, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 id,
                 input.task_id,
+                input.execution_id.as_str(),
                 sequence,
                 input.role.as_str(),
                 content,
@@ -533,6 +566,7 @@ impl DesktopStore {
         Ok(TaskMessage {
             id,
             task_id: input.task_id,
+            execution_id: input.execution_id,
             sequence,
             role: input.role,
             content: content.to_owned(),
@@ -549,16 +583,23 @@ impl DesktopStore {
             return Err(StoreError::message("Task Event payload exceeds 1 MiB"));
         }
         let mut connection = self.connection()?;
+        execution::ensure_execution_for_task(
+            &connection,
+            &input.task_id,
+            input.execution_id.as_str(),
+        )?;
         let transaction = connection.transaction()?;
         let sequence = next_sequence(&transaction, "task_events", &input.task_id)?;
         let id = new_id(&transaction);
         let created_at_ms = now_ms();
         transaction.execute(
-            "INSERT INTO task_events (id, task_id, sequence, kind, payload_json, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO task_events
+             (id, task_id, execution_id, sequence, kind, payload_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 id,
                 input.task_id,
+                input.execution_id.as_str(),
                 sequence,
                 kind,
                 payload_json,
@@ -573,6 +614,7 @@ impl DesktopStore {
         Ok(TaskEvent {
             id,
             task_id: input.task_id,
+            execution_id: input.execution_id,
             sequence,
             kind: kind.to_owned(),
             payload: input.payload,
@@ -590,6 +632,11 @@ impl DesktopStore {
             return Err(StoreError::message("task error exceeds 16 KiB"));
         }
         let connection = self.connection()?;
+        if execution::task_has_executions(&connection, task_id)? {
+            return Err(StoreError::message(
+                "Task status is derived from Execution history and cannot be mutated directly",
+            ));
+        }
         let changed = connection.execute(
             "UPDATE tasks SET status = ?2, error = ?3, updated_at_ms = ?4 WHERE id = ?1",
             params![task_id, status.as_str(), error, now_ms()],
@@ -620,21 +667,27 @@ impl DesktopStore {
             return Err(StoreError::message("Tool Approval proposal exceeds 1 MiB"));
         }
         let connection = self.connection()?;
-        let task_exists: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
-            [&input.task_id],
-            |row| row.get(0),
+        execution::ensure_execution_for_task(
+            &connection,
+            &input.task_id,
+            input.execution_id.as_str(),
         )?;
-        if !task_exists {
-            return Err(StoreError::message("the Task does not exist"));
-        }
         let id = new_id(&connection);
         let created_at_ms = now_ms();
         connection.execute(
             "INSERT INTO tool_approvals
-             (id, task_id, tool_call_id, operation, proposal_json, state, detail, created_at_ms, decided_at_ms, settled_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', NULL, ?6, NULL, NULL)",
-            params![id, input.task_id, tool_call_id, operation, proposal_json, created_at_ms],
+             (id, task_id, execution_id, tool_call_id, operation, proposal_json, state, detail,
+              created_at_ms, decided_at_ms, settled_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', NULL, ?7, NULL, NULL)",
+            params![
+                id,
+                input.task_id,
+                input.execution_id.as_str(),
+                tool_call_id,
+                operation,
+                proposal_json,
+                created_at_ms
+            ],
         )?;
         drop(connection);
         self.get_tool_approval(&id)?
@@ -645,8 +698,8 @@ impl DesktopStore {
         let connection = self.connection()?;
         connection
             .query_row(
-                "SELECT id, task_id, tool_call_id, operation, proposal_json, state, detail,
-                        created_at_ms, decided_at_ms, settled_at_ms
+                "SELECT id, task_id, execution_id, tool_call_id, operation, proposal_json, state,
+                        detail, created_at_ms, decided_at_ms, settled_at_ms
                  FROM tool_approvals WHERE id = ?1",
                 [approval_id],
                 approval_from_row,
@@ -658,8 +711,8 @@ impl DesktopStore {
     pub fn list_pending_approvals(&self, task_id: &str) -> Result<Vec<ToolApproval>, StoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id, task_id, tool_call_id, operation, proposal_json, state, detail,
-                    created_at_ms, decided_at_ms, settled_at_ms
+            "SELECT id, task_id, execution_id, tool_call_id, operation, proposal_json, state,
+                    detail, created_at_ms, decided_at_ms, settled_at_ms
              FROM tool_approvals WHERE task_id = ?1 AND state = 'pending'
              ORDER BY created_at_ms, id",
         )?;
@@ -687,8 +740,8 @@ impl DesktopStore {
         let transaction = connection.transaction()?;
         let mut approval = transaction
             .query_row(
-                "SELECT id, task_id, tool_call_id, operation, proposal_json, state, detail,
-                        created_at_ms, decided_at_ms, settled_at_ms
+                "SELECT id, task_id, execution_id, tool_call_id, operation, proposal_json, state,
+                        detail, created_at_ms, decided_at_ms, settled_at_ms
                  FROM tool_approvals WHERE id = ?1",
                 [approval_id],
                 approval_from_row,
@@ -722,11 +775,13 @@ impl DesktopStore {
         let sequence = next_sequence(&transaction, "task_events", &approval.task_id)?;
         let event_id = new_id(&transaction);
         transaction.execute(
-            "INSERT INTO task_events (id, task_id, sequence, kind, payload_json, created_at_ms)
-             VALUES (?1, ?2, ?3, 'approval.decided', ?4, ?5)",
+            "INSERT INTO task_events
+             (id, task_id, execution_id, sequence, kind, payload_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'approval.decided', ?5, ?6)",
             params![
                 event_id,
                 approval.task_id,
+                approval.execution_id.as_str(),
                 sequence,
                 payload_json,
                 decided_at_ms
@@ -743,6 +798,7 @@ impl DesktopStore {
             event: TaskEvent {
                 id: event_id,
                 task_id: approval.task_id.clone(),
+                execution_id: approval.execution_id.clone(),
                 sequence,
                 kind: "approval.decided".to_owned(),
                 payload: event_payload,
@@ -762,8 +818,8 @@ impl DesktopStore {
         let connection = self.connection()?;
         let approval = connection
             .query_row(
-                "SELECT id, task_id, tool_call_id, operation, proposal_json, state, detail,
-                        created_at_ms, decided_at_ms, settled_at_ms
+                "SELECT id, task_id, execution_id, tool_call_id, operation, proposal_json, state,
+                        detail, created_at_ms, decided_at_ms, settled_at_ms
                  FROM tool_approvals WHERE id = ?1",
                 [approval_id],
                 approval_from_row,
@@ -1046,6 +1102,14 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
             COMMIT;",
         )?;
     }
+    let version: i64 = connection.query_row(
+        "SELECT version FROM desktop_schema WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if version == 3 {
+        execution::migrate_v4(connection)?;
+    }
     Ok(())
 }
 
@@ -1183,6 +1247,9 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DesktopTask> {
         project_id: row.get(1)?,
         title: row.get(2)?,
         status,
+        summary: TaskSummary::from_legacy_status(status),
+        active_execution_id: None,
+        latest_execution_id: None,
         model_repo_id: row.get(4)?,
         model_filename: row.get(5)?,
         profile: row.get(6)?,
@@ -1193,55 +1260,58 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DesktopTask> {
 }
 
 fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskMessage> {
-    let role: String = row.get(3)?;
+    let role: String = row.get(4)?;
     let role = MessageRole::parse(&role).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
     })?;
     Ok(TaskMessage {
         id: row.get(0)?,
         task_id: row.get(1)?,
-        sequence: row.get(2)?,
+        execution_id: ExecutionId(row.get(2)?),
+        sequence: row.get(3)?,
         role,
-        content: row.get(4)?,
-        created_at_ms: row.get(5)?,
+        content: row.get(5)?,
+        created_at_ms: row.get(6)?,
     })
 }
 
 fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEvent> {
-    let payload_json: String = row.get(4)?;
+    let payload_json: String = row.get(5)?;
     let payload = serde_json::from_str(&payload_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
     })?;
     Ok(TaskEvent {
         id: row.get(0)?,
         task_id: row.get(1)?,
-        sequence: row.get(2)?,
-        kind: row.get(3)?,
+        execution_id: ExecutionId(row.get(2)?),
+        sequence: row.get(3)?,
+        kind: row.get(4)?,
         payload,
-        created_at_ms: row.get(5)?,
+        created_at_ms: row.get(6)?,
     })
 }
 
 fn approval_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolApproval> {
-    let proposal_json: String = row.get(4)?;
+    let proposal_json: String = row.get(5)?;
     let proposal = serde_json::from_str(&proposal_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
-    })?;
-    let state: String = row.get(5)?;
-    let state = ApprovalState::parse(&state).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let state: String = row.get(6)?;
+    let state = ApprovalState::parse(&state).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error))
     })?;
     Ok(ToolApproval {
         id: row.get(0)?,
         task_id: row.get(1)?,
-        tool_call_id: row.get(2)?,
-        operation: row.get(3)?,
+        execution_id: ExecutionId(row.get(2)?),
+        tool_call_id: row.get(3)?,
+        operation: row.get(4)?,
         proposal,
         state,
-        detail: row.get(6)?,
-        created_at_ms: row.get(7)?,
-        decided_at_ms: row.get(8)?,
-        settled_at_ms: row.get(9)?,
+        detail: row.get(7)?,
+        created_at_ms: row.get(8)?,
+        decided_at_ms: row.get(9)?,
+        settled_at_ms: row.get(10)?,
     })
 }
 

@@ -2,6 +2,8 @@ import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   DesktopClient,
   DesktopTask,
+  Execution,
+  ExecutionState,
   TaskEvent,
   TaskMessage,
   ToolApproval,
@@ -35,6 +37,7 @@ export interface TaskExecutionInput {
 
 export interface TaskExecutionResult {
   taskId: string;
+  executionId?: string;
   prompt: string;
   response: string;
   state: "done" | "cancelled" | "error";
@@ -68,6 +71,7 @@ export function createTaskExecution(
 
 export class TaskExecution {
   private runtime: AgentRuntime | null = null;
+  private execution: Execution | null = null;
   private cancelled = false;
   private running = false;
   private promptText = "";
@@ -75,7 +79,10 @@ export class TaskExecution {
   private frame: number | null = null;
   private persistenceQueue: Promise<void> = Promise.resolve();
   private persistenceFailure: Error | null = null;
-  private cancelStatus: Promise<unknown> = Promise.resolve();
+  private cancellationFailure: Error | null = null;
+  private cancelStatus: Promise<void> = Promise.resolve();
+  private transitionQueue: Promise<void> = Promise.resolve();
+  private runStartedAt = 0;
 
   constructor(
     private readonly input: TaskExecutionInput,
@@ -87,22 +94,39 @@ export class TaskExecution {
     this.running = true;
     this.promptText = prompt;
     this.response = "";
+    this.runStartedAt = Date.now();
     this.mark("alpine:pi-launch:start");
     let unsubscribe: (() => void) | undefined;
 
     try {
-      await this.input.desktop.setTaskStatus(this.input.task.id, "running");
       const launch = await this.input.desktop.resolvePiLaunch();
+      this.execution = await this.input.desktop.createExecution({
+        taskId: this.input.task.id,
+        specification: launch.specification,
+      });
       if (this.cancelled) return await this.settleCancelled();
+      await this.moveTo("preparing");
 
       this.runtime = await this.dependencies.createRuntime(launch, {
         taskId: this.input.task.id,
+        executionId: this.execution.id,
         desktop: this.input.desktop,
         history: this.input.history,
-        onApproval: (approval) =>
-          this.input.onUpdate({ type: "approval", approval }),
+        onApproval: async (approval) => {
+          if (!this.cancelled && this.execution?.state === "running")
+            await this.moveTo("waiting-for-approval");
+          this.input.onUpdate({ type: "approval", approval });
+        },
+        onApprovalSettled: async () => {
+          if (
+            !this.cancelled &&
+            this.execution?.state === "waiting-for-approval"
+          )
+            await this.moveTo("running");
+        },
       });
       if (this.cancelled) return await this.settleCancelled();
+      await this.moveTo("running");
 
       this.measure(
         "alpine:pi-launch",
@@ -127,9 +151,7 @@ export class TaskExecution {
           this.scheduleResponse();
           return;
         }
-        this.persistenceQueue = this.persistenceQueue.then(() =>
-          this.persist(event),
-        );
+        this.persistenceQueue = this.persistenceQueue.then(() => this.persist(event));
       });
 
       this.mark("alpine:stream:start");
@@ -151,15 +173,16 @@ export class TaskExecution {
       if (this.runtime.errorMessage) throw new Error(this.runtime.errorMessage);
       if (this.cancelled) return await this.settleCancelled();
 
-      await this.input.desktop.setTaskStatus(this.input.task.id, "completed");
+      await this.recordMetricEvent("completed");
+      await this.moveTo("completed");
       this.flushResponse();
       return this.result("done");
     } catch (error) {
       const message = asError(error).message;
       if (this.cancelled) return await this.settleCancelled();
-      await this.input.desktop
-        .setTaskStatus(this.input.task.id, "failed", message)
-        .catch(() => undefined);
+      if (this.execution && !isTerminal(this.execution.state)) {
+        await this.moveTo("failed", message).catch(() => undefined);
+      }
       this.input.onUpdate({ type: "error", scope: "run", message });
       this.flushResponse();
       return this.result("error", message);
@@ -183,22 +206,44 @@ export class TaskExecution {
     if (this.cancelled) return;
     this.cancelled = true;
     this.runtime?.abort();
-    this.cancelStatus = this.input.desktop
-      .setTaskStatus(this.input.task.id, "cancelling")
-      .catch((error: unknown) => {
-        this.input.onUpdate({
-          type: "error",
-          scope: "persistence",
-          message: `Cancellation state could not be saved: ${asError(error).message}`,
-        });
-      });
+    this.cancelStatus = this.execution
+      ? this.moveTo("cancelling")
+          .then(() => undefined)
+          .catch((error: unknown) => {
+            this.cancellationFailure = new Error(
+              `Cancellation state could not be saved: ${asError(error).message}`,
+            );
+            this.input.onUpdate({
+              type: "error",
+              scope: "persistence",
+              message: this.cancellationFailure.message,
+            });
+          })
+      : Promise.resolve();
   }
 
   private async settleCancelled(): Promise<TaskExecutionResult> {
     await this.cancelStatus;
-    await this.input.desktop
-      .setTaskStatus(this.input.task.id, "cancelled")
-      .catch(() => undefined);
+    if (this.cancellationFailure) {
+      const message = this.cancellationFailure.message;
+      if (this.execution && !isTerminal(this.execution.state)) {
+        await this.moveTo("failed", message).catch(() => undefined);
+      }
+      this.flushResponse();
+      return this.result("error", message);
+    }
+    if (this.execution && !isTerminal(this.execution.state)) {
+      try {
+        await this.moveTo("cancelled");
+      } catch (error) {
+        const message = `Cancellation state could not be saved: ${asError(error).message}`;
+        this.input.onUpdate({ type: "error", scope: "persistence", message });
+        await this.moveTo("failed", message).catch(() => undefined);
+        this.flushResponse();
+        return this.result("error", message);
+      }
+    }
+    await this.recordMetricEvent("cancelled").catch(() => undefined);
     this.flushResponse();
     return this.result("cancelled");
   }
@@ -209,11 +254,33 @@ export class TaskExecution {
   ): TaskExecutionResult {
     return {
       taskId: this.input.task.id,
+      ...(this.execution ? { executionId: this.execution.id } : {}),
       prompt: this.promptText,
       response: this.response,
       state,
       ...(error ? { error } : {}),
     };
+  }
+
+  private moveTo(state: ExecutionState, failure: string | null = null) {
+    const operation = this.transitionQueue.then(async () => {
+      if (!this.execution) throw new Error("Execution identity is unavailable");
+      if (this.execution.state === state) return this.execution;
+      if (isTerminal(this.execution.state)) {
+        throw new Error(`Execution is already ${this.execution.state}`);
+      }
+      this.execution = await this.input.desktop.transitionExecution(
+        this.execution.id,
+        state,
+        failure,
+      );
+      return this.execution;
+    });
+    this.transitionQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 
   private scheduleResponse() {
@@ -247,6 +314,8 @@ export class TaskExecution {
   }
 
   private async persist(event: AgentEvent) {
+    const executionId = this.execution?.id;
+    if (!executionId) throw new Error("Execution identity is unavailable");
     if (
       event.type === "message_end" &&
       (event.message.role === "user" || event.message.role === "assistant")
@@ -255,6 +324,7 @@ export class TaskExecution {
       if (content) {
         const message = await this.input.desktop.appendTaskMessage({
           taskId: this.input.task.id,
+          executionId,
           role: event.message.role,
           content,
         });
@@ -266,6 +336,7 @@ export class TaskExecution {
     if (!normalized) return;
     const persisted = await this.input.desktop.appendTaskEvent({
       taskId: this.input.task.id,
+      executionId,
       ...normalized,
     });
     this.input.onUpdate({ type: "event", event: persisted });
@@ -276,6 +347,21 @@ export class TaskExecution {
       if (payload.toolName === "run_command")
         this.input.onUpdate({ type: "inspector", tab: "terminal" });
     }
+  }
+
+  private async recordMetricEvent(outcome: "completed" | "cancelled") {
+    if (!this.execution) return;
+    const event = await this.input.desktop.appendTaskEvent({
+      taskId: this.input.task.id,
+      executionId: this.execution.id,
+      kind: "execution.metrics",
+      payload: {
+        outcome,
+        durationMs: Math.max(0, Date.now() - this.runStartedAt),
+        responseCharacters: this.response.length,
+      },
+    });
+    this.input.onUpdate({ type: "event", event });
   }
 
   private mark(name: string) {
@@ -296,6 +382,10 @@ export class TaskExecution {
       // Performance marks are best-effort local diagnostics.
     }
   }
+}
+
+function isTerminal(state: ExecutionState) {
+  return ["completed", "cancelled", "failed", "interrupted"].includes(state);
 }
 
 export function normalizeAgentEvent(

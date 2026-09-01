@@ -27,9 +27,11 @@ export interface PiLocalModelConfig {
 export interface PiHarnessDependencies {
   streamFn?: StreamFn;
   taskId?: string;
+  executionId?: string;
   desktop?: DesktopClient;
   history?: Array<Pick<TaskMessage, "role" | "content" | "createdAtMs">>;
   onApproval?: (approval: ToolApproval) => void | Promise<void>;
+  onApprovalSettled?: (approval: ToolApproval) => void | Promise<void>;
 }
 
 const listFilesSchema = Type.Object({
@@ -98,11 +100,13 @@ export class PiHarness {
     dependencies: PiHarnessDependencies = {},
   ) {
     const tools =
-      dependencies.taskId && dependencies.desktop
+      dependencies.taskId && dependencies.executionId && dependencies.desktop
         ? createProjectTools(
             dependencies.taskId,
+            dependencies.executionId,
             dependencies.desktop,
             dependencies.onApproval,
+            dependencies.onApprovalSettled,
           )
         : [];
     this.descriptor = Object.freeze({
@@ -154,8 +158,10 @@ export class PiHarness {
 
 function createProjectTools(
   taskId: string,
+  executionId: string,
   desktop: DesktopClient,
   onApproval?: (approval: ToolApproval) => void | Promise<void>,
+  onApprovalSettled?: (approval: ToolApproval) => void | Promise<void>,
 ): AgentTool[] {
   const listFilesTool: AgentTool<typeof listFilesSchema> = {
     name: "list_files",
@@ -228,12 +234,18 @@ function createProjectTools(
       };
       const approval = await desktop.requestToolApproval({
         taskId,
+        executionId,
         toolCallId,
         operation: "edit",
         proposal,
       });
       await onApproval?.(approval);
-      await waitForApproval(desktop, approval.id, signal);
+      await waitForApproval(
+        desktop,
+        approval.id,
+        signal,
+        onApprovalSettled,
+      );
       const result = await desktop.editProjectFile(
         taskId,
         approval.id,
@@ -261,6 +273,7 @@ function createProjectTools(
       };
       const approval = await desktop.requestToolApproval({
         taskId,
+        executionId,
         toolCallId,
         operation: "shell",
         proposal: shell,
@@ -270,7 +283,12 @@ function createProjectTools(
         content: [{ type: "text", text: "Waiting for operator approval…" }],
         details: { approvalId: approval.id, state: "pending" },
       });
-      await waitForApproval(desktop, approval.id, signal);
+      await waitForApproval(
+        desktop,
+        approval.id,
+        signal,
+        onApprovalSettled,
+      );
       onUpdate?.({
         content: [{ type: "text", text: "Approved. Running command…" }],
         details: { approvalId: approval.id, state: "executing" },
@@ -301,15 +319,22 @@ async function waitForApproval(
   desktop: DesktopClient,
   approvalId: string,
   signal?: AbortSignal,
+  onSettled?: (approval: ToolApproval) => void | Promise<void>,
 ) {
   for (;;) {
     if (signal?.aborted) throw new Error("Tool Approval wait was cancelled");
     const approval = await desktop.getToolApproval(approvalId);
     if (!approval) throw new Error("Tool Approval no longer exists");
-    if (approval.state === "approved") return;
-    if (approval.state === "denied")
+    if (approval.state === "approved") {
+      await onSettled?.(approval);
+      return;
+    }
+    if (approval.state === "denied") {
+      await onSettled?.(approval);
       throw new Error("Operator denied the proposed operation");
+    }
     if (["interrupted", "failed", "completed"].includes(approval.state)) {
+      await onSettled?.(approval);
       throw new Error(`Tool Approval settled as ${approval.state}`);
     }
     await delay(200, signal);

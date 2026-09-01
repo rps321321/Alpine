@@ -52,6 +52,7 @@ describe("Pi harness adapter", () => {
     const harness = new PiHarness(config, {
       streamFn: neverCalled,
       taskId: "task-1",
+      executionId: "execution-1",
       desktop: {} as DesktopClient,
     });
 
