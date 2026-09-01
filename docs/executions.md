@@ -38,7 +38,6 @@ On startup, each unfinished Execution becomes `interrupted` and retains a restar
 
 Schema-3 task history is migrated deterministically to `legacy-execution-<task-id>` and `legacy-spec-<task-id>` when legacy activity can be associated with a Task. Known task-level model/profile fields are retained, while unavailable runtime, adapter, policy, and digest evidence is marked `legacyUnverified` rather than fabricated.
 
-
 ## Host-owned execution authority
 
 The visible React renderer is a projection client. It can submit prompt,
@@ -49,3 +48,7 @@ capacity, creates the immutable Execution and persists every authoritative
 outcome. Pi runs in an isolated `agent-worker` webview and reports bounded events
 over a Tauri channel; worker-originated calls are checked against both webview
 identity and the active Task/Execution pair.
+
+The desktop architecture gate rejects reintroduction of renderer-side provider
+imports, runtime credentials, row-level task mutation primitives, or direct
+Execution transition APIs.
