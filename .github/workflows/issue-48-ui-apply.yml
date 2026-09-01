@@ -21,8 +21,10 @@ jobs:
       - name: Generate TypeScript journal contract
         working-directory: apps/desktop
         run: node scripts/generate-task-journal-contract.mjs
-      - name: Retire one-shot files
-        run: rm scripts/apply_issue_48_ui.py .github/workflows/issue-48-ui-apply.yml
+      - name: Keep CI workflow edits outside the bot push
+        run: |
+          git checkout -- .github/workflows/verify.yml
+          rm scripts/apply_issue_48_ui.py
       - name: Commit renderer cutover
         run: |
           git config user.name "github-actions[bot]"
