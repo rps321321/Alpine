@@ -1,3 +1,4 @@
+use alpine_control_plane::sanitized_process_environment;
 use alpine_desktop::store::{CreateTask, DesktopStore, NewToolApproval};
 use alpine_desktop::workspace::{
     WorkspaceEdit, WorkspaceShell, edit_project_file, list_project_files, read_project_file,
@@ -93,10 +94,7 @@ fn an_exact_approved_shell_command_captures_output() {
         } else {
             "printf ALPINE_SHELL_OK".to_owned()
         },
-        // Windows PowerShell can pay a one-time cold-start cost on a clean CI
-        // runner. Keep the test bounded without treating startup latency as a
-        // command failure; production callers retain their requested timeout.
-        timeout_seconds: 30,
+        timeout_seconds: 10,
     };
     let approval = store
         .request_tool_approval(NewToolApproval {
@@ -112,4 +110,39 @@ fn an_exact_approved_shell_command_captures_output() {
     assert_eq!(result.exit_code, 0);
     assert!(result.stdout.contains("ALPINE_SHELL_OK"));
     assert!(result.stderr.is_empty());
+}
+
+#[test]
+fn shared_child_environment_preserves_system_context_without_secret_carriers() {
+    let environment = sanitized_process_environment();
+    assert!(environment.iter().any(|(name, _)| {
+        let name = name.to_string_lossy();
+        name.eq_ignore_ascii_case("PATH")
+    }));
+    #[cfg(windows)]
+    assert!(environment.iter().any(|(name, _)| {
+        let name = name.to_string_lossy();
+        name.eq_ignore_ascii_case("SystemRoot")
+    }));
+    for (name, _) in environment {
+        let upper = name.to_string_lossy().to_ascii_uppercase();
+        assert!(
+            [
+                "TOKEN",
+                "SECRET",
+                "PASSWORD",
+                "PASSWD",
+                "API_KEY",
+                "APIKEY",
+                "ACCESS_KEY",
+                "CREDENTIAL",
+                "DATABASE_URL",
+                "REDIS_URL",
+                "MONGO_URI",
+            ]
+            .iter()
+            .all(|marker| !upper.contains(marker)),
+            "secret-shaped environment variable survived: {upper}"
+        );
+    }
 }
