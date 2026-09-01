@@ -80,6 +80,7 @@ pub use tooling::{
 };
 pub use tuning::{TuningDisposition, TuningOptions, TuningReport};
 
+use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
@@ -88,6 +89,14 @@ use thiserror::Error;
 pub enum AlpineError {
     #[error("{0}")]
     InvalidInput(String),
+}
+
+/// Return the inherited process environment after removing common credential carriers.
+///
+/// Callers should combine this with `Command::env_clear` so the child receives the complete
+/// Windows/system environment it needs without inheriting secret-shaped variables.
+pub fn sanitized_process_environment() -> Vec<(OsString, OsString)> {
+    opencode::sanitized_environment()
 }
 
 pub struct Alpine;
