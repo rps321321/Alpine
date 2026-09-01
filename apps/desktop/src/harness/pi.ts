@@ -9,10 +9,16 @@ import { streamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import type { Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import type {
-  DesktopClient,
   MessageRole,
   TaskMessage,
   ToolApproval,
+  WorkspaceEdit,
+  WorkspaceEditResult,
+  WorkspaceEntry,
+  WorkspaceRead,
+  WorkspaceSearchMatch,
+  WorkspaceShell,
+  WorkspaceShellResult,
 } from "../desktop";
 
 export interface PiLocalModelConfig {
@@ -24,15 +30,53 @@ export interface PiLocalModelConfig {
   temperature: number;
 }
 
+export interface PiToolClient {
+  listProjectFiles(taskId: string, limit: number): Promise<WorkspaceEntry[]>;
+  readProjectFile(
+    taskId: string,
+    path: string,
+    offset?: number,
+    limit?: number,
+  ): Promise<WorkspaceRead>;
+  searchProjectFiles(
+    taskId: string,
+    query: string,
+    limit: number,
+  ): Promise<WorkspaceSearchMatch[]>;
+  requestToolApproval(input: {
+    taskId: string;
+    executionId: string;
+    toolCallId: string;
+    operation: "edit" | "shell";
+    proposal: Record<string, unknown>;
+  }): Promise<ToolApproval>;
+  waitForApproval(approvalId: string, signal?: AbortSignal): Promise<void>;
+  editProjectFile(
+    taskId: string,
+    executionId: string,
+    approvalId: string,
+    edit: WorkspaceEdit,
+  ): Promise<WorkspaceEditResult>;
+  runProjectShell(
+    taskId: string,
+    executionId: string,
+    approvalId: string,
+    shell: WorkspaceShell,
+  ): Promise<WorkspaceShellResult>;
+}
+
 export interface PiHarnessDependencies {
   streamFn?: StreamFn;
   taskId?: string;
   executionId?: string;
-  desktop?: DesktopClient;
+  tools?: PiToolClient;
   history?: Array<Pick<TaskMessage, "role" | "content" | "createdAtMs">>;
-  onApproval?: (approval: ToolApproval) => void | Promise<void>;
-  onApprovalSettled?: (approval: ToolApproval) => void | Promise<void>;
 }
+
+export type PiHarnessEvent =
+  | { type: "delta"; delta: string }
+  | { type: "message"; role: "assistant"; content: string }
+  | { type: "event"; kind: string; payload: unknown };
 
 const listFilesSchema = Type.Object({
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10_000 })),
@@ -100,13 +144,11 @@ export class PiHarness {
     dependencies: PiHarnessDependencies = {},
   ) {
     const tools =
-      dependencies.taskId && dependencies.executionId && dependencies.desktop
+      dependencies.taskId && dependencies.executionId && dependencies.tools
         ? createProjectTools(
             dependencies.taskId,
             dependencies.executionId,
-            dependencies.desktop,
-            dependencies.onApproval,
-            dependencies.onApprovalSettled,
+            dependencies.tools,
           )
         : [];
     this.descriptor = Object.freeze({
@@ -135,8 +177,10 @@ export class PiHarness {
     return this.agent.prompt(text);
   }
 
-  subscribe(listener: (event: AgentEvent) => void | Promise<void>) {
-    return this.agent.subscribe((event) => listener(event));
+  subscribe(listener: (event: PiHarnessEvent) => void | Promise<void>) {
+    return this.agent.subscribe(async (event) => {
+      for (const normalized of normalizePiEvent(event)) await listener(normalized);
+    });
   }
 
   abort() {
@@ -159,9 +203,7 @@ export class PiHarness {
 function createProjectTools(
   taskId: string,
   executionId: string,
-  desktop: DesktopClient,
-  onApproval?: (approval: ToolApproval) => void | Promise<void>,
-  onApprovalSettled?: (approval: ToolApproval) => void | Promise<void>,
+  tools: PiToolClient,
 ): AgentTool[] {
   const listFilesTool: AgentTool<typeof listFilesSchema> = {
     name: "list_files",
@@ -170,7 +212,7 @@ function createProjectTools(
       "List project-relative files and directories. Generated dependency/build directories are omitted.",
     parameters: listFilesSchema,
     async execute(_toolCallId, { limit }) {
-      const entries = await desktop.listProjectFiles(taskId, limit ?? 2_000);
+      const entries = await tools.listProjectFiles(taskId, limit ?? 2_000);
       const text = entries.length
         ? entries
             .map(
@@ -189,7 +231,7 @@ function createProjectTools(
       "Read an existing UTF-8 file inside the Selected Project. Use offset and limit to continue large files.",
     parameters: readFileSchema,
     async execute(_toolCallId, { path, offset, limit }) {
-      const result = await desktop.readProjectFile(taskId, path, offset, limit);
+      const result = await tools.readProjectFile(taskId, path, offset, limit);
       const continuation = result.truncated
         ? `\n\n[Showing lines ${result.startLine}-${result.endLine} of ${result.totalLines}. Continue with offset=${result.endLine + 1}.]`
         : "";
@@ -206,11 +248,7 @@ function createProjectTools(
       "Search for exact text inside UTF-8 files in the Selected Project.",
     parameters: searchFilesSchema,
     async execute(_toolCallId, { query, limit }) {
-      const matches = await desktop.searchProjectFiles(
-        taskId,
-        query,
-        limit ?? 200,
-      );
+      const matches = await tools.searchProjectFiles(taskId, query, limit ?? 200);
       const text = matches.length
         ? matches
             .map((match) => `${match.path}:${match.line}: ${match.preview}`)
@@ -232,22 +270,17 @@ function createProjectTools(
         oldText: edit.oldText,
         newText: edit.newText,
       };
-      const approval = await desktop.requestToolApproval({
+      const approval = await tools.requestToolApproval({
         taskId,
         executionId,
         toolCallId,
         operation: "edit",
         proposal,
       });
-      await onApproval?.(approval);
-      await waitForApproval(
-        desktop,
-        approval.id,
-        signal,
-        onApprovalSettled,
-      );
-      const result = await desktop.editProjectFile(
+      await tools.waitForApproval(approval.id, signal);
+      const result = await tools.editProjectFile(
         taskId,
+        executionId,
         approval.id,
         proposal,
       );
@@ -271,29 +304,28 @@ function createProjectTools(
         command: input.command,
         timeoutSeconds: input.timeoutSeconds ?? 120,
       };
-      const approval = await desktop.requestToolApproval({
+      const approval = await tools.requestToolApproval({
         taskId,
         executionId,
         toolCallId,
         operation: "shell",
         proposal: shell,
       });
-      await onApproval?.(approval);
       onUpdate?.({
         content: [{ type: "text", text: "Waiting for operator approval…" }],
         details: { approvalId: approval.id, state: "pending" },
       });
-      await waitForApproval(
-        desktop,
-        approval.id,
-        signal,
-        onApprovalSettled,
-      );
+      await tools.waitForApproval(approval.id, signal);
       onUpdate?.({
         content: [{ type: "text", text: "Approved. Running command…" }],
         details: { approvalId: approval.id, state: "executing" },
       });
-      const result = await desktop.runProjectShell(taskId, approval.id, shell);
+      const result = await tools.runProjectShell(
+        taskId,
+        executionId,
+        approval.id,
+        shell,
+      );
       const text = [
         `$ ${result.command}`,
         result.stdout,
@@ -315,44 +347,124 @@ function createProjectTools(
   ];
 }
 
-async function waitForApproval(
-  desktop: DesktopClient,
-  approvalId: string,
-  signal?: AbortSignal,
-  onSettled?: (approval: ToolApproval) => void | Promise<void>,
-) {
-  for (;;) {
-    if (signal?.aborted) throw new Error("Tool Approval wait was cancelled");
-    const approval = await desktop.getToolApproval(approvalId);
-    if (!approval) throw new Error("Tool Approval no longer exists");
-    if (approval.state === "approved") {
-      await onSettled?.(approval);
-      return;
+export function normalizePiEvent(event: AgentEvent): PiHarnessEvent[] {
+  switch (event.type) {
+    case "agent_start":
+      return [{ type: "event", kind: "agent.started", payload: {} }];
+    case "agent_end":
+      return [
+        {
+          type: "event",
+          kind: "agent.finished",
+          payload: { messageCount: event.messages.length },
+        },
+      ];
+    case "turn_start":
+      return [{ type: "event", kind: "turn.started", payload: {} }];
+    case "turn_end":
+      return [
+        {
+          type: "event",
+          kind: "turn.finished",
+          payload: { toolResultCount: event.toolResults.length },
+        },
+      ];
+    case "message_start":
+      return [
+        {
+          type: "event",
+          kind: "message.started",
+          payload: { role: event.message.role },
+        },
+      ];
+    case "message_update":
+      return event.assistantMessageEvent.type === "text_delta"
+        ? [{ type: "delta", delta: event.assistantMessageEvent.delta }]
+        : [];
+    case "message_end": {
+      const completed: PiHarnessEvent =
+        event.message.role === "assistant"
+          ? {
+              type: "event",
+              kind: "message.finished",
+              payload: {
+                role: "assistant",
+                stopReason: event.message.stopReason,
+                usage: event.message.usage,
+                error: event.message.errorMessage ?? null,
+              },
+            }
+          : {
+              type: "event",
+              kind: "message.finished",
+              payload: { role: event.message.role },
+            };
+      if (event.message.role !== "assistant") return [completed];
+      const content = agentMessageText(event.message);
+      return content
+        ? [{ type: "message", role: "assistant", content }, completed]
+        : [completed];
     }
-    if (approval.state === "denied") {
-      await onSettled?.(approval);
-      throw new Error("Operator denied the proposed operation");
-    }
-    if (["interrupted", "failed", "completed"].includes(approval.state)) {
-      await onSettled?.(approval);
-      throw new Error(`Tool Approval settled as ${approval.state}`);
-    }
-    await delay(200, signal);
+    case "tool_execution_start":
+      return [
+        {
+          type: "event",
+          kind: "tool.started",
+          payload: {
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            args: boundedPayload(event.args),
+          },
+        },
+      ];
+    case "tool_execution_update":
+      return [
+        {
+          type: "event",
+          kind: "tool.updated",
+          payload: {
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            details: boundedPayload(event.partialResult?.details ?? null),
+          },
+        },
+      ];
+    case "tool_execution_end":
+      return [
+        {
+          type: "event",
+          kind: "tool.finished",
+          payload: {
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            isError: event.isError,
+            details: boundedPayload(event.result?.details ?? null),
+          },
+        },
+      ];
   }
 }
 
-function delay(milliseconds: number, signal?: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(resolve, milliseconds);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timer);
-        reject(new Error("Operation aborted"));
-      },
-      { once: true },
-    );
-  });
+function boundedPayload(value: unknown): unknown {
+  const encoded = JSON.stringify(value);
+  if (!encoded || encoded.length <= 256_000) return value;
+  return { truncated: true, preview: encoded.slice(0, 256_000) };
+}
+
+function agentMessageText(message: AgentMessage): string {
+  if (message.role === "user") {
+    if (typeof message.content === "string") return message.content;
+    return message.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
+  }
+  if (message.role === "assistant")
+    return message.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("");
+  return "";
 }
 
 function userMessage(content: string): AgentMessage {
