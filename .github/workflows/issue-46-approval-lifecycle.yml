@@ -1,0 +1,116 @@
+name: issue-46-approval-lifecycle
+
+on:
+  push:
+    branches:
+      - codex/issue-46-execution-aggregate
+    paths:
+      - .github/workflows/issue-46-approval-lifecycle.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: codex/issue-46-execution-aggregate
+          fetch-depth: 0
+      - name: Apply approval lifecycle fix
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text(encoding="utf-8")
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected one match in {path}: {old[:100]!r}")
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          pi = Path("apps/desktop/src/harness/pi.ts")
+          replace_once(
+              pi,
+              '''  onApproval?: (approval: ToolApproval) => void | Promise<void>;\n}''',
+              '''  onApproval?: (approval: ToolApproval) => void | Promise<void>;\n  onApprovalSettled?: (approval: ToolApproval) => void | Promise<void>;\n}''',
+          )
+          replace_once(
+              pi,
+              '''            dependencies.desktop,\n            dependencies.onApproval,\n          )''',
+              '''            dependencies.desktop,\n            dependencies.onApproval,\n            dependencies.onApprovalSettled,\n          )''',
+          )
+          replace_once(
+              pi,
+              '''  desktop: DesktopClient,\n  onApproval?: (approval: ToolApproval) => void | Promise<void>,\n): AgentTool[] {''',
+              '''  desktop: DesktopClient,\n  onApproval?: (approval: ToolApproval) => void | Promise<void>,\n  onApprovalSettled?: (approval: ToolApproval) => void | Promise<void>,\n): AgentTool[] {''',
+          )
+          text = pi.read_text(encoding="utf-8")
+          old_wait = '''      await waitForApproval(desktop, approval.id, signal);'''
+          if text.count(old_wait) != 2:
+              raise SystemExit("expected two approval waits")
+          pi.write_text(
+              text.replace(
+                  old_wait,
+                  '''      await waitForApproval(\n        desktop,\n        approval.id,\n        signal,\n        onApprovalSettled,\n      );''',
+              ),
+              encoding="utf-8",
+          )
+          replace_once(
+              pi,
+              '''async function waitForApproval(\n  desktop: DesktopClient,\n  approvalId: string,\n  signal?: AbortSignal,\n) {''',
+              '''async function waitForApproval(\n  desktop: DesktopClient,\n  approvalId: string,\n  signal?: AbortSignal,\n  onSettled?: (approval: ToolApproval) => void | Promise<void>,\n) {''',
+          )
+          replace_once(
+              pi,
+              '''    if (approval.state === "approved") return;\n    if (approval.state === "denied")\n      throw new Error("Operator denied the proposed operation");\n    if (["interrupted", "failed", "completed"].includes(approval.state)) {\n      throw new Error(`Tool Approval settled as ${approval.state}`);\n    }''',
+              '''    if (approval.state === "approved") {\n      await onSettled?.(approval);\n      return;\n    }\n    if (approval.state === "denied") {\n      await onSettled?.(approval);\n      throw new Error("Operator denied the proposed operation");\n    }\n    if (["interrupted", "failed", "completed"].includes(approval.state)) {\n      await onSettled?.(approval);\n      throw new Error(`Tool Approval settled as ${approval.state}`);\n    }''',
+          )
+
+          execution = Path("apps/desktop/src/task-execution.ts")
+          replace_once(
+              execution,
+              '''        onApproval: async (approval) => {\n          if (!this.cancelled && this.execution?.state === "running")\n            await this.moveTo("waiting-for-approval");\n          this.input.onUpdate({ type: "approval", approval });\n        },''',
+              '''        onApproval: async (approval) => {\n          if (!this.cancelled && this.execution?.state === "running")\n            await this.moveTo("waiting-for-approval");\n          this.input.onUpdate({ type: "approval", approval });\n        },\n        onApprovalSettled: async () => {\n          if (\n            !this.cancelled &&\n            this.execution?.state === "waiting-for-approval"\n          )\n            await this.moveTo("running");\n        },''',
+          )
+          replace_once(
+              execution,
+              '''    if (\n      event.type === "tool_execution_start" &&\n      this.execution?.state === "waiting-for-approval"\n    ) {\n      await this.moveTo("running");\n    }\n''',
+              "",
+          )
+
+          tests = Path("apps/desktop/src/task-execution.test.ts")
+          replace_once(
+              tests,
+              '''  ExecutionState,\n  TaskMessage,\n} from "./desktop";''',
+              '''  ExecutionState,\n  TaskMessage,\n  ToolApproval,\n} from "./desktop";''',
+          )
+          text = tests.read_text(encoding="utf-8")
+          marker = '''  it("settles cancellation against the exact active Execution", async () => {'''
+          if text.count(marker) != 1:
+              raise SystemExit("cancellation test marker changed")
+          insertion = '''  it("returns the Execution to running after a Tool Approval settles", async () => {\n    const desktop = desktopDouble();\n    const pending: ToolApproval = {\n      id: "approval-1",\n      taskId: "task-1",\n      executionId: "execution-1",\n      toolCallId: "tool-1",\n      operation: "shell",\n      proposal: { command: "cargo test" },\n      state: "pending",\n      detail: null,\n      createdAtMs: 1,\n      decidedAtMs: null,\n      settledAtMs: null,\n    };\n    const approved: ToolApproval = {\n      ...pending,\n      state: "approved",\n      decidedAtMs: 2,\n    };\n    const createRuntime = vi.fn(async (_config, dependencies) => ({\n      subscribe: () => () => undefined,\n      async prompt() {\n        await dependencies.onApproval?.(pending);\n        await dependencies.onApprovalSettled?.(approved);\n      },\n      abort: vi.fn(),\n      steer: vi.fn(),\n      followUp: vi.fn(),\n    }));\n    const controller = createTaskExecution(\n      { desktop, task: task(), history: [], onUpdate: () => undefined },\n      {\n        createRuntime,\n        scheduleFrame: () => 1,\n        cancelFrame: () => undefined,\n      },\n    );\n\n    await expect(controller.run("Run the tests")).resolves.toMatchObject({\n      executionId: "execution-1",\n      state: "done",\n    });\n    const transition = vi.mocked(desktop.transitionExecution);\n    expect(transition).toHaveBeenNthCalledWith(\n      1,\n      "execution-1",\n      "preparing",\n      null,\n    );\n    expect(transition).toHaveBeenNthCalledWith(\n      2,\n      "execution-1",\n      "running",\n      null,\n    );\n    expect(transition).toHaveBeenNthCalledWith(\n      3,\n      "execution-1",\n      "waiting-for-approval",\n      null,\n    );\n    expect(transition).toHaveBeenNthCalledWith(\n      4,\n      "execution-1",\n      "running",\n      null,\n    );\n    expect(transition).toHaveBeenNthCalledWith(\n      5,\n      "execution-1",\n      "completed",\n      null,\n    );\n  });\n\n'''
+          tests.write_text(text.replace(marker, insertion + marker, 1), encoding="utf-8")
+          PY
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Verify approval lifecycle
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+      - name: Commit verified approval lifecycle
+        shell: bash
+        run: |
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop/src/harness/pi.ts apps/desktop/src/task-execution.ts apps/desktop/src/task-execution.test.ts
+          git commit -m "fix: resume executions after tool approval"
+          git push origin HEAD:codex/issue-46-execution-aggregate
