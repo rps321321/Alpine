@@ -2,6 +2,7 @@ pub mod assessment;
 pub mod browser;
 pub mod catalog;
 pub mod store;
+pub mod supervisor;
 pub mod workspace;
 
 use alpine_control_plane::{
@@ -23,11 +24,10 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use store::{
-    CreateExecution, CreateTask, DesktopProject, DesktopStore, DesktopTask, Execution,
-    ExecutionState, ModelRegistryEntry, ModelSource, NewExecutionSpecification, NewTaskEvent,
-    NewTaskMessage, NewToolApproval, RegisterModelArtifact, TaskDetail, TaskEvent, TaskMessage,
-    TaskStatus, ToolApproval, ToolApprovalDecision,
+    CreateTask, DesktopProject, DesktopStore, DesktopTask, ModelRegistryEntry, ModelSource,
+    NewExecutionSpecification, RegisterModelArtifact, TaskDetail, ToolApproval,
 };
+use supervisor::TaskSupervisor;
 use tauri::{AppHandle, Emitter, Manager, State};
 use workspace::{
     WorkspaceEdit, WorkspaceEditResult, WorkspaceEntry, WorkspaceRead, WorkspaceSearchMatch,
@@ -132,16 +132,16 @@ struct BootstrapSnapshot {
     runtime: RuntimeSnapshot,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PiLaunchConfig {
-    model_id: String,
-    base_url: String,
-    api_key: String,
-    context_window: u32,
-    max_tokens: u32,
-    temperature: f32,
-    specification: NewExecutionSpecification,
+pub(crate) struct PiLaunchConfig {
+    pub(crate) model_id: String,
+    pub(crate) base_url: String,
+    pub(crate) api_key: String,
+    pub(crate) context_window: u32,
+    pub(crate) max_tokens: u32,
+    pub(crate) temperature: f32,
+    pub(crate) specification: NewExecutionSpecification,
 }
 
 #[derive(Debug, Serialize)]
@@ -725,7 +725,7 @@ fn registered_default_selection(
     Ok(selection)
 }
 
-fn resolve_pi_launch_blocking(app: AppHandle) -> Result<PiLaunchConfig, String> {
+pub(crate) fn resolve_pi_launch_blocking(app: AppHandle) -> Result<PiLaunchConfig, String> {
     let settings = read_settings(&app)?;
     let selected = settings
         .default_model
@@ -797,13 +797,6 @@ fn resolve_pi_launch_blocking(app: AppHandle) -> Result<PiLaunchConfig, String> 
         temperature: 0.2,
         specification,
     })
-}
-
-#[tauri::command]
-async fn resolve_pi_launch(app: AppHandle) -> Result<PiLaunchConfig, String> {
-    tauri::async_runtime::spawn_blocking(move || resolve_pi_launch_blocking(app))
-        .await
-        .map_err(|error| format!("Pi launch worker failed: {error}"))?
 }
 
 fn decode_probe_response(body: &str) -> Result<(bool, Option<u64>), String> {
@@ -1595,28 +1588,6 @@ fn create_task(
 }
 
 #[tauri::command]
-fn create_execution(
-    store: State<'_, Arc<DesktopStore>>,
-    input: CreateExecution,
-) -> Result<Execution, String> {
-    store
-        .create_execution(input)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn transition_execution(
-    store: State<'_, Arc<DesktopStore>>,
-    execution_id: String,
-    state: ExecutionState,
-    failure: Option<String>,
-) -> Result<Execution, String> {
-    store
-        .transition_execution(&execution_id, state, failure.as_deref())
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
 fn delete_task(store: State<'_, Arc<DesktopStore>>, task_id: String) -> Result<(), String> {
     store
         .delete_task(&task_id)
@@ -1632,73 +1603,12 @@ fn load_task(
 }
 
 #[tauri::command]
-fn append_task_message(
-    store: State<'_, Arc<DesktopStore>>,
-    input: NewTaskMessage,
-) -> Result<TaskMessage, String> {
-    store
-        .append_message(input)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn append_task_event(
-    store: State<'_, Arc<DesktopStore>>,
-    input: NewTaskEvent,
-) -> Result<TaskEvent, String> {
-    store.append_event(input).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn set_task_status(
-    store: State<'_, Arc<DesktopStore>>,
-    task_id: String,
-    status: TaskStatus,
-    error: Option<String>,
-) -> Result<DesktopTask, String> {
-    store
-        .set_task_status(&task_id, status, error.as_deref())
-        .map_err(|cause| cause.to_string())
-}
-
-#[tauri::command]
-fn request_tool_approval(
-    store: State<'_, Arc<DesktopStore>>,
-    input: NewToolApproval,
-) -> Result<ToolApproval, String> {
-    store
-        .request_tool_approval(input)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn get_tool_approval(
-    store: State<'_, Arc<DesktopStore>>,
-    approval_id: String,
-) -> Result<Option<ToolApproval>, String> {
-    store
-        .get_tool_approval(&approval_id)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
 fn list_pending_approvals(
     store: State<'_, Arc<DesktopStore>>,
     task_id: String,
 ) -> Result<Vec<ToolApproval>, String> {
     store
         .list_pending_approvals(&task_id)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn decide_tool_approval(
-    store: State<'_, Arc<DesktopStore>>,
-    approval_id: String,
-    approved: bool,
-) -> Result<ToolApprovalDecision, String> {
-    store
-        .decide_tool_approval_with_event(&approval_id, approved)
         .map_err(|error| error.to_string())
 }
 
@@ -1734,37 +1644,11 @@ fn search_project_files(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-fn edit_project_file(
-    store: State<'_, Arc<DesktopStore>>,
-    task_id: String,
-    approval_id: String,
-    edit: WorkspaceEdit,
-) -> Result<WorkspaceEditResult, String> {
-    workspace::edit_project_file(&store, &task_id, &approval_id, edit)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn run_project_shell(
-    store: State<'_, Arc<DesktopStore>>,
-    task_id: String,
-    approval_id: String,
-    shell: WorkspaceShell,
-) -> Result<WorkspaceShellResult, String> {
-    let store = Arc::clone(store.inner());
-    tauri::async_runtime::spawn_blocking(move || {
-        workspace::run_project_shell(&store, &task_id, &approval_id, shell)
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("workspace shell worker failed: {error}"))?
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(DownloadRegistry::default())
+        .manage(Arc::new(TaskSupervisor::default()))
         .invoke_handler(tauri::generate_handler![
             bootstrap_snapshot,
             update_settings,
@@ -1774,7 +1658,6 @@ pub fn run() {
             set_default_model,
             start_runtime,
             stop_runtime,
-            resolve_pi_launch,
             run_runtime_probe,
             run_full_evaluation,
             download_model,
@@ -1786,22 +1669,23 @@ pub fn run() {
             create_project,
             list_tasks,
             create_task,
-            create_execution,
-            transition_execution,
             delete_task,
             load_task,
-            append_task_message,
-            append_task_event,
-            set_task_status,
-            request_tool_approval,
-            get_tool_approval,
+            supervisor::connect_agent_worker,
+            supervisor::subscribe_execution_updates,
+            supervisor::submit_prompt,
+            supervisor::cancel_execution,
+            supervisor::steer_execution,
+            supervisor::queue_follow_up,
+            supervisor::decide_tool_approval,
+            supervisor::agent_request_tool_approval,
+            supervisor::agent_execute_edit,
+            supervisor::agent_run_shell,
+            supervisor::agent_worker_event,
             list_pending_approvals,
-            decide_tool_approval,
             list_project_files,
             read_project_file,
             search_project_files,
-            edit_project_file,
-            run_project_shell,
             browser::browser_navigate,
             browser::browser_sync_surface,
             browser::browser_command,
@@ -1812,6 +1696,18 @@ pub fn run() {
             app.manage(Arc::new(DesktopStore::open(
                 data_dir.join("desktop.sqlite3"),
             )?));
+            #[cfg(desktop)]
+            tauri::WebviewWindowBuilder::new(
+                app,
+                "agent-worker",
+                tauri::WebviewUrl::App("agent.html".into()),
+            )
+            .title("Alpine Agent Worker")
+            .visible(false)
+            .skip_taskbar(true)
+            .resizable(false)
+            .inner_size(1.0, 1.0)
+            .build()?;
             let browser_hosts = read_settings(app.handle())
                 .map(|settings| settings.browser_allowed_hosts)
                 .unwrap_or_default();

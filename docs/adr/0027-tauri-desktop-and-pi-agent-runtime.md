@@ -22,6 +22,16 @@ evidence.
 
 ## Decision
 
+Amended 2026-09-01: a host-owned `TaskSupervisor` is now the sole execution
+lifecycle authority. The visible renderer submits prompt, cancellation,
+steering, follow-up and approval-decision intents and consumes typed execution
+projections over an ordered Tauri channel. It never receives the local runtime
+credential, constructs Pi, writes durable task facts or decides terminal state.
+Pi runs inside a hidden Alpine-owned worker webview whose command surface is
+bound to the `agent-worker` webview identity. The Rust host creates the immutable
+Execution, persists prompts and normalized results, governs local inference
+capacity, settles cancellation and wakes the exact approval continuation.
+
 Alpine Desktop uses Tauri 2 with a React and TypeScript webview. The existing
 Rust crate is linked into the Tauri host and remains authoritative for hardware,
 Profiles, the Model Registry, Inference Sessions, experiments, evidence,
@@ -74,14 +84,14 @@ client-asset transfer, while approved command results retain their own duration.
 They do not record raw prompts, secrets or private file contents.
 
 The renderer consumes an Alpine-owned Task execution interface rather than Pi
-events or Pi agent state. That module owns launch readiness, Pi construction,
-history restoration, event normalization, ordered persistence, animation-frame
-stream coalescing, cancellation settlement, steering, follow-up and local timing
-marks. The low-level Pi object is private to the adapter; its public descriptor
-reports only the selected model, bound Alpine tools and queue modes. A checked
-capability manifest lists supported and unsupported Pi behavior in Settings so
-experimental adapter status cannot be mistaken for terminal or AgentHarness
-parity.
+events or Pi agent state. The host supervisor owns launch readiness, immutable
+Execution creation, ordered persistence, cancellation settlement, approval
+continuations and terminal outcomes. The isolated worker owns only the in-memory
+Pi adapter loop and converts provider events into bounded Alpine worker events;
+it cannot write durable task history or transition an Execution directly. The
+low-level Pi object is private to the worker adapter, and a checked capability
+manifest prevents experimental adapter status from being mistaken for terminal
+or AgentHarness parity.
 
 `apps/desktop/scripts/live-pi-smoke.ts` is the bounded adapter integration
 probe. It accepts the already-resolved loopback endpoint, local credential and

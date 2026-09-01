@@ -19,6 +19,15 @@ consequential effects. Filesystem reachability is not operator consent.
 
 ## Decision
 
+Amended 2026-09-01: durable task facts are written only by the Tauri host's
+`TaskSupervisor` and workspace services. The visible renderer has no arbitrary
+message/event/status append commands. The isolated Agent Worker can propose
+exact effects and report bounded adapter events, but host-side webview identity
+checks, Execution identity checks and SQLite transitions remain authoritative.
+Approval decisions are persisted by the host and delivered directly to the
+specific waiting worker continuation; the database is not polled as a message
+queue.
+
 Alpine Desktop stores Desktop Project Records, Tasks, Task Messages and typed Task
 Events in an app-local SQLite database owned by the Tauri host. The database uses
 explicit schema migrations, foreign keys and ordered per-task sequences. Pi may

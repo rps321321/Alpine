@@ -12,10 +12,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
-use tauri::{
-    AppHandle, State, Webview,
-    ipc::Channel,
-};
+use tauri::{AppHandle, State, Webview, ipc::Channel};
 
 const MAIN_WEBVIEW: &str = "main";
 const AGENT_WORKER_WEBVIEW: &str = "agent-worker";
@@ -286,9 +283,7 @@ impl TaskSupervisor {
     fn verify_active(&self, task_id: &str, execution_id: &str) -> Result<(), String> {
         let state = self.state()?;
         match &state.active {
-            Some(active)
-                if active.task_id == task_id && active.execution_id == execution_id =>
-            {
+            Some(active) if active.task_id == task_id && active.execution_id == execution_id => {
                 Ok(())
             }
             Some(active) => Err(format!(
@@ -358,9 +353,7 @@ fn require_webview(webview: &Webview, expected: &str) -> Result<(), String> {
 fn validate_text(label: &str, value: &str, max: usize) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() || value.len() > max {
-        return Err(format!(
-            "{label} must contain between 1 and {max} bytes"
-        ));
+        return Err(format!("{label} must contain between 1 and {max} bytes"));
     }
     Ok(value.to_owned())
 }
@@ -526,11 +519,10 @@ pub async fn submit_prompt(
             .ok_or_else(|| "the Task does not exist".to_owned())?;
         let history = detail.messages;
         let launch_app = app.clone();
-        let launch = tauri::async_runtime::spawn_blocking(move || {
-            resolve_pi_launch_blocking(launch_app)
-        })
-        .await
-        .map_err(|error| format!("Agent launch worker failed: {error}"))??;
+        let launch =
+            tauri::async_runtime::spawn_blocking(move || resolve_pi_launch_blocking(launch_app))
+                .await
+                .map_err(|error| format!("Agent launch worker failed: {error}"))??;
         let execution = store
             .create_execution(CreateExecution {
                 task_id: task_id.clone(),
@@ -545,7 +537,12 @@ pub async fn submit_prompt(
         }) {
             Ok(message) => message,
             Err(error) => {
-                let _ = fail_execution(&store, &supervisor, execution.id.as_str(), error.to_string());
+                let _ = fail_execution(
+                    &store,
+                    &supervisor,
+                    execution.id.as_str(),
+                    error.to_string(),
+                );
                 return Err(error.to_string());
             }
         };
@@ -556,7 +553,12 @@ pub async fn submit_prompt(
         ) {
             Ok(execution) => execution,
             Err(error) => {
-                let _ = fail_execution(&store, &supervisor, execution.id.as_str(), error.to_string());
+                let _ = fail_execution(
+                    &store,
+                    &supervisor,
+                    execution.id.as_str(),
+                    error.to_string(),
+                );
                 return Err(error.to_string());
             }
         };
@@ -1052,11 +1054,7 @@ mod tests {
         assert!(supervisor.reserve("task-2").is_err());
         supervisor.activate("task-1", "execution-1").unwrap();
         assert!(supervisor.reserve("task-2").is_err());
-        assert!(
-            supervisor
-                .verify_active("task-1", "execution-1")
-                .is_ok()
-        );
+        assert!(supervisor.verify_active("task-1", "execution-1").is_ok());
         supervisor.finish("execution-1");
         assert!(supervisor.reserve("task-2").is_ok());
     }
@@ -1066,15 +1064,7 @@ mod tests {
         let supervisor = TaskSupervisor::default();
         supervisor.reserve("task-1").unwrap();
         supervisor.activate("task-1", "execution-1").unwrap();
-        assert!(
-            supervisor
-                .verify_active("task-2", "execution-1")
-                .is_err()
-        );
-        assert!(
-            supervisor
-                .verify_active("task-1", "execution-2")
-                .is_err()
-        );
+        assert!(supervisor.verify_active("task-2", "execution-1").is_err());
+        assert!(supervisor.verify_active("task-1", "execution-2").is_err());
     }
 }

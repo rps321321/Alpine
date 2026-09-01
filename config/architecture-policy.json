@@ -1,7 +1,11 @@
 {
   "schema": 1,
   "manifestDiscovery": {
-    "names": ["Cargo.toml", "package.json", "pyproject.toml"],
+    "names": [
+      "Cargo.toml",
+      "package.json",
+      "pyproject.toml"
+    ],
     "ignoredDirectories": [
       ".git",
       ".artifacts",
@@ -66,7 +70,10 @@
       "apps/desktop/src",
       "apps/desktop/scripts"
     ],
-    "ignoredDirectories": ["dist", "node_modules"],
+    "ignoredDirectories": [
+      "dist",
+      "node_modules"
+    ],
     "allowed": [
       {
         "path": "apps/desktop/src/harness/pi.ts",
@@ -77,39 +84,29 @@
         "reason": "The adapter's focused contract test may use Pi test types."
       }
     ],
-    "temporaryExceptions": [
-      {
-        "path": "apps/desktop/src/task-execution.ts",
-        "issue": 49,
-        "reason": "The legacy renderer orchestrator still consumes Pi AgentEvent until the Alpine runtime protocol replaces it."
-      },
-      {
-        "path": "apps/desktop/src/task-execution.test.ts",
-        "issue": 49,
-        "reason": "The legacy orchestrator tests still construct Pi AgentEvent fixtures until the Alpine runtime protocol replaces them."
-      }
-    ]
+    "temporaryExceptions": []
   },
   "rendererMutationBoundary": {
-    "roots": ["apps/desktop/src"],
-    "ignoredDirectories": ["dist", "node_modules"],
+    "roots": [
+      "apps/desktop/src"
+    ],
+    "ignoredDirectories": [
+      "dist",
+      "node_modules"
+    ],
     "symbols": [
+      "resolvePiLaunch",
+      "createExecution",
+      "transitionExecution",
       "appendTaskMessage",
       "appendTaskEvent",
-      "setTaskStatus"
+      "setTaskStatus",
+      "requestToolApproval",
+      "getToolApproval",
+      "editProjectFile",
+      "runProjectShell"
     ],
-    "temporaryAllowedFiles": [
-      {
-        "path": "apps/desktop/src/desktop.ts",
-        "issue": 47,
-        "reason": "The legacy renderer-facing interface still declares row-level mutation primitives until host-owned execution lands."
-      },
-      {
-        "path": "apps/desktop/src/task-execution.ts",
-        "issue": 47,
-        "reason": "The legacy renderer orchestrator still calls row-level mutation primitives until host-owned execution lands."
-      }
-    ]
+    "temporaryAllowedFiles": []
   },
   "generatedContracts": [],
   "manualVerification": [
