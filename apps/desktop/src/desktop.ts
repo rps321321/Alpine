@@ -113,6 +113,7 @@ export interface PiLaunchConfig {
   contextWindow: number;
   maxTokens: number;
   temperature: number;
+  specification: NewExecutionSpecification;
 }
 
 export interface RuntimeProbeReport {
@@ -228,11 +229,86 @@ export type TaskStatus =
   | "failed"
   | "interrupted";
 
+
+export type TaskSummary = "ready" | "active" | "done" | "needs-attention";
+
+export type ExecutionState =
+  | "queued"
+  | "preparing"
+  | "running"
+  | "waiting-for-approval"
+  | "cancelling"
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "interrupted";
+
+export interface NewExecutionSpecification {
+  modelRegistryId: string;
+  modelRepoId: string;
+  modelRevision: string | null;
+  modelFilename: string;
+  modelSha256: string;
+  sessionConfigSha256: string;
+  profileName: string;
+  profileSha256: string;
+  runtimeName: string;
+  runtimeIdentity: string;
+  adapterIdentity: string;
+  policyIdentity: string;
+  contextWindow: number;
+  maxTokens: number;
+  temperatureMillis: number;
+}
+
+export interface ExecutionSpecification {
+  id: string;
+  taskId: string;
+  modelRegistryId: string | null;
+  modelRepoId: string;
+  modelRevision: string | null;
+  modelFilename: string;
+  modelSha256: string | null;
+  sessionConfigSha256: string | null;
+  profileName: string;
+  profileSha256: string | null;
+  runtimeName: string;
+  runtimeIdentity: string;
+  adapterIdentity: string;
+  policyIdentity: string;
+  contextWindow: number;
+  maxTokens: number;
+  temperatureMillis: number;
+  legacyUnverified: boolean;
+  createdAtMs: number;
+}
+
+export interface Execution {
+  id: string;
+  taskId: string;
+  executionSpecId: string;
+  specification: ExecutionSpecification;
+  state: ExecutionState;
+  failure: string | null;
+  queuedAtMs: number;
+  startedAtMs: number | null;
+  finishedAtMs: number | null;
+  updatedAtMs: number;
+}
+
+export interface CreateExecutionInput {
+  taskId: string;
+  specification: NewExecutionSpecification;
+}
+
 export interface DesktopTask {
   id: string;
   projectId: string;
   title: string;
   status: TaskStatus;
+  summary?: TaskSummary;
+  activeExecutionId?: string | null;
+  latestExecutionId?: string | null;
   modelRepoId: string;
   modelFilename: string;
   profile: string;
@@ -254,6 +330,7 @@ export type MessageRole = "user" | "assistant" | "system";
 export interface TaskMessage {
   id: string;
   taskId: string;
+  executionId: string;
   sequence: number;
   role: MessageRole;
   content: string;
@@ -263,6 +340,7 @@ export interface TaskMessage {
 export interface TaskEvent {
   id: string;
   taskId: string;
+  executionId: string;
   sequence: number;
   kind: string;
   payload: unknown;
@@ -271,6 +349,7 @@ export interface TaskEvent {
 
 export interface TaskDetail {
   task: DesktopTask;
+  executions?: Execution[];
   messages: TaskMessage[];
   events: TaskEvent[];
 }
@@ -287,6 +366,7 @@ export type ApprovalState =
 export interface ToolApproval {
   id: string;
   taskId: string;
+  executionId: string;
   toolCallId: string;
   operation: "edit" | "shell";
   proposal: Record<string, unknown>;
@@ -425,13 +505,22 @@ export interface DesktopClient {
   listTasks(projectId: string): Promise<DesktopTask[]>;
   createTask(input: CreateTaskInput): Promise<DesktopTask>;
   loadTask(taskId: string): Promise<TaskDetail | null>;
+  createExecution(input: CreateExecutionInput): Promise<Execution>;
+  transitionExecution(
+    executionId: string,
+    state: ExecutionState,
+    failure?: string | null,
+  ): Promise<Execution>;
+  deleteTask(taskId: string): Promise<void>;
   appendTaskMessage(input: {
     taskId: string;
+    executionId: string;
     role: MessageRole;
     content: string;
   }): Promise<TaskMessage>;
   appendTaskEvent(input: {
     taskId: string;
+    executionId: string;
     kind: string;
     payload: unknown;
   }): Promise<TaskEvent>;
@@ -442,6 +531,7 @@ export interface DesktopClient {
   ): Promise<DesktopTask>;
   requestToolApproval(input: {
     taskId: string;
+    executionId: string;
     toolCallId: string;
     operation: "edit" | "shell";
     proposal: Record<string, unknown>;
@@ -538,6 +628,11 @@ export const tauriDesktopClient: DesktopClient = {
   listTasks: (projectId) => invoke<DesktopTask[]>("list_tasks", { projectId }),
   createTask: (input) => invoke<DesktopTask>("create_task", { input }),
   loadTask: (taskId) => invoke<TaskDetail | null>("load_task", { taskId }),
+  createExecution: (input) =>
+    invoke<Execution>("create_execution", { input }),
+  transitionExecution: (executionId, state, failure = null) =>
+    invoke<Execution>("transition_execution", { executionId, state, failure }),
+  deleteTask: (taskId) => invoke<void>("delete_task", { taskId }),
   appendTaskMessage: (input) =>
     invoke<TaskMessage>("append_task_message", { input }),
   appendTaskEvent: (input) => invoke<TaskEvent>("append_task_event", { input }),
@@ -822,6 +917,23 @@ export const previewDesktopClient: DesktopClient = {
       contextWindow: 16_384,
       maxTokens: 2_048,
       temperature: 0.2,
+      specification: {
+        modelRegistryId: "preview-model-1",
+        modelRepoId: "Blackfrost-AI/Qwen3.8-27B-ABLITERATED-GGUF",
+        modelRevision: "0123456789abcdef0123456789abcdef01234567",
+        modelFilename: "Qwen3.5-9B-Q4_K_M.gguf",
+        modelSha256: "a".repeat(64),
+        sessionConfigSha256: "b".repeat(64),
+        profileName: "stable-16k",
+        profileSha256: "c".repeat(64),
+        runtimeName: "official",
+        runtimeIdentity: "d".repeat(64),
+        adapterIdentity: "pi-agent-core@0.84.2",
+        policyIdentity: "alpine-desktop-project-tools-v1",
+        contextWindow: 16_384,
+        maxTokens: 2_048,
+        temperatureMillis: 200,
+      },
     };
   },
   async runRuntimeProbe() {
@@ -975,16 +1087,124 @@ export const previewDesktopClient: DesktopClient = {
       id: previewId("task"),
       ...input,
       status: "draft",
+      summary: "ready",
+      activeExecutionId: null,
+      latestExecutionId: null,
       error: null,
       createdAtMs: now,
       updatedAtMs: now,
     };
     previewTasks.unshift(task);
-    previewDetails.set(task.id, { task, messages: [], events: [] });
+    previewDetails.set(task.id, { task, executions: [], messages: [], events: [] });
     return task;
   },
   async loadTask(taskId) {
     return previewDetails.get(taskId) ?? null;
+  },
+  async createExecution(input) {
+    const detail = previewDetails.get(input.taskId);
+    if (!detail) throw new Error("Preview task does not exist");
+    if (
+      (detail.executions ?? []).some((execution) =>
+        [
+          "queued",
+          "preparing",
+          "running",
+          "waiting-for-approval",
+          "cancelling",
+        ].includes(execution.state),
+      )
+    )
+      throw new Error("Preview task already has an active Execution");
+    const now = Date.now();
+    const execution: Execution = {
+      id: previewId("execution"),
+      taskId: input.taskId,
+      executionSpecId: previewId("execution-spec"),
+      specification: {
+        id: "",
+        taskId: input.taskId,
+        ...input.specification,
+        modelRegistryId: input.specification.modelRegistryId,
+        modelSha256: input.specification.modelSha256,
+        sessionConfigSha256: input.specification.sessionConfigSha256,
+        profileSha256: input.specification.profileSha256,
+        legacyUnverified: false,
+        createdAtMs: now,
+      },
+      state: "queued",
+      failure: null,
+      queuedAtMs: now,
+      startedAtMs: null,
+      finishedAtMs: null,
+      updatedAtMs: now,
+    };
+    execution.specification.id = execution.executionSpecId;
+    detail.executions = [...(detail.executions ?? []), execution];
+    detail.task.summary = "active";
+    detail.task.status = "running";
+    detail.task.activeExecutionId = execution.id;
+    detail.task.latestExecutionId = execution.id;
+    return execution;
+  },
+  async transitionExecution(executionId, state, failure = null) {
+    const detail = [...previewDetails.values()].find((candidate) =>
+      (candidate.executions ?? []).some((execution) => execution.id === executionId),
+    );
+    const execution = detail?.executions?.find(
+      (candidate) => candidate.id === executionId,
+    );
+    if (!detail || !execution) throw new Error("Preview Execution does not exist");
+    const now = Date.now();
+    execution.state = state;
+    execution.failure = failure;
+    execution.startedAtMs ??= state === "queued" ? null : now;
+    execution.finishedAtMs = [
+      "completed",
+      "cancelled",
+      "failed",
+      "interrupted",
+    ].includes(state)
+      ? now
+      : null;
+    execution.updatedAtMs = now;
+    const active = [
+      "queued",
+      "preparing",
+      "running",
+      "waiting-for-approval",
+      "cancelling",
+    ].includes(state);
+    detail.task.activeExecutionId = active ? execution.id : null;
+    detail.task.latestExecutionId = execution.id;
+    detail.task.summary = active
+      ? "active"
+      : state === "completed"
+        ? "done"
+        : state === "failed" || state === "interrupted"
+          ? "needs-attention"
+          : "ready";
+    detail.task.status = active
+      ? state === "cancelling"
+        ? "cancelling"
+        : "running"
+      : state === "completed"
+        ? "completed"
+        : state === "failed"
+          ? "failed"
+          : state === "interrupted"
+            ? "interrupted"
+            : "cancelled";
+    detail.task.error = failure;
+    return execution;
+  },
+  async deleteTask(taskId) {
+    const index = previewTasks.findIndex((task) => task.id === taskId);
+    if (index >= 0) previewTasks.splice(index, 1);
+    previewDetails.delete(taskId);
+    for (const [id, approval] of previewApprovals) {
+      if (approval.taskId === taskId) previewApprovals.delete(id);
+    }
   },
   async appendTaskMessage(input) {
     const detail = previewDetails.get(input.taskId);
@@ -1052,6 +1272,7 @@ export const previewDesktopClient: DesktopClient = {
     const event: TaskEvent = {
       id: previewId("event"),
       taskId: approval.taskId,
+      executionId: approval.executionId,
       sequence: detail.events.length + 1,
       kind: "approval.decided",
       payload: {

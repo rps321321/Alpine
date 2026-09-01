@@ -27,6 +27,7 @@ export interface PiLocalModelConfig {
 export interface PiHarnessDependencies {
   streamFn?: StreamFn;
   taskId?: string;
+  executionId?: string;
   desktop?: DesktopClient;
   history?: Array<Pick<TaskMessage, "role" | "content" | "createdAtMs">>;
   onApproval?: (approval: ToolApproval) => void | Promise<void>;
@@ -98,9 +99,10 @@ export class PiHarness {
     dependencies: PiHarnessDependencies = {},
   ) {
     const tools =
-      dependencies.taskId && dependencies.desktop
+      dependencies.taskId && dependencies.executionId && dependencies.desktop
         ? createProjectTools(
             dependencies.taskId,
+            dependencies.executionId,
             dependencies.desktop,
             dependencies.onApproval,
           )
@@ -154,6 +156,7 @@ export class PiHarness {
 
 function createProjectTools(
   taskId: string,
+  executionId: string,
   desktop: DesktopClient,
   onApproval?: (approval: ToolApproval) => void | Promise<void>,
 ): AgentTool[] {
@@ -228,6 +231,7 @@ function createProjectTools(
       };
       const approval = await desktop.requestToolApproval({
         taskId,
+        executionId,
         toolCallId,
         operation: "edit",
         proposal,
@@ -261,6 +265,7 @@ function createProjectTools(
       };
       const approval = await desktop.requestToolApproval({
         taskId,
+        executionId,
         toolCallId,
         operation: "shell",
         proposal: shell,

@@ -395,11 +395,10 @@ export function App({ desktop }: { desktop: DesktopClient }) {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const matchesFilter = (task: DesktopTask) => {
-      if (taskFilter === "active")
-        return task.status === "running" || task.status === "cancelling";
-      if (taskFilter === "completed") return task.status === "completed";
-      if (taskFilter === "attention")
-        return task.status === "failed" || task.status === "interrupted";
+      const summary = projectedTaskSummary(task);
+      if (taskFilter === "active") return summary === "active";
+      if (taskFilter === "completed") return summary === "done";
+      if (taskFilter === "attention") return summary === "needs-attention";
       return true;
     };
     const visible = tasks.filter(
@@ -1054,7 +1053,7 @@ export function App({ desktop }: { desktop: DesktopClient }) {
                     >
                       <ChatCircleDots size={14} />
                       <span>{task.title}</span>
-                      <small>{friendlyTaskStatus(task.status)}</small>
+                      <small>{friendlyTaskSummary(projectedTaskSummary(task))}</small>
                     </button>
                   ))}
                 </section>
@@ -1140,8 +1139,8 @@ export function App({ desktop }: { desktop: DesktopClient }) {
               <span>Browser</span>
             </button>
             {taskDetail && (
-              <span className={`task-state ${taskDetail.task.status}`}>
-                {friendlyTaskStatus(taskDetail.task.status)}
+              <span className={`task-state ${projectedTaskSummary(taskDetail.task)}`}>
+                {friendlyTaskSummary(projectedTaskSummary(taskDetail.task))}
               </span>
             )}
             <button
@@ -3368,18 +3367,24 @@ function titleFor(view: View) {
   )[view];
 }
 
-function friendlyTaskStatus(status: DesktopTask["status"]) {
+function projectedTaskSummary(task: DesktopTask) {
+  if (task.summary) return task.summary;
+  if (task.status === "running" || task.status === "cancelling") return "active";
+  if (task.status === "completed") return "done";
+  if (task.status === "failed" || task.status === "interrupted")
+    return "needs-attention";
+  return "ready";
+}
+
+function friendlyTaskSummary(summary: ReturnType<typeof projectedTaskSummary>) {
   return (
     {
-      draft: "Draft",
-      running: "Working",
-      cancelling: "Stopping",
-      completed: "Done",
-      cancelled: "Stopped",
-      failed: "Needs attention",
-      interrupted: "Interrupted",
+      ready: "Ready",
+      active: "Working",
+      done: "Done",
+      "needs-attention": "Needs attention",
     } as const
-  )[status];
+  )[summary];
 }
 
 function friendlyDownloadState(state: DownloadedModel["state"]) {

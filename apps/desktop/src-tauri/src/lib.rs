@@ -23,9 +23,10 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use store::{
-    CreateTask, DesktopProject, DesktopStore, DesktopTask, ModelRegistryEntry, ModelSource,
-    NewTaskEvent, NewTaskMessage, NewToolApproval, RegisterModelArtifact, TaskDetail, TaskEvent,
-    TaskMessage, TaskStatus, ToolApproval, ToolApprovalDecision,
+    CreateExecution, CreateTask, DesktopProject, DesktopStore, DesktopTask, Execution,
+    ExecutionState, ModelRegistryEntry, ModelSource, NewExecutionSpecification, NewTaskEvent,
+    NewTaskMessage, NewToolApproval, RegisterModelArtifact, TaskDetail, TaskEvent, TaskMessage,
+    TaskStatus, ToolApproval, ToolApprovalDecision,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use workspace::{
@@ -34,6 +35,8 @@ use workspace::{
 };
 
 const SETTINGS_SCHEMA: u32 = 4;
+const PI_ADAPTER_IDENTITY: &str = "pi-agent-core@0.84.2";
+const PI_POLICY_IDENTITY: &str = "alpine-desktop-project-tools-v1";
 
 fn settings_schema() -> u32 {
     SETTINGS_SCHEMA
@@ -138,6 +141,7 @@ struct PiLaunchConfig {
     context_window: u32,
     max_tokens: u32,
     temperature: f32,
+    specification: NewExecutionSpecification,
 }
 
 #[derive(Debug, Serialize)]
@@ -757,13 +761,41 @@ fn resolve_pi_launch_blocking(app: AppHandle) -> Result<PiLaunchConfig, String> 
     if api_key.is_empty() {
         return Err("the local runtime credential is empty".to_owned());
     }
+    let model_registry_id = selected.registry_id.ok_or_else(|| {
+        "the selected default model has no verified Model Registry identity".to_owned()
+    })?;
+    let model_sha256 = selected
+        .sha256
+        .ok_or_else(|| "the selected default model has no verified SHA-256 identity".to_owned())?;
+    let model_id = selected.filename;
+    let runtime_identity = file_sha256(&resolved.server)?;
+    let context_window = resolved.profile.context;
+    let max_tokens = resolved.profile.output;
+    let specification = NewExecutionSpecification {
+        model_registry_id,
+        model_repo_id: selected.repo_id,
+        model_revision: selected.revision,
+        model_filename: model_id.clone(),
+        model_sha256,
+        session_config_sha256: resolved.session_config_sha256,
+        profile_name: resolved.profile_name,
+        profile_sha256: resolved.profile_sha256,
+        runtime_name: resolved.runtime_name,
+        runtime_identity,
+        adapter_identity: PI_ADAPTER_IDENTITY.to_owned(),
+        policy_identity: PI_POLICY_IDENTITY.to_owned(),
+        context_window,
+        max_tokens,
+        temperature_millis: 200,
+    };
     Ok(PiLaunchConfig {
-        model_id: selected.filename,
+        model_id,
         base_url: resolved.base_url,
         api_key,
-        context_window: resolved.profile.context,
-        max_tokens: resolved.profile.output,
+        context_window,
+        max_tokens,
         temperature: 0.2,
+        specification,
     })
 }
 
@@ -1563,6 +1595,35 @@ fn create_task(
 }
 
 #[tauri::command]
+fn create_execution(
+    store: State<'_, Arc<DesktopStore>>,
+    input: CreateExecution,
+) -> Result<Execution, String> {
+    store
+        .create_execution(input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn transition_execution(
+    store: State<'_, Arc<DesktopStore>>,
+    execution_id: String,
+    state: ExecutionState,
+    failure: Option<String>,
+) -> Result<Execution, String> {
+    store
+        .transition_execution(&execution_id, state, failure.as_deref())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_task(store: State<'_, Arc<DesktopStore>>, task_id: String) -> Result<(), String> {
+    store
+        .delete_task(&task_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn load_task(
     store: State<'_, Arc<DesktopStore>>,
     task_id: String,
@@ -1725,6 +1786,9 @@ pub fn run() {
             create_project,
             list_tasks,
             create_task,
+            create_execution,
+            transition_execution,
+            delete_task,
             load_task,
             append_task_message,
             append_task_event,
