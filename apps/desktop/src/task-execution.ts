@@ -172,7 +172,7 @@ export class TaskExecution {
     } catch (error) {
       const message = asError(error).message;
       if (this.cancelled) return await this.settleCancelled();
-      if (this.execution && !this.execution.state.endsWith("ed")) {
+      if (this.execution && !isTerminal(this.execution.state)) {
         await this.moveTo("failed", message).catch(() => undefined);
       }
       this.input.onUpdate({ type: "error", scope: "run", message });
@@ -212,8 +212,7 @@ export class TaskExecution {
   private async settleCancelled(): Promise<TaskExecutionResult> {
     await this.cancelStatus;
     if (this.execution && !isTerminal(this.execution.state)) {
-      const next = this.execution.state === "queued" ? "cancelled" : "cancelled";
-      await this.moveTo(next).catch(() => undefined);
+      await this.moveTo("cancelled").catch(() => undefined);
     }
     await this.recordMetricEvent("cancelled").catch(() => undefined);
     this.flushResponse();

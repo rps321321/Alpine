@@ -280,6 +280,38 @@ describe("Task execution", () => {
     );
   });
 
+  it("fails a queued Execution when preparation persistence fails", async () => {
+    const desktop = desktopDouble();
+    const transition = vi.mocked(desktop.transitionExecution);
+    transition
+      .mockRejectedValueOnce(new Error("state store unavailable"))
+      .mockResolvedValueOnce(execution("failed"));
+    const createRuntime = vi.fn().mockResolvedValue(runtimeThatEmits([]));
+    const controller = createTaskExecution(
+      { desktop, task: task(), history: [], onUpdate: () => undefined },
+      {
+        createRuntime,
+        scheduleFrame: () => 1,
+        cancelFrame: () => undefined,
+      },
+    );
+
+    const result = await controller.run("Continue");
+
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      executionId: "execution-1",
+      state: "error",
+      error: "state store unavailable",
+    });
+    expect(transition).toHaveBeenNthCalledWith(
+      2,
+      "execution-1",
+      "failed",
+      "state store unavailable",
+    );
+  });
+
   it("records failure on the Execution without mutating Task lifecycle fields", async () => {
     const desktop = desktopDouble();
     const history: TaskMessage[] = [];

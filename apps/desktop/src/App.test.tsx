@@ -1105,6 +1105,7 @@ describe("Alpine Desktop primary workflow", () => {
         {
           id: "message-1",
           taskId: task.id,
+          executionId: "legacy-execution-task-1",
           sequence: 1,
           role: "user",
           content: "Tighten the tests",
@@ -1117,6 +1118,7 @@ describe("Alpine Desktop primary workflow", () => {
       {
         id: "approval-1",
         taskId: task.id,
+        executionId: "legacy-execution-task-1",
         toolCallId: "tool-1",
         operation: "shell",
         proposal: { command: "npm.cmd test" },
