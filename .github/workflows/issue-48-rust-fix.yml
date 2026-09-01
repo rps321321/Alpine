@@ -17,13 +17,13 @@ jobs:
         with:
           fetch-depth: 0
       - name: Apply Task Journal Rust hardening
-        run: python scripts/fix_issue_48_rust_v2.py
+        run: python scripts/fix_issue_48_rust_v3.py
       - name: Install Rust formatter
         run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt
       - name: Format Rust
         run: cargo +1.88.0 fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
       - name: Retire one-shot scripts
-        run: rm scripts/fix_issue_48_rust.py scripts/fix_issue_48_rust_v2.py
+        run: rm scripts/fix_issue_48_rust.py scripts/fix_issue_48_rust_v2.py scripts/fix_issue_48_rust_v3.py
       - name: Commit Rust hardening
         run: |
           git config user.name "github-actions[bot]"
