@@ -2,17 +2,11 @@
 
 use super::{
     DesktopStore, DesktopTask, StoreError, TaskStatus, new_id, now_ms, validate_nonempty,
-    validate_optional, validate_optional_identifier,
+    validate_optional_identifier,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
-
-const LEGACY_RUNTIME_IDENTITY: &str = "legacy-unverified";
-const LEGACY_ADAPTER_IDENTITY: &str = "legacy-unverified";
-const LEGACY_POLICY_IDENTITY: &str = "legacy-unverified";
-const LEGACY_AMBIGUITY: &str =
-    "Legacy task activity had no authoritative Execution lifecycle or exact execution identity";
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -327,9 +321,10 @@ impl DesktopStore {
             )));
         }
         let timestamp = now_ms();
-        let started_at_ms = current
-            .started_at_ms
-            .or_else(|| (!matches!(next, ExecutionState::Queued)).then_some(timestamp));
+        let started_at_ms = current.started_at_ms.or_else(|| {
+            (!matches!(next, ExecutionState::Queued | ExecutionState::Cancelled))
+                .then_some(timestamp)
+        });
         let finished_at_ms = next.is_terminal().then_some(timestamp);
         let changed = transaction.execute(
             "UPDATE executions
@@ -449,10 +444,10 @@ fn validate_sha256<'a>(label: &str, value: &'a str) -> Result<&'a str, StoreErro
     }
 }
 
-fn validate_transition_failure<'a>(
+fn validate_transition_failure(
     next: ExecutionState,
-    failure: Option<&'a str>,
-) -> Result<Option<&'a str>, StoreError> {
+    failure: Option<&str>,
+) -> Result<Option<&str>, StoreError> {
     match next {
         ExecutionState::Failed | ExecutionState::Interrupted => failure
             .map(|value| validate_nonempty("Execution failure", value, 64 * 1024))
@@ -769,7 +764,7 @@ pub(super) fn migrate_v4(connection: &Connection) -> Result<(), StoreError> {
                            'Legacy task ended without a recorded failure detail')
                    ELSE NULL
                END,
-               tasks.created_at_ms, NULL, NULL, tasks.updated_at_ms
+               tasks.created_at_ms, NULL, tasks.updated_at_ms, tasks.updated_at_ms
         FROM tasks
         WHERE EXISTS (
             SELECT 1 FROM execution_specs WHERE execution_specs.task_id = tasks.id

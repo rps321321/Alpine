@@ -79,7 +79,8 @@ export class TaskExecution {
   private frame: number | null = null;
   private persistenceQueue: Promise<void> = Promise.resolve();
   private persistenceFailure: Error | null = null;
-  private cancelStatus: Promise<unknown> = Promise.resolve();
+  private cancellationFailure: Error | null = null;
+  private cancelStatus: Promise<void> = Promise.resolve();
   private transitionQueue: Promise<void> = Promise.resolve();
   private runStartedAt = 0;
 
@@ -199,20 +200,41 @@ export class TaskExecution {
     this.cancelled = true;
     this.runtime?.abort();
     this.cancelStatus = this.execution
-      ? this.moveTo("cancelling").catch((error: unknown) => {
-          this.input.onUpdate({
-            type: "error",
-            scope: "persistence",
-            message: `Cancellation state could not be saved: ${asError(error).message}`,
-          });
-        })
+      ? this.moveTo("cancelling")
+          .then(() => undefined)
+          .catch((error: unknown) => {
+            this.cancellationFailure = new Error(
+              `Cancellation state could not be saved: ${asError(error).message}`,
+            );
+            this.input.onUpdate({
+              type: "error",
+              scope: "persistence",
+              message: this.cancellationFailure.message,
+            });
+          })
       : Promise.resolve();
   }
 
   private async settleCancelled(): Promise<TaskExecutionResult> {
     await this.cancelStatus;
+    if (this.cancellationFailure) {
+      const message = this.cancellationFailure.message;
+      if (this.execution && !isTerminal(this.execution.state)) {
+        await this.moveTo("failed", message).catch(() => undefined);
+      }
+      this.flushResponse();
+      return this.result("error", message);
+    }
     if (this.execution && !isTerminal(this.execution.state)) {
-      await this.moveTo("cancelled").catch(() => undefined);
+      try {
+        await this.moveTo("cancelled");
+      } catch (error) {
+        const message = `Cancellation state could not be saved: ${asError(error).message}`;
+        this.input.onUpdate({ type: "error", scope: "persistence", message });
+        await this.moveTo("failed", message).catch(() => undefined);
+        this.flushResponse();
+        return this.result("error", message);
+      }
     }
     await this.recordMetricEvent("cancelled").catch(() => undefined);
     this.flushResponse();
@@ -237,7 +259,9 @@ export class TaskExecution {
     const operation = this.transitionQueue.then(async () => {
       if (!this.execution) throw new Error("Execution identity is unavailable");
       if (this.execution.state === state) return this.execution;
-      if (isTerminal(this.execution.state)) return this.execution;
+      if (isTerminal(this.execution.state)) {
+        throw new Error(`Execution is already ${this.execution.state}`);
+      }
       this.execution = await this.input.desktop.transitionExecution(
         this.execution.id,
         state,

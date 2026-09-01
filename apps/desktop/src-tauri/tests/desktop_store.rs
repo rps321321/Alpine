@@ -164,6 +164,24 @@ fn cancellation_is_a_validated_execution_lifecycle() {
 }
 
 #[test]
+fn queued_cancellation_does_not_invent_a_start_timestamp() {
+    let (_temporary, store, task_id) = setup();
+    let execution = store
+        .create_execution(CreateExecution {
+            task_id,
+            specification: specification('a'),
+        })
+        .unwrap();
+
+    let cancelled = store
+        .transition_execution(execution.id.as_str(), ExecutionState::Cancelled, None)
+        .unwrap();
+
+    assert_eq!(cancelled.started_at_ms, None);
+    assert!(cancelled.finished_at_ms.is_some());
+}
+
+#[test]
 fn restart_interrupts_the_exact_execution_and_its_pending_approval() {
     let temporary = tempfile::tempdir().unwrap();
     let project_root = temporary.path().join("selected-project");
@@ -376,6 +394,7 @@ fn schema_three_history_migrates_to_explicitly_unverified_synthetic_execution() 
     let execution = &detail.executions[0];
     assert_eq!(execution.id.as_str(), "legacy-execution-task-legacy");
     assert!(execution.specification.legacy_unverified);
+    assert_eq!(execution.finished_at_ms, Some(3));
     assert_eq!(
         execution.specification.runtime_identity,
         "legacy-unverified"

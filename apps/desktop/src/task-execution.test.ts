@@ -280,6 +280,52 @@ describe("Task execution", () => {
     );
   });
 
+  it("does not claim cancellation when its durable transition fails", async () => {
+    const desktop = desktopDouble();
+    let releaseLaunch!: (runtime: AgentRuntime) => void;
+    const runtimePromise = new Promise<AgentRuntime>((resolve) => {
+      releaseLaunch = resolve;
+    });
+    const createRuntime = vi.fn(() => runtimePromise);
+    const controller = createTaskExecution(
+      { desktop, task: task(), history: [], onUpdate: () => undefined },
+      {
+        createRuntime,
+        scheduleFrame: () => 1,
+        cancelFrame: () => undefined,
+      },
+    );
+
+    const run = controller.run("Wait for launch");
+    await vi.waitFor(() => expect(createRuntime).toHaveBeenCalled());
+    vi.mocked(desktop.transitionExecution).mockRejectedValueOnce(
+      new Error("state store unavailable"),
+    );
+    controller.cancel();
+    releaseLaunch(runtimeThatEmits([]));
+
+    await expect(run).resolves.toMatchObject({
+      executionId: "execution-1",
+      state: "error",
+      error: "Cancellation state could not be saved: state store unavailable",
+    });
+    expect(desktop.transitionExecution).toHaveBeenCalledWith(
+      "execution-1",
+      "cancelling",
+      null,
+    );
+    expect(desktop.transitionExecution).toHaveBeenCalledWith(
+      "execution-1",
+      "failed",
+      "Cancellation state could not be saved: state store unavailable",
+    );
+    expect(desktop.transitionExecution).not.toHaveBeenCalledWith(
+      "execution-1",
+      "cancelled",
+      null,
+    );
+  });
+
   it("fails a queued Execution when preparation persistence fails", async () => {
     const desktop = desktopDouble();
     const transition = vi.mocked(desktop.transitionExecution);

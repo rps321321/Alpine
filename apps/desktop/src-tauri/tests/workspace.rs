@@ -1,11 +1,34 @@
 use alpine_control_plane::sanitized_process_environment;
-use alpine_desktop::store::{CreateTask, DesktopStore, NewToolApproval};
+use alpine_desktop::store::{
+    CreateExecution, CreateTask, DesktopStore, ExecutionId, NewExecutionSpecification,
+    NewToolApproval,
+};
 use alpine_desktop::workspace::{
     WorkspaceEdit, WorkspaceShell, edit_project_file, list_project_files, read_project_file,
     run_project_shell, search_project_files,
 };
 
-fn setup() -> (tempfile::TempDir, DesktopStore, String) {
+fn execution_specification() -> NewExecutionSpecification {
+    NewExecutionSpecification {
+        model_registry_id: "model-workspace".to_owned(),
+        model_repo_id: "Qwen/Qwen-GGUF".to_owned(),
+        model_revision: Some("a".repeat(40)),
+        model_filename: "model.gguf".to_owned(),
+        model_sha256: "b".repeat(64),
+        session_config_sha256: "c".repeat(64),
+        profile_name: "stable-16k".to_owned(),
+        profile_sha256: "d".repeat(64),
+        runtime_name: "official".to_owned(),
+        runtime_identity: "e".repeat(64),
+        adapter_identity: "pi-agent-core@0.84.2".to_owned(),
+        policy_identity: "alpine-desktop-project-tools-v1".to_owned(),
+        context_window: 16_384,
+        max_tokens: 2_048,
+        temperature_millis: 200,
+    }
+}
+
+fn setup() -> (tempfile::TempDir, DesktopStore, String, ExecutionId) {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("selected-project");
     std::fs::create_dir(&root).unwrap();
@@ -29,12 +52,18 @@ fn setup() -> (tempfile::TempDir, DesktopStore, String) {
             profile: "stable-16k".to_owned(),
         })
         .unwrap();
-    (temporary, store, task.id)
+    let execution = store
+        .create_execution(CreateExecution {
+            task_id: task.id.clone(),
+            specification: execution_specification(),
+        })
+        .unwrap();
+    (temporary, store, task.id, execution.id)
 }
 
 #[test]
 fn read_list_and_search_stay_inside_the_selected_project() {
-    let (_temporary, store, task_id) = setup();
+    let (_temporary, store, task_id, _execution_id) = setup();
 
     let files = list_project_files(&store, &task_id, 100).unwrap();
     assert_eq!(
@@ -58,7 +87,7 @@ fn read_list_and_search_stay_inside_the_selected_project() {
 
 #[test]
 fn an_exact_approved_edit_returns_a_reviewable_diff() {
-    let (temporary, store, task_id) = setup();
+    let (temporary, store, task_id, execution_id) = setup();
     let edit = WorkspaceEdit {
         path: "README.md".to_owned(),
         old_text: "run alpine-verify".to_owned(),
@@ -68,6 +97,7 @@ fn an_exact_approved_edit_returns_a_reviewable_diff() {
     let approval = store
         .request_tool_approval(NewToolApproval {
             task_id: task_id.clone(),
+            execution_id: execution_id.clone(),
             tool_call_id: "edit-1".to_owned(),
             operation: "edit".to_owned(),
             proposal,
@@ -87,7 +117,7 @@ fn an_exact_approved_edit_returns_a_reviewable_diff() {
 
 #[test]
 fn an_exact_approved_shell_command_captures_output() {
-    let (_temporary, store, task_id) = setup();
+    let (_temporary, store, task_id, execution_id) = setup();
     let shell = WorkspaceShell {
         command: if cfg!(windows) {
             "Write-Output ALPINE_SHELL_OK".to_owned()
@@ -99,6 +129,7 @@ fn an_exact_approved_shell_command_captures_output() {
     let approval = store
         .request_tool_approval(NewToolApproval {
             task_id: task_id.clone(),
+            execution_id: execution_id.clone(),
             tool_call_id: "shell-1".to_owned(),
             operation: "shell".to_owned(),
             proposal: serde_json::to_value(&shell).unwrap(),
