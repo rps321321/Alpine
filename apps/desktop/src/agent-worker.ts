@@ -223,14 +223,14 @@ function toolClient(): PiToolClient {
     requestToolApproval: (input) =>
       invoke<ToolApproval>("agent_request_tool_approval", { input }),
     waitForApproval,
-    editProjectFile: (taskId, executionId, approvalId, edit: WorkspaceEdit) =>
+    executeApprovedEdit: (taskId, executionId, approvalId, edit: WorkspaceEdit) =>
       invoke<WorkspaceEditResult>("agent_execute_edit", {
         taskId,
         executionId,
         approvalId,
         edit,
       }),
-    runProjectShell: (
+    executeApprovedShell: (
       taskId,
       executionId,
       approvalId,

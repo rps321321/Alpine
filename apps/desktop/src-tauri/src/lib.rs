@@ -29,10 +29,7 @@ use store::{
 };
 use supervisor::TaskSupervisor;
 use tauri::{AppHandle, Emitter, Manager, State};
-use workspace::{
-    WorkspaceEdit, WorkspaceEditResult, WorkspaceEntry, WorkspaceRead, WorkspaceSearchMatch,
-    WorkspaceShell, WorkspaceShellResult,
-};
+use workspace::{WorkspaceEntry, WorkspaceRead, WorkspaceSearchMatch};
 
 const SETTINGS_SCHEMA: u32 = 4;
 const PI_ADAPTER_IDENTITY: &str = "pi-agent-core@0.84.2";

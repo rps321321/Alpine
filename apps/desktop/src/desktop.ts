@@ -1316,30 +1316,4 @@ export const previewDesktopClient: DesktopClient = {
   async searchProjectFiles(_taskId, query) {
     return [{ path: "CONTEXT.md", line: 1, preview: `Matched ${query}` }];
   },
-  async editProjectFile(_taskId, approvalId, edit) {
-    const approval = previewApprovals.get(approvalId);
-    if (approval?.state !== "approved") throw new Error("Edit is not approved");
-    approval.state = "completed";
-    approval.settledAtMs = Date.now();
-    return {
-      path: edit.path,
-      replacements: 1,
-      diff: `--- a/${edit.path}\n+++ b/${edit.path}\n-${edit.oldText}\n+${edit.newText}`,
-    };
-  },
-  async runProjectShell(_taskId, approvalId, shell) {
-    const approval = previewApprovals.get(approvalId);
-    if (approval?.state !== "approved")
-      throw new Error("Shell command is not approved");
-    approval.state = "completed";
-    approval.settledAtMs = Date.now();
-    return {
-      command: shell.command,
-      exitCode: 0,
-      stdout: "All checks passed in preview mode.",
-      stderr: "",
-      durationMs: 842,
-      truncated: false,
-    };
-  },
 };

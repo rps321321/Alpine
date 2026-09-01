@@ -51,13 +51,13 @@ export interface PiToolClient {
     proposal: Record<string, unknown>;
   }): Promise<ToolApproval>;
   waitForApproval(approvalId: string, signal?: AbortSignal): Promise<void>;
-  editProjectFile(
+  executeApprovedEdit(
     taskId: string,
     executionId: string,
     approvalId: string,
     edit: WorkspaceEdit,
   ): Promise<WorkspaceEditResult>;
-  runProjectShell(
+  executeApprovedShell(
     taskId: string,
     executionId: string,
     approvalId: string,
@@ -278,7 +278,7 @@ function createProjectTools(
         proposal,
       });
       await tools.waitForApproval(approval.id, signal);
-      const result = await tools.editProjectFile(
+      const result = await tools.executeApprovedEdit(
         taskId,
         executionId,
         approval.id,
@@ -320,7 +320,7 @@ function createProjectTools(
         content: [{ type: "text", text: "Approved. Running command…" }],
         details: { approvalId: approval.id, state: "executing" },
       });
-      const result = await tools.runProjectShell(
+      const result = await tools.executeApprovedShell(
         taskId,
         executionId,
         approval.id,
