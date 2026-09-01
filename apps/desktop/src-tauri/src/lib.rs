@@ -131,7 +131,7 @@ struct BootstrapSnapshot {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct PiLaunchConfig {
+pub struct PiLaunchConfig {
     pub(crate) model_id: String,
     pub(crate) base_url: String,
     pub(crate) api_key: String,

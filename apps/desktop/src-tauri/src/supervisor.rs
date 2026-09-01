@@ -38,7 +38,7 @@ pub enum AgentWorkerCommand {
         execution_id: String,
         prompt: String,
         history: Vec<TaskMessage>,
-        config: PiLaunchConfig,
+        config: Box<PiLaunchConfig>,
     },
     Cancel {
         execution_id: String,
@@ -574,7 +574,7 @@ pub async fn submit_prompt(
             execution_id: execution.id.to_string(),
             prompt,
             history,
-            config: launch,
+            config: Box::new(launch),
         }) {
             let _ = fail_execution(&store, &supervisor, execution.id.as_str(), error.clone());
             return Err(error);
