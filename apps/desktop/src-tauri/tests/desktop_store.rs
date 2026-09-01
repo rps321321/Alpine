@@ -123,11 +123,11 @@ fn multiple_executions_preserve_failure_retry_identity_and_ordered_history() {
     assert_eq!(detail.executions[1].state, ExecutionState::Completed);
     assert_eq!(
         detail.executions[0].specification.model_sha256.as_deref(),
-        Some(&"a".repeat(64))
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     );
     assert_eq!(
         detail.executions[1].specification.model_sha256.as_deref(),
-        Some(&"e".repeat(64))
+        Some("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
     );
     assert_eq!(detail.messages[0].execution_id, first.id);
     assert_eq!(detail.events[0].execution_id, first.id);
