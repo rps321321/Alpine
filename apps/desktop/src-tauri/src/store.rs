@@ -7,9 +7,10 @@ pub use execution::{
     TaskSummary,
 };
 pub use journal::{
-    ExecutionOutcome, ExecutionTransitionOutcome, LegacyCausalOrder, LegacySource,
-    TASK_JOURNAL_VERSION, TaskJournalEvent, ToolOperation, ToolProposal, ToolResult,
-    ToolSettlementState, UserDirection,
+    AcceptedPrompt, ExecutionOutcome, ExecutionTransitionOutcome, LegacyCausalOrder, LegacySource,
+    RecordedMessage, TASK_JOURNAL_VERSION, TaskJournalEvent, ToolClaimOutcome, ToolOperation,
+    ToolProposal, ToolProposalOutcome, ToolResult, ToolSettlementOutcome, ToolSettlementState,
+    UserDirection,
 };
 
 use rusqlite::{Connection, OptionalExtension, params};

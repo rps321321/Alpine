@@ -1,7 +1,7 @@
 use alpine_control_plane::sanitized_process_environment;
 use alpine_desktop::store::{
-    CreateExecution, CreateTask, DesktopStore, ExecutionId, NewExecutionSpecification,
-    NewToolApproval,
+    CreateTask, DesktopStore, ExecutionId, ExecutionState, NewExecutionSpecification,
+    NewToolApproval, ToolProposal,
 };
 use alpine_desktop::workspace::{
     WorkspaceEdit, WorkspaceShell, edit_project_file, list_project_files, read_project_file,
@@ -53,10 +53,14 @@ fn setup() -> (tempfile::TempDir, DesktopStore, String, ExecutionId) {
         })
         .unwrap();
     let execution = store
-        .create_execution(CreateExecution {
-            task_id: task.id.clone(),
-            specification: execution_specification(),
-        })
+        .accept_prompt(&task.id, "Workspace test", execution_specification())
+        .unwrap()
+        .execution;
+    store
+        .record_execution_state(execution.id.as_str(), ExecutionState::Preparing)
+        .unwrap();
+    store
+        .record_execution_state(execution.id.as_str(), ExecutionState::Running)
         .unwrap();
     (temporary, store, task.id, execution.id)
 }
@@ -86,24 +90,26 @@ fn read_list_and_search_stay_inside_the_selected_project() {
 }
 
 #[test]
-fn an_exact_approved_edit_returns_a_reviewable_diff() {
+fn an_exact_approved_edit_returns_a_reviewable_diff_and_typed_settlement() {
     let (temporary, store, task_id, execution_id) = setup();
     let edit = WorkspaceEdit {
         path: "README.md".to_owned(),
         old_text: "run alpine-verify".to_owned(),
         new_text: "run cargo test".to_owned(),
     };
-    let proposal = serde_json::to_value(&edit).unwrap();
+    let proposal = ToolProposal::from(&edit);
     let approval = store
-        .request_tool_approval(NewToolApproval {
+        .propose_tool(NewToolApproval {
             task_id: task_id.clone(),
             execution_id: execution_id.clone(),
             tool_call_id: "edit-1".to_owned(),
-            operation: "edit".to_owned(),
             proposal,
         })
+        .unwrap()
+        .approval;
+    store
+        .decide_tool_approval_recorded(&approval.id, true)
         .unwrap();
-    store.decide_tool_approval(&approval.id, true).unwrap();
 
     let result = edit_project_file(&store, &task_id, &approval.id, edit).unwrap();
     assert!(result.diff.contains("-run alpine-verify"));
@@ -113,10 +119,18 @@ fn an_exact_approved_edit_returns_a_reviewable_diff() {
             .unwrap(),
         "alpha\nrun cargo test\nomega\n"
     );
+    assert_eq!(
+        store
+            .get_tool_approval(&approval.id)
+            .unwrap()
+            .unwrap()
+            .state,
+        alpine_desktop::store::ApprovalState::Completed
+    );
 }
 
 #[test]
-fn an_exact_approved_shell_command_captures_output() {
+fn an_exact_approved_shell_command_captures_output_and_typed_settlement() {
     let (_temporary, store, task_id, execution_id) = setup();
     let shell = WorkspaceShell {
         command: if cfg!(windows) {
@@ -126,21 +140,32 @@ fn an_exact_approved_shell_command_captures_output() {
         },
         timeout_seconds: 10,
     };
+    let proposal = ToolProposal::from(&shell);
     let approval = store
-        .request_tool_approval(NewToolApproval {
+        .propose_tool(NewToolApproval {
             task_id: task_id.clone(),
-            execution_id: execution_id.clone(),
+            execution_id,
             tool_call_id: "shell-1".to_owned(),
-            operation: "shell".to_owned(),
-            proposal: serde_json::to_value(&shell).unwrap(),
+            proposal,
         })
+        .unwrap()
+        .approval;
+    store
+        .decide_tool_approval_recorded(&approval.id, true)
         .unwrap();
-    store.decide_tool_approval(&approval.id, true).unwrap();
 
     let result = run_project_shell(&store, &task_id, &approval.id, shell).unwrap();
     assert_eq!(result.exit_code, 0);
     assert!(result.stdout.contains("ALPINE_SHELL_OK"));
     assert!(result.stderr.is_empty());
+    assert_eq!(
+        store
+            .get_tool_approval(&approval.id)
+            .unwrap()
+            .unwrap()
+            .state,
+        alpine_desktop::store::ApprovalState::Completed
+    );
 }
 
 #[test]
