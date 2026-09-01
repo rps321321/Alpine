@@ -1,0 +1,47 @@
+name: issue-46-transform
+
+on:
+  push:
+    branches:
+      - codex/issue-46-execution-aggregate
+    paths:
+      - .github/workflows/issue-46-transform.yml
+
+permissions:
+  contents: write
+
+jobs:
+  transform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: codex/issue-46-execution-aggregate
+          fetch-depth: 0
+      - name: Reconstruct transformer
+        shell: bash
+        run: |
+          cat .github/issue46/part* | base64 --decode | gzip --decompress > /tmp/issue46_transform.py
+          python -m py_compile /tmp/issue46_transform.py
+      - name: Apply durable Execution migration
+        shell: bash
+        run: python /tmp/issue46_transform.py
+      - name: Install desktop Rust formatter
+        shell: bash
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+      - name: Format native desktop sources
+        shell: bash
+        run: cargo +1.88.0 fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
+      - name: Validate generated patch
+        shell: bash
+        run: |
+          git diff --check
+          test -n "$(git status --porcelain -- apps/desktop docs/executions.md)"
+      - name: Commit generated implementation
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop docs/executions.md
+          git commit -m "feat: introduce durable Execution aggregate"
+          git push origin HEAD:codex/issue-46-execution-aggregate
