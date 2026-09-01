@@ -1,6 +1,7 @@
 //! Project-scoped file and shell capabilities used by the Pi Agent Runtime Adapter.
 
 use crate::store::{DesktopStore, StoreError};
+use alpine_control_plane::sanitized_process_environment;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::io::Read;
@@ -298,8 +299,8 @@ fn execute_shell(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env_clear();
-    copy_safe_environment(&mut command);
+        .env_clear()
+        .envs(sanitized_process_environment());
     let started = Instant::now();
     let mut child = command
         .spawn()
@@ -475,29 +476,6 @@ fn display_relative(root: &Path, path: &Path) -> Result<String, StoreError> {
     path.strip_prefix(root)
         .map(|value| value.to_string_lossy().replace('\\', "/"))
         .map_err(|_| error("the path is outside the Selected Project"))
-}
-
-fn copy_safe_environment(command: &mut Command) {
-    const SAFE_NAMES: &[&str] = &[
-        "PATH",
-        "PATHEXT",
-        "SystemRoot",
-        "WINDIR",
-        "TEMP",
-        "TMP",
-        "USERPROFILE",
-        "LOCALAPPDATA",
-        "APPDATA",
-        "ProgramFiles",
-        "ProgramFiles(x86)",
-        "RUSTUP_HOME",
-        "CARGO_HOME",
-    ];
-    for name in SAFE_NAMES {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
 }
 
 fn read_output(mut stream: impl Read) -> Result<Vec<u8>, StoreError> {

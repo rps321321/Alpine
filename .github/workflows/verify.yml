@@ -8,7 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  windows:
+  canonical-verification:
+    name: canonical-verification
     runs-on: windows-latest
     defaults:
       run:
@@ -21,7 +22,56 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install pinned Rust
-        run: |
-          rustup toolchain install 1.85.0 --profile minimal --component clippy,rustfmt
-      - name: Verify
+        run: rustup toolchain install 1.85.0 --profile minimal --component clippy,rustfmt
+      - name: Warm Windows PowerShell for subprocess tests
+        timeout-minutes: 2
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -Command "exit 0"
+      - name: Verify control plane and compatibility contracts
         run: cargo run --locked --bin alpine-verify
+
+  desktop-verification:
+    name: desktop-verification
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Verify package inventory and architecture boundaries
+        run: node --test scripts/verify-architecture.test.mjs && node scripts/verify-architecture.mjs
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Test renderer
+        working-directory: apps/desktop
+        run: npm test
+      - name: Type-check renderer
+        working-directory: apps/desktop
+        run: npm run typecheck
+      - name: Build renderer and Sites handoff
+        working-directory: apps/desktop
+        run: npm run build
+      - name: Test Sites handoff
+        working-directory: apps/desktop
+        run: npm run test:sites
+      - name: Install desktop Rust
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
+      - name: Warm Windows PowerShell for subprocess tests
+        timeout-minutes: 2
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -Command "exit 0"
+      - name: Check desktop Rust formatting
+        working-directory: apps/desktop/src-tauri
+        run: cargo fmt --all -- --check
+      - name: Lint desktop Rust
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Test desktop Rust
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --locked --all-targets --all-features
