@@ -1,0 +1,46 @@
+name: issue-46-test-type-fix
+
+on:
+  push:
+    branches:
+      - codex/issue-46-execution-aggregate
+    paths:
+      - .github/workflows/issue-46-test-type-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: codex/issue-46-execution-aggregate
+          fetch-depth: 0
+      - name: Fix digest assertion types
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('apps/desktop/src-tauri/tests/desktop_store.rs')
+          text = path.read_text(encoding='utf-8')
+          replacements = {
+              'Some(&"a".repeat(64))': 'Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")',
+              'Some(&"e".repeat(64))': 'Some("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'expected one assertion: {old}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+      - name: Commit test correction
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop/src-tauri/tests/desktop_store.rs
+          git commit -m "test: compare persisted digests as strings"
+          git push origin HEAD:codex/issue-46-execution-aggregate
