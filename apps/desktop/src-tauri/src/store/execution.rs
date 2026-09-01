@@ -206,7 +206,8 @@ pub(super) fn validate_new_specification(
         .as_deref()
         .map(|value| validate_optional_identifier("model revision", Some(value), 160))
         .transpose()?
-        .flatten();
+        .flatten()
+        .map(str::to_owned);
     let model_filename =
         validate_nonempty("model filename", &specification.model_filename, 240)?.to_owned();
     let model_sha256 = validate_sha256("model digest", &specification.model_sha256)?;
