@@ -93,7 +93,10 @@ fn an_exact_approved_shell_command_captures_output() {
         } else {
             "printf ALPINE_SHELL_OK".to_owned()
         },
-        timeout_seconds: 10,
+        // Windows PowerShell can pay a one-time cold-start cost on a clean CI
+        // runner. Keep the test bounded without treating startup latency as a
+        // command failure; production callers retain their requested timeout.
+        timeout_seconds: 30,
     };
     let approval = store
         .request_tool_approval(NewToolApproval {
