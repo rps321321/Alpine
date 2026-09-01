@@ -1,0 +1,129 @@
+{
+  "schema": 1,
+  "manifestDiscovery": {
+    "names": ["Cargo.toml", "package.json", "pyproject.toml"],
+    "ignoredDirectories": [
+      ".git",
+      ".artifacts",
+      "dist",
+      "node_modules",
+      "target",
+      "vendor"
+    ]
+  },
+  "packages": [
+    {
+      "kind": "cargo",
+      "manifest": "Cargo.toml",
+      "lockfile": "Cargo.lock",
+      "toolchain": "rust-toolchain.toml",
+      "verificationJob": "canonical-verification"
+    },
+    {
+      "kind": "python",
+      "manifest": "pyproject.toml",
+      "verificationJob": "canonical-verification"
+    },
+    {
+      "kind": "npm",
+      "manifest": "apps/desktop/package.json",
+      "lockfile": "apps/desktop/package-lock.json",
+      "verificationJob": "desktop-verification"
+    },
+    {
+      "kind": "cargo",
+      "manifest": "apps/desktop/src-tauri/Cargo.toml",
+      "lockfile": "apps/desktop/src-tauri/Cargo.lock",
+      "toolchain": "apps/desktop/src-tauri/rust-toolchain.toml",
+      "verificationJob": "desktop-verification"
+    }
+  ],
+  "workflowContract": {
+    "path": ".github/workflows/verify.yml",
+    "requiredCheckNames": [
+      "canonical-verification",
+      "desktop-verification"
+    ],
+    "requiredSnippets": [
+      "node --test scripts/verify-architecture.test.mjs",
+      "node scripts/verify-architecture.mjs",
+      "npm ci",
+      "npm test",
+      "npm run typecheck",
+      "npm run build",
+      "npm run test:sites",
+      "cargo fmt --all -- --check",
+      "cargo clippy --locked --all-targets --all-features -- -D warnings",
+      "cargo test --locked --all-targets --all-features"
+    ]
+  },
+  "providerImports": {
+    "packages": [
+      "@earendil-works/pi-agent-core",
+      "@earendil-works/pi-ai"
+    ],
+    "roots": [
+      "apps/desktop/src",
+      "apps/desktop/scripts"
+    ],
+    "ignoredDirectories": ["dist", "node_modules"],
+    "allowed": [
+      {
+        "path": "apps/desktop/src/harness/pi.ts",
+        "reason": "The Pi SDK implementation is confined to its declared adapter."
+      },
+      {
+        "path": "apps/desktop/src/harness/pi.test.ts",
+        "reason": "The adapter's focused contract test may use Pi test types."
+      }
+    ],
+    "temporaryExceptions": [
+      {
+        "path": "apps/desktop/src/task-execution.ts",
+        "issue": 49,
+        "reason": "The legacy renderer orchestrator still consumes Pi AgentEvent until the Alpine runtime protocol replaces it."
+      },
+      {
+        "path": "apps/desktop/src/task-execution.test.ts",
+        "issue": 49,
+        "reason": "The legacy orchestrator tests still construct Pi AgentEvent fixtures until the Alpine runtime protocol replaces them."
+      }
+    ]
+  },
+  "rendererMutationBoundary": {
+    "roots": ["apps/desktop/src"],
+    "ignoredDirectories": ["dist", "node_modules"],
+    "symbols": [
+      "appendTaskMessage",
+      "appendTaskEvent",
+      "setTaskStatus"
+    ],
+    "temporaryAllowedFiles": [
+      {
+        "path": "apps/desktop/src/desktop.ts",
+        "issue": 47,
+        "reason": "The legacy renderer-facing interface still declares row-level mutation primitives until host-owned execution lands."
+      },
+      {
+        "path": "apps/desktop/src/task-execution.ts",
+        "issue": 47,
+        "reason": "The legacy renderer orchestrator still calls row-level mutation primitives until host-owned execution lands."
+      }
+    ]
+  },
+  "generatedContracts": [],
+  "manualVerification": [
+    {
+      "id": "packaged-native-desktop-behavior",
+      "owner": "maintainer",
+      "issue": 43,
+      "scope": "Native window sizing, child WebViews, file pickers, focus, screen readers, and rendered accessibility require packaged-app evidence."
+    },
+    {
+      "id": "live-local-model-capability",
+      "owner": "maintainer",
+      "issue": 25,
+      "scope": "Live model, hardware, session restoration, and agent capability remain separate evidence operations and are not implied by source CI."
+    }
+  ]
+}
