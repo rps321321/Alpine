@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { TaskJournalEvent } from "./generated/task-journal";
 
 export interface HardwareProfile {
   cpu: string;
@@ -381,10 +382,10 @@ export interface TaskMessage {
 export interface TaskEvent {
   id: string;
   taskId: string;
-  executionId: string;
+  executionId: string | null;
   sequence: number;
-  kind: string;
-  payload: unknown;
+  version: number;
+  event: TaskJournalEvent;
   createdAtMs: number;
 }
 
@@ -420,7 +421,8 @@ export interface ToolApproval {
 
 export interface ToolApprovalDecision {
   approval: ToolApproval;
-  event: TaskEvent;
+  execution: Execution;
+  records: TaskEvent[];
 }
 
 export interface WorkspaceEntry {
@@ -701,6 +703,70 @@ function previewBrowserEvent(event: BrowserEvent) {
 
 function previewExecutionUpdate(update: ExecutionUpdate) {
   for (const listener of previewExecutionListeners) listener(update);
+}
+
+function nextPreviewTaskSequence(detail: TaskDetail) {
+  return Math.max(
+    0,
+    ...detail.messages.map((message) => message.sequence),
+    ...detail.events.map((event) => event.sequence),
+  ) + 1;
+}
+
+function previewJournalRecord(
+  detail: TaskDetail,
+  executionId: string,
+  event: TaskJournalEvent,
+  createdAtMs = Date.now(),
+) {
+  const record: TaskEvent = {
+    id: previewId("journal"),
+    taskId: detail.task.id,
+    executionId,
+    sequence: nextPreviewTaskSequence(detail),
+    version: 1,
+    event,
+    createdAtMs,
+  };
+  detail.events.push(record);
+  previewExecutionUpdate({
+    type: "event",
+    taskId: detail.task.id,
+    executionId,
+    event: record,
+  });
+  return record;
+}
+
+function previewDirection(
+  executionId: string,
+  text: string,
+  direction: "steer" | "follow-up",
+) {
+  const found = previewExecution(executionId);
+  if (!found) throw new Error("Preview Execution does not exist");
+  const record = previewJournalRecord(found.detail, executionId, {
+    type: "user-direction-accepted",
+    direction,
+    content: text,
+  });
+  const message: TaskMessage = {
+    id: record.id,
+    taskId: found.execution.taskId,
+    executionId,
+    sequence: record.sequence,
+    role: "user",
+    content: text,
+    createdAtMs: record.createdAtMs,
+  };
+  found.detail.messages.push(message);
+  previewExecutionUpdate({
+    type: "message",
+    taskId: message.taskId,
+    executionId,
+    message,
+  });
+  return message;
 }
 
 function previewExecution(executionId: string) {
@@ -1139,56 +1205,80 @@ export const previewDesktopClient: DesktopClient = {
     detail.task.summary = "active";
     detail.task.activeExecutionId = execution.id;
     detail.task.latestExecutionId = execution.id;
+
+    const promptRecord = previewJournalRecord(
+      detail,
+      executionId,
+      { type: "user-prompt-accepted", content: prompt },
+      now,
+    );
     const promptMessage: TaskMessage = {
-      id: previewId("message"),
+      id: promptRecord.id,
       taskId,
       executionId,
-      sequence: detail.messages.length + 1,
+      sequence: promptRecord.sequence,
       role: "user",
       content: prompt,
       createdAtMs: now,
     };
     detail.messages.push(promptMessage);
+    previewJournalRecord(
+      detail,
+      executionId,
+      { type: "execution-queued", executionSpecId: specificationId },
+      now,
+    );
+    previewJournalRecord(detail, executionId, { type: "execution-preparing" }, now);
     previewExecutionUpdate({
       type: "message",
       taskId,
       executionId,
       message: promptMessage,
     });
-    previewExecutionUpdate({
-      type: "state",
-      taskId,
-      executionId,
-      execution,
-    });
+    previewExecutionUpdate({ type: "state", taskId, executionId, execution });
+
     window.setTimeout(() => {
       if (execution.state !== "preparing") return;
       execution.state = "running";
+      execution.updatedAtMs = Date.now();
+      previewJournalRecord(detail, executionId, { type: "execution-started" });
       previewExecutionUpdate({ type: "state", taskId, executionId, execution });
       const content = "Preview mode accepted the host-owned Execution.";
       previewExecutionUpdate({ type: "delta", taskId, executionId, delta: content });
+      const assistantRecord = previewJournalRecord(detail, executionId, {
+        type: "assistant-message-completed",
+        content,
+      });
       const assistant: TaskMessage = {
-        id: previewId("message"),
+        id: assistantRecord.id,
         taskId,
         executionId,
-        sequence: detail.messages.length + 1,
+        sequence: assistantRecord.sequence,
         role: "assistant",
         content,
-        createdAtMs: Date.now(),
+        createdAtMs: assistantRecord.createdAtMs,
       };
       detail.messages.push(assistant);
-      previewExecutionUpdate({
-        type: "message",
-        taskId,
-        executionId,
-        message: assistant,
-      });
+      previewExecutionUpdate({ type: "message", taskId, executionId, message: assistant });
+      const finishedAt = Date.now();
       execution.state = "completed";
-      execution.finishedAtMs = Date.now();
-      execution.updatedAtMs = execution.finishedAtMs;
+      execution.finishedAtMs = finishedAt;
+      execution.updatedAtMs = finishedAt;
       detail.task.status = "completed";
       detail.task.summary = "done";
       detail.task.activeExecutionId = null;
+      previewJournalRecord(
+        detail,
+        executionId,
+        {
+          type: "execution-finished",
+          outcome: "completed",
+          failure: null,
+          durationMs: Math.max(0, finishedAt - now),
+          responseCharacters: content.length,
+        },
+        finishedAt,
+      );
       previewExecutionUpdate({ type: "state", taskId, executionId, execution });
       previewExecutionUpdate({
         type: "terminal",
@@ -1207,6 +1297,7 @@ export const previewDesktopClient: DesktopClient = {
     const { detail, execution } = found;
     execution.state = "cancelling";
     execution.updatedAtMs = Date.now();
+    previewJournalRecord(detail, executionId, { type: "execution-cancelling" });
     previewExecutionUpdate({
       type: "state",
       taskId: execution.taskId,
@@ -1214,12 +1305,26 @@ export const previewDesktopClient: DesktopClient = {
       execution,
     });
     window.setTimeout(() => {
+      const finishedAt = Date.now();
       execution.state = "cancelled";
-      execution.finishedAtMs = Date.now();
-      execution.updatedAtMs = execution.finishedAtMs;
+      execution.finishedAtMs = finishedAt;
+      execution.updatedAtMs = finishedAt;
       detail.task.status = "cancelled";
       detail.task.summary = "ready";
       detail.task.activeExecutionId = null;
+      previewJournalRecord(
+        detail,
+        executionId,
+        {
+          type: "execution-finished",
+          outcome: "cancelled",
+          failure: null,
+          durationMs: null,
+          responseCharacters: null,
+        },
+        finishedAt,
+      );
+      previewExecutionUpdate({ type: "state", taskId: execution.taskId, executionId, execution });
       previewExecutionUpdate({
         type: "terminal",
         taskId: execution.taskId,
@@ -1232,28 +1337,10 @@ export const previewDesktopClient: DesktopClient = {
     return execution;
   },
   async steerExecution(executionId, text) {
-    const found = previewExecution(executionId);
-    if (!found) throw new Error("Preview Execution does not exist");
-    const message: TaskMessage = {
-      id: previewId("message"),
-      taskId: found.execution.taskId,
-      executionId,
-      sequence: found.detail.messages.length + 1,
-      role: "user",
-      content: text,
-      createdAtMs: Date.now(),
-    };
-    found.detail.messages.push(message);
-    previewExecutionUpdate({
-      type: "message",
-      taskId: message.taskId,
-      executionId,
-      message,
-    });
-    return message;
+    return previewDirection(executionId, text, "steer");
   },
   async queueFollowUp(executionId, text) {
-    return this.steerExecution(executionId, text);
+    return previewDirection(executionId, text, "follow-up");
   },
   async subscribeExecutionUpdates(listener) {
     previewExecutionListeners.add(listener);
@@ -1271,28 +1358,29 @@ export const previewDesktopClient: DesktopClient = {
     approval.state = approved ? "approved" : "denied";
     approval.decidedAtMs = Date.now();
     const detail = previewDetails.get(approval.taskId);
-    if (!detail) throw new Error("Preview task does not exist");
-    const event: TaskEvent = {
-      id: previewId("event"),
-      taskId: approval.taskId,
-      executionId: approval.executionId,
-      sequence: detail.events.length + 1,
-      kind: "approval.decided",
-      payload: {
-        approvalId: approval.id,
-        operation: approval.operation,
-        approved,
-      },
-      createdAtMs: approval.decidedAtMs,
-    };
-    detail.events.push(event);
+    const found = previewExecution(approval.executionId);
+    if (!detail || !found) throw new Error("Preview task execution does not exist");
+    const decision = previewJournalRecord(
+      detail,
+      approval.executionId,
+      { type: "approval-decided", approvalId: approval.id, approved },
+      approval.decidedAtMs,
+    );
+    found.execution.state = "running";
+    found.execution.updatedAtMs = approval.decidedAtMs;
+    const resumed = previewJournalRecord(
+      detail,
+      approval.executionId,
+      { type: "execution-resumed", approvalId: approval.id },
+      approval.decidedAtMs,
+    );
     previewExecutionUpdate({
-      type: "event",
+      type: "state",
       taskId: approval.taskId,
       executionId: approval.executionId,
-      event,
+      execution: found.execution,
     });
-    return { approval, event };
+    return { approval, execution: found.execution, records: [decision, resumed] };
   },
   async listProjectFiles() {
     return [

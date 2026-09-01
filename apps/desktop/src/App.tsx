@@ -630,9 +630,9 @@ export function App({ desktop }: { desktop: DesktopClient }) {
       current.filter((candidate) => candidate.id !== decision.approval.id),
     );
     setTaskDetail((current) =>
-      !current || current.task.id !== decision.event.taskId
+      !current || current.task.id !== decision.approval.taskId
         ? current
-        : { ...current, events: [...current.events, decision.event] },
+        : { ...current, events: [...current.events, ...decision.records] },
     );
   };
 
@@ -3256,10 +3256,11 @@ function ContextInspector({
 
 function latestToolDetails(events: TaskEvent[], toolName: string) {
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (event.kind !== "tool.finished") continue;
-    const payload = event.payload as { toolName?: string; details?: unknown };
-    if (payload.toolName === toolName) return payload.details ?? null;
+    const record = events[index];
+    if (record.event.type !== "tool-result-recorded") continue;
+    const result = record.event.result;
+    if (toolName === "edit_file" && result.type === "edit") return result;
+    if (toolName === "run_command" && result.type === "shell") return result;
   }
   return null;
 }

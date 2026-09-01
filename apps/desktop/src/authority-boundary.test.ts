@@ -25,6 +25,9 @@ describe("desktop execution authority", () => {
     expect(taskExecution).not.toContain("@earendil-works/pi-");
     expect(taskExecution).toContain("submitPrompt");
     expect(taskExecution).toContain("subscribeExecutionUpdates");
+    expect(desktop).toContain("TaskJournalEvent");
+    expect(desktop).not.toContain("kind: string");
+    expect(desktop).not.toContain("payload: unknown");
   });
 
   it("binds provider execution to the isolated worker and host supervisor", () => {
