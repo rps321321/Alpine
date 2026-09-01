@@ -1490,14 +1490,36 @@ fn rebuild_task_projections(connection: &mut Connection, task_id: &str) -> Resul
     transaction.execute("DELETE FROM tool_approvals WHERE task_id = ?1", [task_id])?;
     transaction.execute("DELETE FROM task_messages WHERE task_id = ?1", [task_id])?;
     transaction.execute("DELETE FROM executions WHERE task_id = ?1", [task_id])?;
+
+    // Prompt acceptance is deliberately journaled before ExecutionQueued so a crash can
+    // never expose a provider launch without its accepted user intent. Projection replay
+    // therefore creates every Execution first, then replays the remaining causal facts.
     for record in &records {
-        apply_record_projection(&transaction, record)?;
+        if is_execution_seed(record) {
+            apply_record_projection(&transaction, record)?;
+        }
+    }
+    for record in &records {
+        if !is_execution_seed(record) {
+            apply_record_projection(&transaction, record)?;
+        }
     }
     if let Some(timestamp) = records.iter().map(|record| record.created_at_ms).max() {
         touch_task(&transaction, task_id, timestamp)?;
     }
     transaction.commit()?;
     Ok(())
+}
+
+fn is_execution_seed(record: &TaskEvent) -> bool {
+    matches!(record.event, TaskJournalEvent::ExecutionQueued { .. })
+        || matches!(
+            &record.event,
+            TaskJournalEvent::LegacyImported {
+                source: LegacySource::Execution,
+                ..
+            }
+        )
 }
 
 fn apply_record_projection(
