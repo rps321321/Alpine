@@ -4,7 +4,7 @@ use super::{
     DesktopStore, DesktopTask, StoreError, TaskStatus, validate_nonempty,
     validate_optional_identifier,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
@@ -110,8 +110,8 @@ impl ExecutionState {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NewExecutionSpecification {
     pub model_registry_id: String,
     pub model_repo_id: String,
@@ -130,7 +130,7 @@ pub struct NewExecutionSpecification {
     pub temperature_millis: i64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionSpecification {
     pub id: String,
@@ -154,7 +154,7 @@ pub struct ExecutionSpecification {
     pub created_at_ms: i64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Execution {
     pub id: ExecutionId,
@@ -191,183 +191,109 @@ impl DesktopStore {
 }
 
 pub(super) fn validate_new_specification(
-    mut specification: NewExecutionSpecification,
+    specification: NewExecutionSpecification,
 ) -> Result<NewExecutionSpecification, StoreError> {
-    specification.model_registry_id = validate_nonempty(
-        "Execution model registry identifier",
+    let model_registry_id = validate_nonempty(
+        "model registry identifier",
         &specification.model_registry_id,
         160,
     )?
     .to_owned();
-    specification.model_repo_id = validate_nonempty(
-        "Execution model repository",
-        &specification.model_repo_id,
+    let model_repo_id =
+        validate_nonempty("model repository", &specification.model_repo_id, 240)?.to_owned();
+    let model_revision = specification
+        .model_revision
+        .as_deref()
+        .map(|value| validate_optional_identifier("model revision", Some(value), 160))
+        .transpose()?
+        .flatten();
+    let model_filename = validate_nonempty(
+        "model filename",
+        &specification.model_filename,
         240,
     )?
     .to_owned();
-    specification.model_revision = validate_optional_identifier(
-        "Execution model revision",
-        specification.model_revision.as_deref(),
+    let model_sha256 = validate_sha256("model digest", &specification.model_sha256)?;
+    let session_config_sha256 = validate_sha256(
+        "Session Config digest",
+        &specification.session_config_sha256,
+    )?;
+    let profile_name =
+        validate_nonempty("Profile name", &specification.profile_name, 96)?.to_owned();
+    let profile_sha256 = validate_sha256("Profile digest", &specification.profile_sha256)?;
+    let runtime_name =
+        validate_nonempty("runtime name", &specification.runtime_name, 96)?.to_owned();
+    let runtime_identity =
+        validate_sha256("runtime binary digest", &specification.runtime_identity)?;
+    let adapter_identity = validate_nonempty(
+        "adapter identity",
+        &specification.adapter_identity,
         160,
     )?
-    .map(str::to_owned);
-    specification.model_filename = validate_nonempty(
-        "Execution model filename",
-        &specification.model_filename,
-        255,
-    )?
     .to_owned();
-    specification.model_sha256 =
-        validate_sha256("Execution model SHA-256", &specification.model_sha256)?.to_owned();
-    specification.session_config_sha256 = validate_sha256(
-        "Execution Session Config SHA-256",
-        &specification.session_config_sha256,
-    )?
-    .to_owned();
-    specification.profile_name =
-        validate_nonempty("Execution Profile", &specification.profile_name, 96)?.to_owned();
-    specification.profile_sha256 =
-        validate_sha256("Execution Profile SHA-256", &specification.profile_sha256)?.to_owned();
-    specification.runtime_name =
-        validate_nonempty("Execution Runtime", &specification.runtime_name, 96)?.to_owned();
-    specification.runtime_identity = validate_sha256(
-        "Execution Runtime identity",
-        &specification.runtime_identity,
-    )?
-    .to_owned();
-    specification.adapter_identity = validate_nonempty(
-        "Execution adapter identity",
-        &specification.adapter_identity,
-        240,
-    )?
-    .to_owned();
-    specification.policy_identity = validate_nonempty(
-        "Execution policy identity",
+    let policy_identity = validate_nonempty(
+        "policy identity",
         &specification.policy_identity,
-        240,
+        160,
     )?
     .to_owned();
     if specification.context_window == 0 || specification.max_tokens == 0 {
         return Err(StoreError::message(
-            "Execution context and output limits must be positive",
+            "Execution specification token limits must be positive",
         ));
     }
-    if !(0..=2_000).contains(&specification.temperature_millis) {
+    if specification.temperature_millis < 0 || specification.temperature_millis > 5_000 {
         return Err(StoreError::message(
-            "Execution temperature must be between 0 and 2000 millis",
+            "Execution specification temperature is outside the supported range",
         ));
     }
-    Ok(specification)
+    Ok(NewExecutionSpecification {
+        model_registry_id,
+        model_repo_id,
+        model_revision,
+        model_filename,
+        model_sha256,
+        session_config_sha256,
+        profile_name,
+        profile_sha256,
+        runtime_name,
+        runtime_identity,
+        adapter_identity,
+        policy_identity,
+        context_window: specification.context_window,
+        max_tokens: specification.max_tokens,
+        temperature_millis: specification.temperature_millis,
+    })
 }
 
-fn validate_sha256<'a>(label: &str, value: &'a str) -> Result<&'a str, StoreError> {
-    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(value)
-    } else {
-        Err(StoreError::message(format!("{label} is invalid")))
+fn validate_sha256(label: &str, value: &str) -> Result<String, StoreError> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StoreError::message(format!(
+            "{label} must be a 64-character SHA-256 digest"
+        )));
     }
-}
-
-pub(super) fn task_has_executions(
-    connection: &Connection,
-    task_id: &str,
-) -> Result<bool, StoreError> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM executions WHERE task_id = ?1)",
-            [task_id],
-            |row| row.get(0),
-        )
-        .map_err(Into::into)
-}
-
-pub(super) fn project_task(
-    connection: &Connection,
-    mut task: DesktopTask,
-) -> Result<DesktopTask, StoreError> {
-    let active = connection
-        .query_row(
-            "SELECT id, state FROM executions
-             WHERE task_id = ?1
-               AND state IN ('queued','preparing','running','waiting-for-approval','cancelling')
-             ORDER BY updated_at_ms DESC, queued_at_ms DESC, id DESC LIMIT 1",
-            [&task.id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?;
-    let latest = connection
-        .query_row(
-            "SELECT id, state, failure FROM executions
-             WHERE task_id = ?1
-             ORDER BY queued_at_ms DESC, id DESC LIMIT 1",
-            [&task.id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-
-    task.active_execution_id = active.as_ref().map(|(id, _)| ExecutionId(id.clone()));
-    task.latest_execution_id = latest.as_ref().map(|(id, _, _)| ExecutionId(id.clone()));
-
-    if let Some((_, state)) = active {
-        let state = ExecutionState::parse(&state)?;
-        task.summary = TaskSummary::Active;
-        task.status = if state == ExecutionState::Cancelling {
-            TaskStatus::Cancelling
-        } else {
-            TaskStatus::Running
-        };
-        task.error = None;
-        return Ok(task);
-    }
-
-    if let Some((_, state, failure)) = latest {
-        let state = ExecutionState::parse(&state)?;
-        match state {
-            ExecutionState::Completed => {
-                task.summary = TaskSummary::Done;
-                task.status = TaskStatus::Completed;
-                task.error = None;
-            }
-            ExecutionState::Failed => {
-                task.summary = TaskSummary::NeedsAttention;
-                task.status = TaskStatus::Failed;
-                task.error = failure;
-            }
-            ExecutionState::Interrupted => {
-                task.summary = TaskSummary::NeedsAttention;
-                task.status = TaskStatus::Interrupted;
-                task.error = failure;
-            }
-            ExecutionState::Cancelled => {
-                task.summary = TaskSummary::Ready;
-                task.status = TaskStatus::Cancelled;
-                task.error = None;
-            }
-            state if state.is_active() => {
-                return Err(StoreError::message(
-                    "an active Execution was omitted from the active projection",
-                ));
-            }
-            _ => {}
-        }
-    }
-    Ok(task)
+    Ok(value)
 }
 
 pub(super) fn list_task_executions(
     connection: &Connection,
     task_id: &str,
 ) -> Result<Vec<Execution>, StoreError> {
-    let sql = format!("{EXECUTION_SELECT} WHERE e.task_id = ?1 ORDER BY e.queued_at_ms, e.id");
-    let mut statement = connection.prepare(&sql)?;
+    let mut statement = connection.prepare(
+        "SELECT e.id, e.task_id, e.execution_spec_id, e.state, e.failure,
+                e.queued_at_ms, e.started_at_ms, e.finished_at_ms, e.updated_at_ms,
+                s.id, s.task_id, s.model_registry_id, s.model_repo_id, s.model_revision,
+                s.model_filename, s.model_sha256, s.session_config_sha256, s.profile_name,
+                s.profile_sha256, s.runtime_name, s.runtime_identity, s.adapter_identity,
+                s.policy_identity, s.context_window, s.max_tokens, s.temperature_millis,
+                s.legacy_unverified, s.created_at_ms
+         FROM executions e
+         INNER JOIN execution_specs s ON s.id = e.execution_spec_id
+         WHERE e.task_id = ?1 ORDER BY e.queued_at_ms, e.id",
+    )?;
     statement
-        .query_map([task_id], execution_from_row)?
+        .query_map([task_id], execution_from_joined_row)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
@@ -376,30 +302,50 @@ pub(super) fn load_execution(
     connection: &Connection,
     execution_id: &str,
 ) -> Result<Option<Execution>, StoreError> {
-    let sql = format!("{EXECUTION_SELECT} WHERE e.id = ?1");
     connection
-        .query_row(&sql, [execution_id], execution_from_row)
+        .query_row(
+            "SELECT e.id, e.task_id, e.execution_spec_id, e.state, e.failure,
+                    e.queued_at_ms, e.started_at_ms, e.finished_at_ms, e.updated_at_ms,
+                    s.id, s.task_id, s.model_registry_id, s.model_repo_id, s.model_revision,
+                    s.model_filename, s.model_sha256, s.session_config_sha256, s.profile_name,
+                    s.profile_sha256, s.runtime_name, s.runtime_identity, s.adapter_identity,
+                    s.policy_identity, s.context_window, s.max_tokens, s.temperature_millis,
+                    s.legacy_unverified, s.created_at_ms
+             FROM executions e
+             INNER JOIN execution_specs s ON s.id = e.execution_spec_id
+             WHERE e.id = ?1",
+            [execution_id],
+            execution_from_joined_row,
+        )
         .optional()
         .map_err(Into::into)
 }
 
-const EXECUTION_SELECT: &str = "SELECT e.id, e.task_id, e.execution_spec_id, e.state, e.failure,
-            e.queued_at_ms, e.started_at_ms, e.finished_at_ms, e.updated_at_ms,
-            s.id, s.task_id, s.model_registry_id, s.model_repo_id, s.model_revision,
-            s.model_filename, s.model_sha256, s.session_config_sha256, s.profile_name,
-            s.profile_sha256, s.runtime_name, s.runtime_identity, s.adapter_identity,
-            s.policy_identity, s.context_window, s.max_tokens, s.temperature_millis,
-            s.legacy_unverified, s.created_at_ms
-     FROM executions e
-     INNER JOIN execution_specs s ON s.id = e.execution_spec_id";
-
-fn execution_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Execution> {
+fn execution_from_joined_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Execution> {
     let state: String = row.get(3)?;
     let state = ExecutionState::parse(&state).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
     })?;
-    let context_window = checked_u32(row, 23)?;
-    let max_tokens = checked_u32(row, 24)?;
+    let context_window: i64 = row.get(23)?;
+    let context_window = u32::try_from(context_window).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            23,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })?;
+    let max_tokens: i64 = row.get(24)?;
+    let max_tokens = u32::try_from(max_tokens).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            24,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })?;
     Ok(Execution {
         id: ExecutionId(row.get(0)?),
         task_id: row.get(1)?,
@@ -434,21 +380,87 @@ fn execution_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Execution> {
     })
 }
 
-fn checked_u32(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u32> {
-    let value: i64 = row.get(index)?;
-    u32::try_from(value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            index,
-            rusqlite::types::Type::Integer,
-            Box::new(error),
+pub(super) fn project_task(
+    connection: &Connection,
+    mut task: DesktopTask,
+) -> Result<DesktopTask, StoreError> {
+    let active = connection
+        .query_row(
+            "SELECT id, state, failure, updated_at_ms FROM executions
+             WHERE task_id = ?1
+               AND state IN ('queued','preparing','running','waiting-for-approval','cancelling')
+             ORDER BY queued_at_ms DESC, id DESC LIMIT 1",
+            [&task.id],
+            |row| {
+                Ok((
+                    ExecutionId(row.get::<_, String>(0)?),
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
         )
-    })
+        .optional()?;
+    let latest = connection
+        .query_row(
+            "SELECT id, state, failure, updated_at_ms FROM executions
+             WHERE task_id = ?1 ORDER BY queued_at_ms DESC, id DESC LIMIT 1",
+            [&task.id],
+            |row| {
+                Ok((
+                    ExecutionId(row.get::<_, String>(0)?),
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((id, state, failure, updated_at_ms)) = active {
+        task.active_execution_id = Some(id.clone());
+        task.latest_execution_id = Some(id);
+        task.summary = TaskSummary::Active;
+        task.status = TaskStatus::parse(&state)?;
+        task.error = failure;
+        task.updated_at_ms = task.updated_at_ms.max(updated_at_ms);
+        return Ok(task);
+    }
+    task.active_execution_id = None;
+    if let Some((id, state, failure, updated_at_ms)) = latest {
+        let state = ExecutionState::parse(&state)?;
+        task.latest_execution_id = Some(id);
+        task.summary = match state {
+            ExecutionState::Completed => TaskSummary::Done,
+            ExecutionState::Failed | ExecutionState::Interrupted => TaskSummary::NeedsAttention,
+            ExecutionState::Cancelled => TaskSummary::Ready,
+            _ => TaskSummary::Active,
+        };
+        task.status = TaskStatus::parse(state.as_str())?;
+        task.error = failure;
+        task.updated_at_ms = task.updated_at_ms.max(updated_at_ms);
+    } else {
+        task.summary = TaskSummary::from_legacy_status(task.status);
+    }
+    Ok(task)
+}
+
+pub(super) fn task_has_executions(
+    connection: &Connection,
+    task_id: &str,
+) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM executions WHERE task_id = ?1)",
+            [task_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
 }
 
 pub(super) fn migrate_v4(connection: &Connection) -> Result<(), StoreError> {
     connection.execute_batch(
-        r#"BEGIN IMMEDIATE;
-        CREATE TABLE execution_specs (
+        "BEGIN IMMEDIATE;
+         CREATE TABLE execution_specs (
             id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
             model_registry_id TEXT,
@@ -463,77 +475,33 @@ pub(super) fn migrate_v4(connection: &Connection) -> Result<(), StoreError> {
             runtime_identity TEXT NOT NULL,
             adapter_identity TEXT NOT NULL,
             policy_identity TEXT NOT NULL,
-            context_window INTEGER NOT NULL CHECK (context_window >= 0),
-            max_tokens INTEGER NOT NULL CHECK (max_tokens >= 0),
+            context_window INTEGER NOT NULL,
+            max_tokens INTEGER NOT NULL,
             temperature_millis INTEGER NOT NULL,
-            legacy_unverified INTEGER NOT NULL CHECK (legacy_unverified IN (0,1)),
+            legacy_unverified INTEGER NOT NULL CHECK (legacy_unverified IN (0, 1)),
             created_at_ms INTEGER NOT NULL
-        );
-        CREATE INDEX execution_specs_task_created
-            ON execution_specs(task_id, created_at_ms, id);
-        CREATE TABLE executions (
+         );
+         CREATE TABLE executions (
             id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-            execution_spec_id TEXT NOT NULL UNIQUE REFERENCES execution_specs(id) ON DELETE CASCADE,
-            state TEXT NOT NULL CHECK (state IN (
-                'queued','preparing','running','waiting-for-approval','cancelling',
-                'completed','cancelled','failed','interrupted'
-            )),
+            execution_spec_id TEXT NOT NULL REFERENCES execution_specs(id),
+            state TEXT NOT NULL,
             failure TEXT,
             queued_at_ms INTEGER NOT NULL,
             started_at_ms INTEGER,
             finished_at_ms INTEGER,
             updated_at_ms INTEGER NOT NULL
-        );
-        CREATE INDEX executions_task_history
-            ON executions(task_id, queued_at_ms DESC, id DESC);
-        CREATE UNIQUE INDEX executions_one_active_per_task
+         );
+         CREATE INDEX executions_task_queued ON executions(task_id, queued_at_ms, id);
+         CREATE UNIQUE INDEX executions_one_active_per_task
             ON executions(task_id)
             WHERE state IN ('queued','preparing','running','waiting-for-approval','cancelling');
 
-        INSERT INTO execution_specs
-        (id, task_id, model_registry_id, model_repo_id, model_revision, model_filename,
-         model_sha256, session_config_sha256, profile_name, profile_sha256, runtime_name,
-         runtime_identity, adapter_identity, policy_identity, context_window, max_tokens,
-         temperature_millis, legacy_unverified, created_at_ms)
-        SELECT 'legacy-spec-' || tasks.id, tasks.id, NULL, tasks.model_repo_id, NULL,
-               tasks.model_filename, NULL, NULL, tasks.profile, NULL, 'legacy-unverified',
-               'legacy-unverified', 'legacy-unverified', 'legacy-unverified', 0, 0, 0, 1,
-               tasks.created_at_ms
-        FROM tasks
-        WHERE tasks.status <> 'draft'
-           OR EXISTS (SELECT 1 FROM task_messages WHERE task_messages.task_id = tasks.id)
-           OR EXISTS (SELECT 1 FROM task_events WHERE task_events.task_id = tasks.id)
-           OR EXISTS (SELECT 1 FROM tool_approvals WHERE tool_approvals.task_id = tasks.id);
+         ALTER TABLE task_messages RENAME TO task_messages_v3;
+         ALTER TABLE task_events RENAME TO task_events_v3;
+         ALTER TABLE tool_approvals RENAME TO tool_approvals_v3;
 
-        INSERT INTO executions
-        (id, task_id, execution_spec_id, state, failure, queued_at_ms, started_at_ms,
-         finished_at_ms, updated_at_ms)
-        SELECT 'legacy-execution-' || tasks.id, tasks.id, 'legacy-spec-' || tasks.id,
-               CASE tasks.status
-                   WHEN 'running' THEN 'interrupted'
-                   WHEN 'cancelling' THEN 'interrupted'
-                   WHEN 'draft' THEN 'interrupted'
-                   ELSE tasks.status
-               END,
-               CASE
-                   WHEN tasks.status IN ('running','cancelling')
-                       THEN 'Alpine Desktop restarted while the execution was active'
-                   WHEN tasks.status = 'draft'
-                       THEN 'Legacy task activity had no authoritative Execution lifecycle or exact execution identity'
-                   WHEN tasks.status IN ('failed','interrupted')
-                       THEN COALESCE(NULLIF(tasks.error, ''),
-                           'Legacy task ended without a recorded failure detail')
-                   ELSE NULL
-               END,
-               tasks.created_at_ms, NULL, tasks.updated_at_ms, tasks.updated_at_ms
-        FROM tasks
-        WHERE EXISTS (
-            SELECT 1 FROM execution_specs WHERE execution_specs.task_id = tasks.id
-        );
-
-        ALTER TABLE task_messages RENAME TO task_messages_v3;
-        CREATE TABLE task_messages (
+         CREATE TABLE task_messages (
             id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
             execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
@@ -542,16 +510,8 @@ pub(super) fn migrate_v4(connection: &Connection) -> Result<(), StoreError> {
             content TEXT NOT NULL,
             created_at_ms INTEGER NOT NULL,
             UNIQUE(task_id, sequence)
-        );
-        INSERT INTO task_messages
-            (id, task_id, execution_id, sequence, role, content, created_at_ms)
-        SELECT id, task_id, 'legacy-execution-' || task_id, sequence, role, content,
-               created_at_ms
-        FROM task_messages_v3;
-        DROP TABLE task_messages_v3;
-
-        ALTER TABLE task_events RENAME TO task_events_v3;
-        CREATE TABLE task_events (
+         );
+         CREATE TABLE task_events (
             id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
             execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
@@ -560,45 +520,96 @@ pub(super) fn migrate_v4(connection: &Connection) -> Result<(), StoreError> {
             payload_json TEXT NOT NULL,
             created_at_ms INTEGER NOT NULL,
             UNIQUE(task_id, sequence)
-        );
-        INSERT INTO task_events
-            (id, task_id, execution_id, sequence, kind, payload_json, created_at_ms)
-        SELECT id, task_id, 'legacy-execution-' || task_id, sequence, kind, payload_json,
-               created_at_ms
-        FROM task_events_v3;
-        DROP TABLE task_events_v3;
-
-        ALTER TABLE tool_approvals RENAME TO tool_approvals_v3;
-        CREATE TABLE tool_approvals (
+         );
+         CREATE TABLE tool_approvals (
             id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
             execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
             tool_call_id TEXT NOT NULL,
-            operation TEXT NOT NULL CHECK (operation IN ('edit', 'shell')),
+            operation TEXT NOT NULL,
             proposal_json TEXT NOT NULL,
-            state TEXT NOT NULL CHECK (state IN (
-                'pending','approved','denied','executing','completed','failed','interrupted'
-            )),
+            state TEXT NOT NULL,
             detail TEXT,
             created_at_ms INTEGER NOT NULL,
             decided_at_ms INTEGER,
             settled_at_ms INTEGER,
-            UNIQUE(execution_id, tool_call_id)
-        );
-        INSERT INTO tool_approvals
-            (id, task_id, execution_id, tool_call_id, operation, proposal_json, state,
-             detail, created_at_ms, decided_at_ms, settled_at_ms)
-        SELECT id, task_id, 'legacy-execution-' || task_id, tool_call_id, operation,
-               proposal_json, state, detail, created_at_ms, decided_at_ms, settled_at_ms
-        FROM tool_approvals_v3;
-        DROP TABLE tool_approvals_v3;
-        CREATE INDEX tool_approvals_task_state
-            ON tool_approvals(task_id, state, created_at_ms);
-        CREATE INDEX tool_approvals_execution_state
+            UNIQUE(task_id, execution_id, tool_call_id)
+         );
+         CREATE INDEX tool_approvals_execution_state
             ON tool_approvals(execution_id, state, created_at_ms);
 
-        UPDATE desktop_schema SET version = 4 WHERE singleton = 1;
-        COMMIT;"#,
+         INSERT INTO execution_specs (
+            id, task_id, model_registry_id, model_repo_id, model_revision, model_filename,
+            model_sha256, session_config_sha256, profile_name, profile_sha256, runtime_name,
+            runtime_identity, adapter_identity, policy_identity, context_window, max_tokens,
+            temperature_millis, legacy_unverified, created_at_ms
+         )
+         SELECT
+            'legacy-spec-' || id, id, NULL, model_repo_id, NULL, model_filename,
+            NULL, NULL, profile, NULL, 'legacy-unverified', 'legacy-unverified',
+            'legacy-unverified', 'legacy-unverified', 1, 1, 0, 1, created_at_ms
+         FROM tasks
+         WHERE EXISTS (SELECT 1 FROM task_messages_v3 m WHERE m.task_id = tasks.id)
+            OR EXISTS (SELECT 1 FROM task_events_v3 e WHERE e.task_id = tasks.id)
+            OR EXISTS (SELECT 1 FROM tool_approvals_v3 a WHERE a.task_id = tasks.id)
+            OR status <> 'draft';
+
+         INSERT INTO executions (
+            id, task_id, execution_spec_id, state, failure, queued_at_ms, started_at_ms,
+            finished_at_ms, updated_at_ms
+         )
+         SELECT
+            'legacy-execution-' || id, id, 'legacy-spec-' || id,
+            CASE status
+              WHEN 'running' THEN 'interrupted'
+              WHEN 'cancelling' THEN 'interrupted'
+              ELSE status
+            END,
+            CASE
+              WHEN status IN ('running','cancelling') THEN 'Legacy active Task migrated without resumable Execution identity'
+              ELSE error
+            END,
+            created_at_ms,
+            CASE WHEN status = 'draft' THEN NULL ELSE created_at_ms END,
+            CASE
+              WHEN status IN ('completed','cancelled','failed','interrupted','running','cancelling') THEN updated_at_ms
+              ELSE NULL
+            END,
+            updated_at_ms
+         FROM tasks
+         WHERE EXISTS (SELECT 1 FROM execution_specs s WHERE s.task_id = tasks.id);
+
+         INSERT INTO task_messages
+            (id, task_id, execution_id, sequence, role, content, created_at_ms)
+         SELECT id, task_id, 'legacy-execution-' || task_id, sequence, role, content, created_at_ms
+         FROM task_messages_v3;
+         INSERT INTO task_events
+            (id, task_id, execution_id, sequence, kind, payload_json, created_at_ms)
+         SELECT id, task_id, 'legacy-execution-' || task_id, sequence, kind, payload_json, created_at_ms
+         FROM task_events_v3;
+         INSERT INTO tool_approvals
+            (id, task_id, execution_id, tool_call_id, operation, proposal_json, state, detail,
+             created_at_ms, decided_at_ms, settled_at_ms)
+         SELECT id, task_id, 'legacy-execution-' || task_id, tool_call_id, operation,
+                proposal_json,
+                CASE WHEN state IN ('pending','approved','executing') THEN 'interrupted' ELSE state END,
+                CASE
+                  WHEN state IN ('pending','approved','executing') THEN 'Legacy Tool Approval migrated without resumable Execution identity'
+                  ELSE detail
+                END,
+                created_at_ms, decided_at_ms,
+                CASE WHEN state IN ('pending','approved','executing') THEN updated_at_ms ELSE settled_at_ms END
+         FROM (
+            SELECT a.*, t.updated_at_ms
+            FROM tool_approvals_v3 a
+            INNER JOIN tasks t ON t.id = a.task_id
+         );
+
+         DROP TABLE task_messages_v3;
+         DROP TABLE task_events_v3;
+         DROP TABLE tool_approvals_v3;
+         UPDATE desktop_schema SET version = 4 WHERE singleton = 1;
+         COMMIT;",
     )?;
     Ok(())
 }
