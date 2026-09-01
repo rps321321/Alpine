@@ -1,23 +1,11 @@
-import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   DesktopClient,
   DesktopTask,
-  Execution,
-  ExecutionState,
+  ExecutionUpdate,
   TaskEvent,
   TaskMessage,
   ToolApproval,
 } from "./desktop";
-import type { PiHarnessDependencies, PiLocalModelConfig } from "./harness/pi";
-
-export interface AgentRuntime {
-  readonly errorMessage?: string;
-  prompt(text: string): Promise<void>;
-  subscribe(listener: (event: AgentEvent) => void | Promise<void>): () => void;
-  abort(): void;
-  steer(text: string): void;
-  followUp(text: string): void;
-}
 
 export type TaskExecutionUpdate =
   | { type: "response"; taskId: string; prompt: string; response: string }
@@ -45,19 +33,11 @@ export interface TaskExecutionResult {
 }
 
 export interface TaskExecutionDependencies {
-  createRuntime(
-    config: PiLocalModelConfig,
-    dependencies: PiHarnessDependencies,
-  ): Promise<AgentRuntime>;
   scheduleFrame(callback: () => void): number;
   cancelFrame(frame: number): void;
 }
 
 const defaultDependencies: TaskExecutionDependencies = {
-  async createRuntime(config, dependencies) {
-    const { PiHarness } = await import("./harness/pi");
-    return new PiHarness(config, dependencies);
-  },
   scheduleFrame: (callback) => window.requestAnimationFrame(callback),
   cancelFrame: (frame) => window.cancelAnimationFrame(frame),
 };
@@ -70,19 +50,18 @@ export function createTaskExecution(
 }
 
 export class TaskExecution {
-  private runtime: AgentRuntime | null = null;
-  private execution: Execution | null = null;
-  private cancelled = false;
   private running = false;
+  private cancelled = false;
+  private cancelRequested = false;
+  private executionId: string | null = null;
   private promptText = "";
   private response = "";
   private frame: number | null = null;
-  private persistenceQueue: Promise<void> = Promise.resolve();
-  private persistenceFailure: Error | null = null;
-  private cancellationFailure: Error | null = null;
-  private cancelStatus: Promise<void> = Promise.resolve();
-  private transitionQueue: Promise<void> = Promise.resolve();
-  private runStartedAt = 0;
+  private firstDelta = true;
+  private terminalResolve: ((result: TaskExecutionResult) => void) | null = null;
+  private terminalSettled = false;
+  private readonly seenMessages = new Set<string>();
+  private readonly seenEvents = new Set<string>();
 
   constructor(
     private readonly input: TaskExecutionInput,
@@ -92,160 +71,185 @@ export class TaskExecution {
   async run(prompt: string): Promise<TaskExecutionResult> {
     if (this.running) throw new Error("Task execution is already running");
     this.running = true;
+    this.cancelled = false;
+    this.cancelRequested = false;
+    this.executionId = null;
     this.promptText = prompt;
     this.response = "";
-    this.runStartedAt = Date.now();
-    this.mark("alpine:pi-launch:start");
+    this.firstDelta = true;
+    this.terminalSettled = false;
+    this.seenMessages.clear();
+    this.seenEvents.clear();
+    this.mark("alpine:host-execution:start");
+
+    const buffered: ExecutionUpdate[] = [];
+    const terminal = new Promise<TaskExecutionResult>((resolve) => {
+      this.terminalResolve = resolve;
+    });
     let unsubscribe: (() => void) | undefined;
 
     try {
-      const launch = await this.input.desktop.resolvePiLaunch();
-      this.execution = await this.input.desktop.createExecution({
-        taskId: this.input.task.id,
-        specification: launch.specification,
-      });
-      if (this.cancelled) return await this.settleCancelled();
-      await this.moveTo("preparing");
-
-      this.runtime = await this.dependencies.createRuntime(launch, {
-        taskId: this.input.task.id,
-        executionId: this.execution.id,
-        desktop: this.input.desktop,
-        history: this.input.history,
-        onApproval: async (approval) => {
-          if (!this.cancelled && this.execution?.state === "running")
-            await this.moveTo("waiting-for-approval");
-          this.input.onUpdate({ type: "approval", approval });
-        },
-        onApprovalSettled: async () => {
-          if (
-            !this.cancelled &&
-            this.execution?.state === "waiting-for-approval"
-          )
-            await this.moveTo("running");
-        },
-      });
-      if (this.cancelled) return await this.settleCancelled();
-      await this.moveTo("running");
-
-      this.measure(
-        "alpine:pi-launch",
-        "alpine:pi-launch:start",
-        "alpine:pi-launch:ready",
-      );
-      let firstDelta = true;
-      unsubscribe = this.runtime.subscribe((event) => {
-        if (
-          event.type === "message_update" &&
-          event.assistantMessageEvent.type === "text_delta"
-        ) {
-          if (firstDelta) {
-            firstDelta = false;
-            this.measure(
-              "alpine:stream:first-event",
-              "alpine:stream:start",
-              "alpine:stream:first-event:ready",
-            );
-          }
-          this.response += event.assistantMessageEvent.delta;
-          this.scheduleResponse();
+      unsubscribe = await this.input.desktop.subscribeExecutionUpdates((update) => {
+        if (update.taskId !== this.input.task.id) return;
+        if (!this.executionId) {
+          buffered.push(update);
           return;
         }
-        this.persistenceQueue = this.persistenceQueue.then(() => this.persist(event));
+        if (update.executionId === this.executionId) this.apply(update);
       });
 
-      this.mark("alpine:stream:start");
-      await this.runtime.prompt(prompt);
-      await this.persistenceQueue.catch((error: unknown) => {
-        this.persistenceFailure = asError(error);
-        this.input.onUpdate({
-          type: "error",
-          scope: "persistence",
-          message: `Task history could not be saved: ${this.persistenceFailure.message}`,
-        });
-        throw this.persistenceFailure;
-      });
-      this.measure(
-        "alpine:stream:duration",
-        "alpine:stream:start",
-        "alpine:stream:end",
+      const accepted = await this.input.desktop.submitPrompt(
+        this.input.task.id,
+        prompt,
       );
-      if (this.runtime.errorMessage) throw new Error(this.runtime.errorMessage);
-      if (this.cancelled) return await this.settleCancelled();
+      this.executionId = accepted.execution.id;
+      this.acceptMessage(accepted.promptMessage);
+      for (const update of buffered) {
+        if (update.executionId === this.executionId) this.apply(update);
+      }
 
-      await this.recordMetricEvent("completed");
-      await this.moveTo("completed");
-      this.flushResponse();
-      return this.result("done");
+      this.measure(
+        "alpine:host-execution",
+        "alpine:host-execution:start",
+        "alpine:host-execution:accepted",
+      );
+      this.mark("alpine:stream:start");
+
+      if (this.cancelRequested) {
+        await this.input.desktop.cancelExecution(this.executionId);
+      }
+      return await terminal;
     } catch (error) {
       const message = asError(error).message;
-      if (this.cancelled) return await this.settleCancelled();
-      if (this.execution && !isTerminal(this.execution.state)) {
-        await this.moveTo("failed", message).catch(() => undefined);
+      if (!this.terminalSettled) {
+        this.input.onUpdate({ type: "error", scope: "run", message });
+        this.flushResponse();
+        return this.result("error", message);
       }
-      this.input.onUpdate({ type: "error", scope: "run", message });
-      this.flushResponse();
-      return this.result("error", message);
+      return await terminal;
     } finally {
       unsubscribe?.();
       this.clearFrame();
-      this.runtime = null;
+      this.terminalResolve = null;
       this.running = false;
     }
   }
 
   steer(text: string) {
-    this.runtime?.steer(text);
+    const executionId = this.executionId;
+    if (!executionId) return;
+    void this.input.desktop.steerExecution(executionId, text).catch((error) => {
+      this.input.onUpdate({
+        type: "error",
+        scope: "run",
+        message: asError(error).message,
+      });
+    });
   }
 
   followUp(text: string) {
-    this.runtime?.followUp(text);
+    const executionId = this.executionId;
+    if (!executionId) return;
+    void this.input.desktop.queueFollowUp(executionId, text).catch((error) => {
+      this.input.onUpdate({
+        type: "error",
+        scope: "run",
+        message: asError(error).message,
+      });
+    });
   }
 
   cancel() {
-    if (this.cancelled) return;
+    if (this.cancelRequested || this.terminalSettled) return;
+    this.cancelRequested = true;
     this.cancelled = true;
-    this.runtime?.abort();
-    this.cancelStatus = this.execution
-      ? this.moveTo("cancelling")
-          .then(() => undefined)
-          .catch((error: unknown) => {
-            this.cancellationFailure = new Error(
-              `Cancellation state could not be saved: ${asError(error).message}`,
-            );
-            this.input.onUpdate({
-              type: "error",
-              scope: "persistence",
-              message: this.cancellationFailure.message,
-            });
-          })
-      : Promise.resolve();
+    const executionId = this.executionId;
+    if (!executionId) return;
+    void this.input.desktop.cancelExecution(executionId).catch((error) => {
+      this.input.onUpdate({
+        type: "error",
+        scope: "persistence",
+        message: `Cancellation could not be requested: ${asError(error).message}`,
+      });
+    });
   }
 
-  private async settleCancelled(): Promise<TaskExecutionResult> {
-    await this.cancelStatus;
-    if (this.cancellationFailure) {
-      const message = this.cancellationFailure.message;
-      if (this.execution && !isTerminal(this.execution.state)) {
-        await this.moveTo("failed", message).catch(() => undefined);
-      }
-      this.flushResponse();
-      return this.result("error", message);
-    }
-    if (this.execution && !isTerminal(this.execution.state)) {
-      try {
-        await this.moveTo("cancelled");
-      } catch (error) {
-        const message = `Cancellation state could not be saved: ${asError(error).message}`;
-        this.input.onUpdate({ type: "error", scope: "persistence", message });
-        await this.moveTo("failed", message).catch(() => undefined);
+  private apply(update: ExecutionUpdate) {
+    switch (update.type) {
+      case "state":
+        return;
+      case "delta":
+        if (this.firstDelta) {
+          this.firstDelta = false;
+          this.measure(
+            "alpine:stream:first-event",
+            "alpine:stream:start",
+            "alpine:stream:first-event:ready",
+          );
+        }
+        this.response += update.delta;
+        this.scheduleResponse();
+        return;
+      case "message":
+        this.acceptMessage(update.message);
+        if (update.message.role === "assistant") {
+          this.response = update.message.content;
+          this.flushResponse();
+        }
+        return;
+      case "event":
+        if (this.seenEvents.has(update.event.id)) return;
+        this.seenEvents.add(update.event.id);
+        this.input.onUpdate({ type: "event", event: update.event });
+        return;
+      case "approval":
+        this.input.onUpdate({ type: "approval", approval: update.approval });
+        return;
+      case "inspector":
+        this.input.onUpdate({ type: "inspector", tab: update.tab });
+        return;
+      case "error":
+        this.input.onUpdate({
+          type: "error",
+          scope: update.scope,
+          message: update.message,
+        });
+        return;
+      case "terminal": {
+        if (this.terminalSettled) return;
+        this.terminalSettled = true;
+        this.measure(
+          "alpine:stream:duration",
+          "alpine:stream:start",
+          "alpine:stream:end",
+        );
         this.flushResponse();
-        return this.result("error", message);
+        if (update.outcome === "completed") {
+          this.resolveTerminal(this.result("done"));
+          return;
+        }
+        if (update.outcome === "cancelled") {
+          this.cancelled = true;
+          this.resolveTerminal(this.result("cancelled"));
+          return;
+        }
+        const message = update.error || "The host-owned Execution failed";
+        this.input.onUpdate({ type: "error", scope: "run", message });
+        this.resolveTerminal(this.result("error", message));
       }
     }
-    await this.recordMetricEvent("cancelled").catch(() => undefined);
-    this.flushResponse();
-    return this.result("cancelled");
+  }
+
+  private acceptMessage(message: TaskMessage) {
+    if (this.seenMessages.has(message.id)) return;
+    this.seenMessages.add(message.id);
+    this.input.onUpdate({ type: "message", message });
+  }
+
+  private resolveTerminal(result: TaskExecutionResult) {
+    const resolve = this.terminalResolve;
+    this.terminalResolve = null;
+    resolve?.(result);
   }
 
   private result(
@@ -254,33 +258,12 @@ export class TaskExecution {
   ): TaskExecutionResult {
     return {
       taskId: this.input.task.id,
-      ...(this.execution ? { executionId: this.execution.id } : {}),
+      ...(this.executionId ? { executionId: this.executionId } : {}),
       prompt: this.promptText,
       response: this.response,
       state,
       ...(error ? { error } : {}),
     };
-  }
-
-  private moveTo(state: ExecutionState, failure: string | null = null) {
-    const operation = this.transitionQueue.then(async () => {
-      if (!this.execution) throw new Error("Execution identity is unavailable");
-      if (this.execution.state === state) return this.execution;
-      if (isTerminal(this.execution.state)) {
-        throw new Error(`Execution is already ${this.execution.state}`);
-      }
-      this.execution = await this.input.desktop.transitionExecution(
-        this.execution.id,
-        state,
-        failure,
-      );
-      return this.execution;
-    });
-    this.transitionQueue = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
   }
 
   private scheduleResponse() {
@@ -313,57 +296,6 @@ export class TaskExecution {
     this.frame = null;
   }
 
-  private async persist(event: AgentEvent) {
-    const executionId = this.execution?.id;
-    if (!executionId) throw new Error("Execution identity is unavailable");
-    if (
-      event.type === "message_end" &&
-      (event.message.role === "user" || event.message.role === "assistant")
-    ) {
-      const content = agentMessageText(event.message);
-      if (content) {
-        const message = await this.input.desktop.appendTaskMessage({
-          taskId: this.input.task.id,
-          executionId,
-          role: event.message.role,
-          content,
-        });
-        this.input.onUpdate({ type: "message", message });
-      }
-    }
-
-    const normalized = normalizeAgentEvent(event);
-    if (!normalized) return;
-    const persisted = await this.input.desktop.appendTaskEvent({
-      taskId: this.input.task.id,
-      executionId,
-      ...normalized,
-    });
-    this.input.onUpdate({ type: "event", event: persisted });
-    if (persisted.kind === "tool.finished") {
-      const payload = persisted.payload as { toolName?: string };
-      if (payload.toolName === "edit_file")
-        this.input.onUpdate({ type: "inspector", tab: "changes" });
-      if (payload.toolName === "run_command")
-        this.input.onUpdate({ type: "inspector", tab: "terminal" });
-    }
-  }
-
-  private async recordMetricEvent(outcome: "completed" | "cancelled") {
-    if (!this.execution) return;
-    const event = await this.input.desktop.appendTaskEvent({
-      taskId: this.input.task.id,
-      executionId: this.execution.id,
-      kind: "execution.metrics",
-      payload: {
-        outcome,
-        durationMs: Math.max(0, Date.now() - this.runStartedAt),
-        responseCharacters: this.response.length,
-      },
-    });
-    this.input.onUpdate({ type: "event", event });
-  }
-
   private mark(name: string) {
     if (this.input.measurePerformance === false) return;
     try {
@@ -382,97 +314,6 @@ export class TaskExecution {
       // Performance marks are best-effort local diagnostics.
     }
   }
-}
-
-function isTerminal(state: ExecutionState) {
-  return ["completed", "cancelled", "failed", "interrupted"].includes(state);
-}
-
-export function normalizeAgentEvent(
-  event: AgentEvent,
-): { kind: string; payload: unknown } | null {
-  switch (event.type) {
-    case "agent_start":
-      return { kind: "agent.started", payload: {} };
-    case "agent_end":
-      return {
-        kind: "agent.finished",
-        payload: { messageCount: event.messages.length },
-      };
-    case "turn_start":
-      return { kind: "turn.started", payload: {} };
-    case "turn_end":
-      return {
-        kind: "turn.finished",
-        payload: { toolResultCount: event.toolResults.length },
-      };
-    case "message_start":
-      return { kind: "message.started", payload: { role: event.message.role } };
-    case "message_end":
-      return event.message.role === "assistant"
-        ? {
-            kind: "message.finished",
-            payload: {
-              role: "assistant",
-              stopReason: event.message.stopReason,
-              usage: event.message.usage,
-              error: event.message.errorMessage ?? null,
-            },
-          }
-        : { kind: "message.finished", payload: { role: event.message.role } };
-    case "tool_execution_start":
-      return {
-        kind: "tool.started",
-        payload: {
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          args: boundedPayload(event.args),
-        },
-      };
-    case "tool_execution_update":
-      return {
-        kind: "tool.updated",
-        payload: {
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          details: boundedPayload(event.partialResult?.details ?? null),
-        },
-      };
-    case "tool_execution_end":
-      return {
-        kind: "tool.finished",
-        payload: {
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          isError: event.isError,
-          details: boundedPayload(event.result?.details ?? null),
-        },
-      };
-    case "message_update":
-      return null;
-  }
-}
-
-function boundedPayload(value: unknown): unknown {
-  const encoded = JSON.stringify(value);
-  if (!encoded || encoded.length <= 256_000) return value;
-  return { truncated: true, preview: encoded.slice(0, 256_000) };
-}
-
-function agentMessageText(message: AgentMessage): string {
-  if (message.role === "user") {
-    if (typeof message.content === "string") return message.content;
-    return message.content
-      .filter((part) => part.type === "text")
-      .map((part) => part.text)
-      .join("\n");
-  }
-  if (message.role === "assistant")
-    return message.content
-      .filter((part) => part.type === "text")
-      .map((part) => part.text)
-      .join("");
-  return "";
 }
 
 function asError(error: unknown) {
