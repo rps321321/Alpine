@@ -3,14 +3,14 @@
 use crate::{
     PiLaunchConfig, resolve_pi_launch_blocking,
     store::{
-        CreateExecution, DesktopStore, Execution, ExecutionId, ExecutionState, MessageRole,
-        NewTaskEvent, NewTaskMessage, NewToolApproval, TaskEvent, TaskMessage, ToolApproval,
-        ToolApprovalDecision,
+        ApprovalState, DesktopStore, Execution, ExecutionState, MessageRole, NewToolApproval,
+        TaskEvent, TaskMessage, ToolApproval, ToolApprovalDecision, ToolProposal, ToolResult,
+        UserDirection,
     },
     workspace::{self, WorkspaceEdit, WorkspaceEditResult, WorkspaceShell, WorkspaceShellResult},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State, Webview, ipc::Channel};
 
@@ -58,13 +58,21 @@ pub enum AgentWorkerCommand {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentWorkerEvent {
+    sequence: u64,
+    #[serde(flatten)]
+    event: AgentWorkerEventKind,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "kebab-case",
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
-pub enum AgentWorkerEvent {
+enum AgentWorkerEventKind {
     Started {
         task_id: String,
         execution_id: String,
@@ -80,7 +88,7 @@ pub enum AgentWorkerEvent {
         role: MessageRole,
         content: String,
     },
-    Event {
+    Trace {
         task_id: String,
         execution_id: String,
         kind: String,
@@ -107,7 +115,7 @@ pub enum AgentWorkerEvent {
     },
 }
 
-impl AgentWorkerEvent {
+impl AgentWorkerEventKind {
     fn identity(&self) -> (&str, &str) {
         match self {
             Self::Started {
@@ -124,7 +132,7 @@ impl AgentWorkerEvent {
                 execution_id,
                 ..
             }
-            | Self::Event {
+            | Self::Trace {
                 task_id,
                 execution_id,
                 ..
@@ -204,6 +212,13 @@ pub enum ExecutionUpdate {
 struct ActiveExecution {
     task_id: String,
     execution_id: String,
+    last_worker_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerSequenceDisposition {
+    Process,
+    Duplicate,
 }
 
 #[derive(Default)]
@@ -276,6 +291,7 @@ impl TaskSupervisor {
         state.active = Some(ActiveExecution {
             task_id: task_id.to_owned(),
             execution_id: execution_id.to_owned(),
+            last_worker_sequence: 0,
         });
         Ok(())
     }
@@ -292,6 +308,36 @@ impl TaskSupervisor {
             )),
             None => Err("there is no active host-owned Execution".to_owned()),
         }
+    }
+
+    fn accept_worker_sequence(
+        &self,
+        task_id: &str,
+        execution_id: &str,
+        sequence: u64,
+    ) -> Result<WorkerSequenceDisposition, String> {
+        let mut state = self.state()?;
+        let active = state
+            .active
+            .as_mut()
+            .ok_or_else(|| "there is no active host-owned Execution".to_owned())?;
+        if active.task_id != task_id || active.execution_id != execution_id {
+            return Err(format!(
+                "worker update for {execution_id} does not match active Execution {}",
+                active.execution_id
+            ));
+        }
+        if sequence <= active.last_worker_sequence {
+            return Ok(WorkerSequenceDisposition::Duplicate);
+        }
+        let expected = active.last_worker_sequence.saturating_add(1);
+        if sequence != expected {
+            return Err(format!(
+                "Agent Worker event arrived out of order: expected {expected}, received {sequence}"
+            ));
+        }
+        active.last_worker_sequence = sequence;
+        Ok(WorkerSequenceDisposition::Process)
     }
 
     fn active_for_execution(&self, execution_id: &str) -> Result<ActiveExecution, String> {
@@ -376,6 +422,18 @@ fn terminal_update(execution: Execution, outcome: &'static str) -> ExecutionUpda
     }
 }
 
+fn broadcast_records(supervisor: &TaskSupervisor, records: &[TaskEvent]) {
+    for record in records {
+        if let Some(execution_id) = &record.execution_id {
+            supervisor.broadcast(ExecutionUpdate::Event {
+                task_id: record.task_id.clone(),
+                execution_id: execution_id.to_string(),
+                event: record.clone(),
+            });
+        }
+    }
+}
+
 fn fail_execution(
     store: &DesktopStore,
     supervisor: &TaskSupervisor,
@@ -383,49 +441,40 @@ fn fail_execution(
     message: impl Into<String>,
 ) -> Result<Execution, String> {
     let message = message.into();
-    let current = store
-        .get_execution(execution_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "the Execution no longer exists".to_owned())?;
-    let failed = if current.state.is_terminal() {
-        current
-    } else {
-        store
-            .transition_execution(execution_id, ExecutionState::Failed, Some(&message))
-            .map_err(|error| error.to_string())?
-    };
     let _ = supervisor.send_worker(AgentWorkerCommand::Cancel {
         execution_id: execution_id.to_owned(),
     });
     supervisor.finish(execution_id);
+    let current = store
+        .get_execution(execution_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the Execution no longer exists".to_owned())?;
+    let outcome = if current.state.is_terminal() {
+        crate::store::ExecutionTransitionOutcome {
+            execution: current,
+            records: Vec::new(),
+        }
+    } else {
+        store
+            .finish_execution(
+                execution_id,
+                ExecutionState::Failed,
+                Some(&message),
+                None,
+                None,
+            )
+            .map_err(|error| error.to_string())?
+    };
+    broadcast_records(supervisor, &outcome.records);
     supervisor.broadcast(ExecutionUpdate::Error {
-        task_id: failed.task_id.clone(),
+        task_id: outcome.execution.task_id.clone(),
         execution_id: execution_id.to_owned(),
         scope: "persistence",
         message: message.clone(),
     });
-    supervisor.broadcast(terminal_update(failed.clone(), "failed"));
-    Ok(failed)
-}
-
-fn append_metrics(
-    store: &DesktopStore,
-    execution: &Execution,
-    duration_ms: u64,
-    response_characters: u64,
-) -> Result<TaskEvent, String> {
-    store
-        .append_event(NewTaskEvent {
-            task_id: execution.task_id.clone(),
-            execution_id: execution.id.clone(),
-            kind: "execution.metrics".to_owned(),
-            payload: json!({
-                "durationMs": duration_ms,
-                "responseCharacters": response_characters,
-                "authority": "host-supervisor",
-            }),
-        })
-        .map_err(|error| error.to_string())
+    supervisor.broadcast(state_update(outcome.execution.clone()));
+    supervisor.broadcast(terminal_update(outcome.execution.clone(), "failed"));
+    Ok(outcome.execution)
 }
 
 fn terminalize(
@@ -437,7 +486,7 @@ fn terminalize(
     duration_ms: u64,
     response_characters: u64,
 ) -> Result<Execution, String> {
-    let mut current = store
+    let current = store
         .get_execution(execution_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "the Execution no longer exists".to_owned())?;
@@ -445,35 +494,27 @@ fn terminalize(
         supervisor.finish(execution_id);
         return Ok(current);
     }
-    if current.state == ExecutionState::WaitingForApproval {
-        current = store
-            .transition_execution(execution_id, ExecutionState::Running, None)
-            .map_err(|error| error.to_string())?;
-    }
-    let event = append_metrics(store, &current, duration_ms, response_characters)?;
-    supervisor.broadcast(ExecutionUpdate::Event {
-        task_id: current.task_id.clone(),
-        execution_id: execution_id.to_owned(),
-        event,
-    });
-    let next = if current.state == ExecutionState::Cancelling {
-        ExecutionState::Cancelled
-    } else {
-        requested
-    };
-    let execution = store
-        .transition_execution(execution_id, next, failure)
+    let outcome = store
+        .finish_execution(
+            execution_id,
+            requested,
+            failure,
+            Some(duration_ms),
+            Some(response_characters),
+        )
         .map_err(|error| error.to_string())?;
     supervisor.finish(execution_id);
-    let outcome = match next {
+    broadcast_records(supervisor, &outcome.records);
+    let result = outcome.execution;
+    let label = match result.state {
         ExecutionState::Completed => "completed",
         ExecutionState::Cancelled => "cancelled",
         ExecutionState::Failed => "failed",
         _ => return Err("terminal settlement selected a non-terminal state".to_owned()),
     };
-    supervisor.broadcast(state_update(execution.clone()));
-    supervisor.broadcast(terminal_update(execution.clone(), outcome));
-    Ok(execution)
+    supervisor.broadcast(state_update(result.clone()));
+    supervisor.broadcast(terminal_update(result.clone(), label));
+    Ok(result)
 }
 
 #[tauri::command]
@@ -523,68 +564,42 @@ pub async fn submit_prompt(
             tauri::async_runtime::spawn_blocking(move || resolve_pi_launch_blocking(launch_app))
                 .await
                 .map_err(|error| format!("Agent launch worker failed: {error}"))??;
-        let execution = store
-            .create_execution(CreateExecution {
-                task_id: task_id.clone(),
-                specification: launch.specification.clone(),
-            })
+        let accepted = store
+            .accept_prompt(&task_id, &prompt, launch.specification.clone())
             .map_err(|error| error.to_string())?;
-        let prompt_message = match store.append_message(NewTaskMessage {
-            task_id: task_id.clone(),
-            execution_id: execution.id.clone(),
-            role: MessageRole::User,
-            content: prompt.clone(),
-        }) {
-            Ok(message) => message,
-            Err(error) => {
-                let _ = fail_execution(
-                    &store,
-                    &supervisor,
-                    execution.id.as_str(),
-                    error.to_string(),
-                );
-                return Err(error.to_string());
-            }
-        };
-        let execution = match store.transition_execution(
-            execution.id.as_str(),
-            ExecutionState::Preparing,
-            None,
-        ) {
-            Ok(execution) => execution,
-            Err(error) => {
-                let _ = fail_execution(
-                    &store,
-                    &supervisor,
-                    execution.id.as_str(),
-                    error.to_string(),
-                );
-                return Err(error.to_string());
-            }
-        };
-        if let Err(error) = supervisor.activate(&task_id, execution.id.as_str()) {
-            let _ = fail_execution(&store, &supervisor, execution.id.as_str(), error.clone());
-            return Err(error);
-        }
+        let execution_id = accepted.execution.id.to_string();
+        broadcast_records(&supervisor, &accepted.records);
         supervisor.broadcast(ExecutionUpdate::Message {
             task_id: task_id.clone(),
-            execution_id: execution.id.to_string(),
-            message: prompt_message.clone(),
+            execution_id: execution_id.clone(),
+            message: accepted.prompt_message.clone(),
         });
-        supervisor.broadcast(state_update(execution.clone()));
+        let preparing = match store.record_execution_state(&execution_id, ExecutionState::Preparing) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = fail_execution(&store, &supervisor, &execution_id, error.to_string());
+                return Err(error.to_string());
+            }
+        };
+        broadcast_records(&supervisor, &preparing.records);
+        supervisor.broadcast(state_update(preparing.execution.clone()));
+        if let Err(error) = supervisor.activate(&task_id, &execution_id) {
+            let _ = fail_execution(&store, &supervisor, &execution_id, error.clone());
+            return Err(error);
+        }
         if let Err(error) = supervisor.send_worker(AgentWorkerCommand::Start {
             task_id: task_id.clone(),
-            execution_id: execution.id.to_string(),
+            execution_id: execution_id.clone(),
             prompt,
             history,
             config: Box::new(launch),
         }) {
-            let _ = fail_execution(&store, &supervisor, execution.id.as_str(), error.clone());
+            let _ = fail_execution(&store, &supervisor, &execution_id, error.clone());
             return Err(error);
         }
         Ok(SubmitPromptResult {
-            execution,
-            prompt_message,
+            execution: preparing.execution,
+            prompt_message: accepted.prompt_message,
         })
     }
     .await;
@@ -617,12 +632,9 @@ pub fn cancel_execution(
         .into_iter()
         .filter(|approval| approval.execution_id.as_str() == execution_id)
     {
-        if let Ok(decision) = store.decide_tool_approval_with_event(&approval.id, false) {
-            supervisor.broadcast(ExecutionUpdate::Event {
-                task_id: active.task_id.clone(),
-                execution_id: execution_id.clone(),
-                event: decision.event,
-            });
+        if let Ok(decision) = store.decide_tool_approval_recorded(&approval.id, false) {
+            broadcast_records(&supervisor, &decision.records);
+            supervisor.broadcast(state_update(decision.execution));
             let _ = supervisor.send_worker(AgentWorkerCommand::ApprovalDecision {
                 approval_id: approval.id,
                 approved: false,
@@ -632,9 +644,11 @@ pub fn cancel_execution(
     let cancelling = if current.state == ExecutionState::Cancelling {
         current
     } else {
-        store
-            .transition_execution(&execution_id, ExecutionState::Cancelling, None)
-            .map_err(|error| error.to_string())?
+        let outcome = store
+            .record_execution_state(&execution_id, ExecutionState::Cancelling)
+            .map_err(|error| error.to_string())?;
+        broadcast_records(&supervisor, &outcome.records);
+        outcome.execution
     };
     supervisor.broadcast(state_update(cancelling.clone()));
     if let Err(error) = supervisor.send_worker(AgentWorkerCommand::Cancel {
@@ -654,32 +668,20 @@ fn send_direction(
 ) -> Result<TaskMessage, String> {
     let text = validate_text("direction", text, MAX_DIRECTION_BYTES)?;
     let active = supervisor.active_for_execution(execution_id)?;
-    let execution = store
-        .get_execution(execution_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "the Execution does not exist".to_owned())?;
-    if !matches!(
-        execution.state,
-        ExecutionState::Running | ExecutionState::WaitingForApproval
-    ) {
-        return Err(format!(
-            "Execution {execution_id} cannot accept direction while {}",
-            execution.state.as_str()
-        ));
-    }
-    let message = store
-        .append_message(NewTaskMessage {
-            task_id: active.task_id.clone(),
-            execution_id: execution.id.clone(),
-            role: MessageRole::User,
-            content: text.clone(),
-        })
+    let direction = if follow_up {
+        UserDirection::FollowUp
+    } else {
+        UserDirection::Steer
+    };
+    let recorded = store
+        .record_direction(execution_id, direction, &text)
         .map_err(|error| error.to_string())?;
     supervisor.broadcast(ExecutionUpdate::Message {
         task_id: active.task_id,
         execution_id: execution_id.to_owned(),
-        message: message.clone(),
+        message: recorded.message.clone(),
     });
+    broadcast_records(supervisor, std::slice::from_ref(&recorded.record));
     let command = if follow_up {
         AgentWorkerCommand::FollowUp {
             execution_id: execution_id.to_owned(),
@@ -695,7 +697,7 @@ fn send_direction(
         let _ = fail_execution(store, supervisor, execution_id, error.clone());
         return Err(error);
     }
-    Ok(message)
+    Ok(recorded.message)
 }
 
 #[tauri::command]
@@ -736,35 +738,12 @@ pub fn decide_tool_approval(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "the Tool Approval does not exist".to_owned())?;
     let execution_id = approval.execution_id.to_string();
-    let task_id = approval.task_id.clone();
-    supervisor.verify_active(&task_id, &execution_id)?;
-    let current = store
-        .get_execution(&execution_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "the Execution does not exist".to_owned())?;
-    if current.state != ExecutionState::WaitingForApproval {
-        return Err(format!(
-            "Execution {execution_id} is not waiting for this approval"
-        ));
-    }
+    supervisor.verify_active(&approval.task_id, &execution_id)?;
     let decision = store
-        .decide_tool_approval_with_event(&approval_id, approved)
+        .decide_tool_approval_recorded(&approval_id, approved)
         .map_err(|error| error.to_string())?;
-    let running = store
-        .get_execution(&execution_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "the Execution no longer exists".to_owned())?;
-    if running.state != ExecutionState::Running {
-        let error = "approval decision did not atomically resume its Execution".to_owned();
-        let _ = fail_execution(&store, &supervisor, &execution_id, error.clone());
-        return Err(error);
-    }
-    supervisor.broadcast(state_update(running));
-    supervisor.broadcast(ExecutionUpdate::Event {
-        task_id: task_id.clone(),
-        execution_id: execution_id.clone(),
-        event: decision.event.clone(),
-    });
+    broadcast_records(&supervisor, &decision.records);
+    supervisor.broadcast(state_update(decision.execution.clone()));
     if let Err(error) = supervisor.send_worker(AgentWorkerCommand::ApprovalDecision {
         approval_id,
         approved,
@@ -784,34 +763,15 @@ pub fn agent_request_tool_approval(
 ) -> Result<ToolApproval, String> {
     require_webview(&webview, AGENT_WORKER_WEBVIEW)?;
     supervisor.verify_active(&input.task_id, input.execution_id.as_str())?;
-    let current = store
-        .get_execution(input.execution_id.as_str())
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "the Execution does not exist".to_owned())?;
-    if current.state != ExecutionState::Running {
-        return Err("the Execution is not ready to request a Tool Approval".to_owned());
-    }
-    let approval = store
-        .request_tool_approval(input)
-        .map_err(|error| error.to_string())?;
-    let waiting = match store.transition_execution(
-        approval.execution_id.as_str(),
-        ExecutionState::WaitingForApproval,
-        None,
-    ) {
-        Ok(execution) => execution,
-        Err(error) => {
-            let _ = store.decide_tool_approval_with_event(&approval.id, false);
-            return Err(error.to_string());
-        }
-    };
-    supervisor.broadcast(state_update(waiting));
+    let outcome = store.propose_tool(input).map_err(|error| error.to_string())?;
+    broadcast_records(&supervisor, &outcome.records);
+    supervisor.broadcast(state_update(outcome.execution));
     supervisor.broadcast(ExecutionUpdate::Approval {
-        task_id: approval.task_id.clone(),
-        execution_id: approval.execution_id.to_string(),
-        approval: approval.clone(),
+        task_id: outcome.approval.task_id.clone(),
+        execution_id: outcome.approval.execution_id.to_string(),
+        approval: outcome.approval.clone(),
     });
-    Ok(approval)
+    Ok(outcome.approval)
 }
 
 fn verify_worker_effect(
@@ -836,6 +796,9 @@ fn verify_worker_effect(
     if approval.task_id != task_id || approval.execution_id.as_str() != execution_id {
         return Err("the Tool Approval belongs to a different Execution".to_owned());
     }
+    if approval.state != ApprovalState::Approved {
+        return Err("the Tool Approval is not approved for execution".to_owned());
+    }
     Ok(())
 }
 
@@ -851,8 +814,46 @@ pub fn agent_execute_edit(
 ) -> Result<WorkspaceEditResult, String> {
     require_webview(&webview, AGENT_WORKER_WEBVIEW)?;
     verify_worker_effect(&store, &supervisor, &task_id, &execution_id, &approval_id)?;
-    workspace::edit_project_file(&store, &task_id, &approval_id, edit)
-        .map_err(|error| error.to_string())
+    let proposal = ToolProposal::from(&edit);
+    let claim = store
+        .claim_tool_effect(&approval_id, &proposal)
+        .map_err(|error| error.to_string())?;
+    broadcast_records(&supervisor, std::slice::from_ref(&claim.record));
+    match workspace::execute_edit(&store, &task_id, edit) {
+        Ok(result) => {
+            let detail = format!("edited {}", result.path);
+            let settled = store
+                .settle_tool_effect(
+                    &approval_id,
+                    true,
+                    ToolResult::from(result.clone()),
+                    Some(&detail),
+                )
+                .map_err(|error| error.to_string())?;
+            broadcast_records(&supervisor, &settled.records);
+            supervisor.broadcast(ExecutionUpdate::Inspector {
+                task_id,
+                execution_id,
+                tab: "changes",
+            });
+            Ok(result)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let settled = store
+                .settle_tool_effect(
+                    &approval_id,
+                    false,
+                    ToolResult::Failure {
+                        message: message.clone(),
+                    },
+                    Some(&message),
+                )
+                .map_err(|cause| cause.to_string())?;
+            broadcast_records(&supervisor, &settled.records);
+            Err(message)
+        }
+    }
 }
 
 #[tauri::command]
@@ -867,49 +868,65 @@ pub async fn agent_run_shell(
 ) -> Result<WorkspaceShellResult, String> {
     require_webview(&webview, AGENT_WORKER_WEBVIEW)?;
     verify_worker_effect(&store, &supervisor, &task_id, &execution_id, &approval_id)?;
-    let store = Arc::clone(store.inner());
-    tauri::async_runtime::spawn_blocking(move || {
-        workspace::run_project_shell(&store, &task_id, &approval_id, shell)
-            .map_err(|error| error.to_string())
+    let proposal = ToolProposal::from(&shell);
+    let claim = store
+        .claim_tool_effect(&approval_id, &proposal)
+        .map_err(|error| error.to_string())?;
+    broadcast_records(&supervisor, std::slice::from_ref(&claim.record));
+    let store_for_shell = Arc::clone(store.inner());
+    let task_for_shell = task_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        workspace::execute_shell(&store_for_shell, &task_for_shell, shell)
     })
     .await
-    .map_err(|error| format!("workspace shell worker failed: {error}"))?
-}
-
-fn inspect_tool_event(
-    supervisor: &TaskSupervisor,
-    task_id: &str,
-    execution_id: &str,
-    kind: &str,
-    payload: &Value,
-) {
-    if kind != "tool.finished" {
-        return;
-    }
-    let tool_name = payload.get("toolName").and_then(Value::as_str);
-    let tab = match tool_name {
-        Some("edit_file") => Some("changes"),
-        Some("run_command") => Some("terminal"),
-        _ => None,
-    };
-    if let Some(tab) = tab {
-        supervisor.broadcast(ExecutionUpdate::Inspector {
-            task_id: task_id.to_owned(),
-            execution_id: execution_id.to_owned(),
-            tab,
-        });
+    .map_err(|error| format!("workspace shell worker failed: {error}"))?;
+    match result {
+        Ok(result) => {
+            let succeeded = result.exit_code == 0;
+            let detail = format!("exit {} in {} ms", result.exit_code, result.duration_ms);
+            let settled = store
+                .settle_tool_effect(
+                    &approval_id,
+                    succeeded,
+                    ToolResult::from(result.clone()),
+                    Some(&detail),
+                )
+                .map_err(|error| error.to_string())?;
+            broadcast_records(&supervisor, &settled.records);
+            supervisor.broadcast(ExecutionUpdate::Inspector {
+                task_id,
+                execution_id,
+                tab: "terminal",
+            });
+            Ok(result)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let settled = store
+                .settle_tool_effect(
+                    &approval_id,
+                    false,
+                    ToolResult::Failure {
+                        message: message.clone(),
+                    },
+                    Some(&message),
+                )
+                .map_err(|cause| cause.to_string())?;
+            broadcast_records(&supervisor, &settled.records);
+            Err(message)
+        }
     }
 }
 
 fn handle_worker_event(
     store: &DesktopStore,
     supervisor: &TaskSupervisor,
-    event: AgentWorkerEvent,
+    event: AgentWorkerEventKind,
 ) -> Result<(), String> {
     let (task_id, execution_id) = event.identity();
     supervisor.verify_active(task_id, execution_id)?;
     match event {
-        AgentWorkerEvent::Started { execution_id, .. } => {
+        AgentWorkerEventKind::Started { execution_id, .. } => {
             let current = store
                 .get_execution(&execution_id)
                 .map_err(|error| error.to_string())?
@@ -924,12 +941,13 @@ fn handle_worker_event(
                     current.state.as_str()
                 ));
             }
-            let running = store
-                .transition_execution(&execution_id, ExecutionState::Running, None)
+            let outcome = store
+                .record_execution_state(&execution_id, ExecutionState::Running)
                 .map_err(|error| error.to_string())?;
-            supervisor.broadcast(state_update(running));
+            broadcast_records(supervisor, &outcome.records);
+            supervisor.broadcast(state_update(outcome.execution));
         }
-        AgentWorkerEvent::Delta {
+        AgentWorkerEventKind::Delta {
             task_id,
             execution_id,
             delta,
@@ -943,7 +961,7 @@ fn handle_worker_event(
                 delta,
             });
         }
-        AgentWorkerEvent::Message {
+        AgentWorkerEventKind::Message {
             task_id,
             execution_id,
             role,
@@ -952,42 +970,20 @@ fn handle_worker_event(
             if role != MessageRole::Assistant {
                 return Err("the Agent Worker may persist only assistant messages".to_owned());
             }
-            let message = store
-                .append_message(NewTaskMessage {
-                    task_id: task_id.clone(),
-                    execution_id: ExecutionId(execution_id.clone()),
-                    role,
-                    content,
-                })
+            let recorded = store
+                .record_assistant_message(&execution_id, &content)
                 .map_err(|error| error.to_string())?;
             supervisor.broadcast(ExecutionUpdate::Message {
                 task_id,
                 execution_id,
-                message,
+                message: recorded.message,
             });
+            broadcast_records(supervisor, std::slice::from_ref(&recorded.record));
         }
-        AgentWorkerEvent::Event {
-            task_id,
-            execution_id,
-            kind,
-            payload,
-        } => {
-            let persisted = store
-                .append_event(NewTaskEvent {
-                    task_id: task_id.clone(),
-                    execution_id: ExecutionId(execution_id.clone()),
-                    kind: kind.clone(),
-                    payload: payload.clone(),
-                })
-                .map_err(|error| error.to_string())?;
-            supervisor.broadcast(ExecutionUpdate::Event {
-                task_id: task_id.clone(),
-                execution_id: execution_id.clone(),
-                event: persisted,
-            });
-            inspect_tool_event(supervisor, &task_id, &execution_id, &kind, &payload);
+        AgentWorkerEventKind::Trace { kind, payload, .. } => {
+            let _ = (kind, payload);
         }
-        AgentWorkerEvent::Completed {
+        AgentWorkerEventKind::Completed {
             execution_id,
             duration_ms,
             response_characters,
@@ -1003,7 +999,7 @@ fn handle_worker_event(
                 response_characters,
             )?;
         }
-        AgentWorkerEvent::Cancelled {
+        AgentWorkerEventKind::Cancelled {
             execution_id,
             duration_ms,
             response_characters,
@@ -1019,7 +1015,7 @@ fn handle_worker_event(
                 response_characters,
             )?;
         }
-        AgentWorkerEvent::Failed {
+        AgentWorkerEventKind::Failed {
             execution_id,
             error,
             duration_ms,
@@ -1048,7 +1044,8 @@ pub fn agent_worker_event(
     event: AgentWorkerEvent,
 ) -> Result<(), String> {
     require_webview(&webview, AGENT_WORKER_WEBVIEW)?;
-    let (_, execution_id) = event.identity();
+    let (task_id, execution_id) = event.event.identity();
+    let task_id = task_id.to_owned();
     let execution_id = execution_id.to_owned();
     let current = store
         .get_execution(&execution_id)
@@ -1057,8 +1054,15 @@ pub fn agent_worker_event(
     if current.state.is_terminal() {
         return Ok(());
     }
-    supervisor.verify_active(&current.task_id, &execution_id)?;
-    match handle_worker_event(&store, &supervisor, event) {
+    match supervisor.accept_worker_sequence(&task_id, &execution_id, event.sequence) {
+        Ok(WorkerSequenceDisposition::Duplicate) => return Ok(()),
+        Ok(WorkerSequenceDisposition::Process) => {}
+        Err(error) => {
+            let _ = fail_execution(&store, &supervisor, &execution_id, error.clone());
+            return Err(error);
+        }
+    }
+    match handle_worker_event(&store, &supervisor, event.event) {
         Ok(()) => Ok(()),
         Err(error) => {
             let current = store
@@ -1097,5 +1101,36 @@ mod tests {
         supervisor.activate("task-1", "execution-1").unwrap();
         assert!(supervisor.verify_active("task-2", "execution-1").is_err());
         assert!(supervisor.verify_active("task-1", "execution-2").is_err());
+    }
+
+    #[test]
+    fn duplicate_worker_delivery_is_idempotent_and_gaps_are_rejected() {
+        let supervisor = TaskSupervisor::default();
+        supervisor.reserve("task-1").unwrap();
+        supervisor.activate("task-1", "execution-1").unwrap();
+        assert_eq!(
+            supervisor
+                .accept_worker_sequence("task-1", "execution-1", 1)
+                .unwrap(),
+            WorkerSequenceDisposition::Process
+        );
+        assert_eq!(
+            supervisor
+                .accept_worker_sequence("task-1", "execution-1", 1)
+                .unwrap(),
+            WorkerSequenceDisposition::Duplicate
+        );
+        assert!(
+            supervisor
+                .accept_worker_sequence("task-1", "execution-1", 3)
+                .unwrap_err()
+                .contains("out of order")
+        );
+        assert_eq!(
+            supervisor
+                .accept_worker_sequence("task-1", "execution-1", 2)
+                .unwrap(),
+            WorkerSequenceDisposition::Process
+        );
     }
 }
