@@ -6,6 +6,7 @@ import type {
   Execution,
   ExecutionState,
   TaskMessage,
+  ToolApproval,
 } from "./desktop";
 import {
   createTaskExecution,
@@ -242,6 +243,82 @@ describe("Task execution", () => {
       }),
     );
     expect(updates.some((update) => update.type === "message")).toBe(true);
+  });
+
+  it("returns the Execution to running after a Tool Approval settles", async () => {
+    const desktop = desktopDouble();
+    const pending: ToolApproval = {
+      id: "approval-1",
+      taskId: "task-1",
+      executionId: "execution-1",
+      toolCallId: "tool-1",
+      operation: "shell",
+      proposal: { command: "cargo test" },
+      state: "pending",
+      detail: null,
+      createdAtMs: 1,
+      decidedAtMs: null,
+      settledAtMs: null,
+    };
+    const approved: ToolApproval = {
+      ...pending,
+      state: "approved",
+      decidedAtMs: 2,
+    };
+    const createRuntime = vi.fn(async (_config, dependencies) => ({
+      subscribe: () => () => undefined,
+      async prompt() {
+        await dependencies.onApproval?.(pending);
+        await dependencies.onApprovalSettled?.(approved);
+      },
+      abort: vi.fn(),
+      steer: vi.fn(),
+      followUp: vi.fn(),
+    }));
+    const controller = createTaskExecution(
+      { desktop, task: task(), history: [], onUpdate: () => undefined },
+      {
+        createRuntime,
+        scheduleFrame: () => 1,
+        cancelFrame: () => undefined,
+      },
+    );
+
+    await expect(controller.run("Run the tests")).resolves.toMatchObject({
+      executionId: "execution-1",
+      state: "done",
+    });
+    const transition = vi.mocked(desktop.transitionExecution);
+    expect(transition).toHaveBeenNthCalledWith(
+      1,
+      "execution-1",
+      "preparing",
+      null,
+    );
+    expect(transition).toHaveBeenNthCalledWith(
+      2,
+      "execution-1",
+      "running",
+      null,
+    );
+    expect(transition).toHaveBeenNthCalledWith(
+      3,
+      "execution-1",
+      "waiting-for-approval",
+      null,
+    );
+    expect(transition).toHaveBeenNthCalledWith(
+      4,
+      "execution-1",
+      "running",
+      null,
+    );
+    expect(transition).toHaveBeenNthCalledWith(
+      5,
+      "execution-1",
+      "completed",
+      null,
+    );
   });
 
   it("settles cancellation against the exact active Execution", async () => {

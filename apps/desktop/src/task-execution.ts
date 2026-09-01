@@ -117,6 +117,13 @@ export class TaskExecution {
             await this.moveTo("waiting-for-approval");
           this.input.onUpdate({ type: "approval", approval });
         },
+        onApprovalSettled: async () => {
+          if (
+            !this.cancelled &&
+            this.execution?.state === "waiting-for-approval"
+          )
+            await this.moveTo("running");
+        },
       });
       if (this.cancelled) return await this.settleCancelled();
       await this.moveTo("running");
@@ -309,12 +316,6 @@ export class TaskExecution {
   private async persist(event: AgentEvent) {
     const executionId = this.execution?.id;
     if (!executionId) throw new Error("Execution identity is unavailable");
-    if (
-      event.type === "tool_execution_start" &&
-      this.execution?.state === "waiting-for-approval"
-    ) {
-      await this.moveTo("running");
-    }
     if (
       event.type === "message_end" &&
       (event.message.role === "user" || event.message.role === "assistant")
