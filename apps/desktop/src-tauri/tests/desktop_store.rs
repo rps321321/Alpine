@@ -248,7 +248,7 @@ fn crash_between_prompt_acceptance_and_provider_launch_is_explicitly_interrupted
         TaskJournalEvent::ExecutionQueued { .. }
     ));
     assert!(matches!(
-        detail.events.last().unwrap().event,
+        &detail.events.last().unwrap().event,
         TaskJournalEvent::ExecutionFinished {
             outcome: alpine_desktop::store::ExecutionOutcome::Interrupted,
             ..
@@ -317,7 +317,7 @@ fn restart_interrupts_the_exact_execution_and_its_pending_approval() {
     assert!(
         journal
             .iter()
-            .any(|record| matches!(record.event, TaskJournalEvent::ApprovalInterrupted { .. }))
+            .any(|record| matches!(&record.event, TaskJournalEvent::ApprovalInterrupted { .. }))
     );
     assert!(journal.iter().any(|record| matches!(
         record.event,
@@ -371,12 +371,12 @@ fn crash_during_tool_settlement_does_not_invent_a_result() {
     assert!(
         journal
             .iter()
-            .any(|record| matches!(record.event, TaskJournalEvent::ToolStarted { .. }))
+            .any(|record| matches!(&record.event, TaskJournalEvent::ToolStarted { .. }))
     );
     assert!(
         !journal
             .iter()
-            .any(|record| matches!(record.event, TaskJournalEvent::ToolResultRecorded { .. }))
+            .any(|record| matches!(&record.event, TaskJournalEvent::ToolResultRecorded { .. }))
     );
     assert!(journal.iter().any(|record| matches!(
         record.event,

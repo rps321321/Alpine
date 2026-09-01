@@ -1512,7 +1512,7 @@ fn rebuild_task_projections(connection: &mut Connection, task_id: &str) -> Resul
 }
 
 fn is_execution_seed(record: &TaskEvent) -> bool {
-    matches!(record.event, TaskJournalEvent::ExecutionQueued { .. })
+    matches!(&record.event, TaskJournalEvent::ExecutionQueued { .. })
         || matches!(
             &record.event,
             TaskJournalEvent::LegacyImported {
@@ -1530,7 +1530,7 @@ fn apply_record_projection(
     match &record.event {
         TaskJournalEvent::UserPromptAccepted { content }
         | TaskJournalEvent::AssistantMessageCompleted { content } => {
-            let role = if matches!(record.event, TaskJournalEvent::UserPromptAccepted { .. }) {
+            let role = if matches!(&record.event, TaskJournalEvent::UserPromptAccepted { .. }) {
                 MessageRole::User
             } else {
                 MessageRole::Assistant
@@ -1650,7 +1650,7 @@ fn apply_record_projection(
         TaskJournalEvent::LegacyImported {
             source,
             source_id,
-            source_sequence,
+            source_sequence: _,
             source_occurred_at_ms,
             data,
             ..

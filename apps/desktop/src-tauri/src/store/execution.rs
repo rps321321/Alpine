@@ -154,13 +154,6 @@ pub struct ExecutionSpecification {
     pub created_at_ms: i64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreateExecution {
-    pub task_id: String,
-    pub specification: NewExecutionSpecification,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Execution {
@@ -272,27 +265,6 @@ fn validate_sha256<'a>(label: &str, value: &'a str) -> Result<&'a str, StoreErro
         Ok(value)
     } else {
         Err(StoreError::message(format!("{label} is invalid")))
-    }
-}
-
-pub(super) fn ensure_execution_for_task(
-    connection: &Connection,
-    task_id: &str,
-    execution_id: &str,
-) -> Result<(), StoreError> {
-    let matches: bool = connection.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM executions WHERE id = ?1 AND task_id = ?2
-         )",
-        params![execution_id, task_id],
-        |row| row.get(0),
-    )?;
-    if matches {
-        Ok(())
-    } else {
-        Err(StoreError::message(
-            "the Execution does not belong to the Task",
-        ))
     }
 }
 

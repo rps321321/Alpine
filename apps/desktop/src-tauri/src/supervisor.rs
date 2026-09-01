@@ -4,8 +4,8 @@ use crate::{
     PiLaunchConfig, resolve_pi_launch_blocking,
     store::{
         ApprovalState, DesktopStore, Execution, ExecutionState, MessageRole, NewToolApproval,
-        TaskEvent, TaskMessage, ToolApproval, ToolApprovalDecision, ToolProposal, ToolResult,
-        UserDirection,
+        StoreError, TaskEvent, TaskMessage, ToolApproval, ToolApprovalDecision, ToolProposal,
+        ToolResult, UserDirection,
     },
     workspace::{self, WorkspaceEdit, WorkspaceEditResult, WorkspaceShell, WorkspaceShellResult},
 };
@@ -477,6 +477,22 @@ fn fail_execution(
     Ok(outcome.execution)
 }
 
+fn journal_or_fail<T>(
+    store: &DesktopStore,
+    supervisor: &TaskSupervisor,
+    execution_id: &str,
+    result: Result<T, StoreError>,
+) -> Result<T, String> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let message = error.to_string();
+            let _ = fail_execution(store, supervisor, execution_id, message.clone());
+            Err(message)
+        }
+    }
+}
+
 fn terminalize(
     store: &DesktopStore,
     supervisor: &TaskSupervisor,
@@ -633,21 +649,28 @@ pub fn cancel_execution(
         .into_iter()
         .filter(|approval| approval.execution_id.as_str() == execution_id)
     {
-        if let Ok(decision) = store.decide_tool_approval_recorded(&approval.id, false) {
-            broadcast_records(&supervisor, &decision.records);
-            supervisor.broadcast(state_update(decision.execution));
-            let _ = supervisor.send_worker(AgentWorkerCommand::ApprovalDecision {
-                approval_id: approval.id,
-                approved: false,
-            });
-        }
+        let decision = journal_or_fail(
+            &store,
+            &supervisor,
+            &execution_id,
+            store.decide_tool_approval_recorded(&approval.id, false),
+        )?;
+        broadcast_records(&supervisor, &decision.records);
+        supervisor.broadcast(state_update(decision.execution));
+        let _ = supervisor.send_worker(AgentWorkerCommand::ApprovalDecision {
+            approval_id: approval.id,
+            approved: false,
+        });
     }
     let cancelling = if current.state == ExecutionState::Cancelling {
         current
     } else {
-        let outcome = store
-            .record_execution_state(&execution_id, ExecutionState::Cancelling)
-            .map_err(|error| error.to_string())?;
+        let outcome = journal_or_fail(
+            &store,
+            &supervisor,
+            &execution_id,
+            store.record_execution_state(&execution_id, ExecutionState::Cancelling),
+        )?;
         broadcast_records(&supervisor, &outcome.records);
         outcome.execution
     };
@@ -674,9 +697,12 @@ fn send_direction(
     } else {
         UserDirection::Steer
     };
-    let recorded = store
-        .record_direction(execution_id, direction, &text)
-        .map_err(|error| error.to_string())?;
+    let recorded = journal_or_fail(
+        store,
+        supervisor,
+        execution_id,
+        store.record_direction(execution_id, direction, &text),
+    )?;
     supervisor.broadcast(ExecutionUpdate::Message {
         task_id: active.task_id,
         execution_id: execution_id.to_owned(),
@@ -740,9 +766,12 @@ pub fn decide_tool_approval(
         .ok_or_else(|| "the Tool Approval does not exist".to_owned())?;
     let execution_id = approval.execution_id.to_string();
     supervisor.verify_active(&approval.task_id, &execution_id)?;
-    let decision = store
-        .decide_tool_approval_recorded(&approval_id, approved)
-        .map_err(|error| error.to_string())?;
+    let decision = journal_or_fail(
+        &store,
+        &supervisor,
+        &execution_id,
+        store.decide_tool_approval_recorded(&approval_id, approved),
+    )?;
     broadcast_records(&supervisor, &decision.records);
     supervisor.broadcast(state_update(decision.execution.clone()));
     if let Err(error) = supervisor.send_worker(AgentWorkerCommand::ApprovalDecision {
@@ -764,9 +793,13 @@ pub fn agent_request_tool_approval(
 ) -> Result<ToolApproval, String> {
     require_webview(&webview, AGENT_WORKER_WEBVIEW)?;
     supervisor.verify_active(&input.task_id, input.execution_id.as_str())?;
-    let outcome = store
-        .propose_tool(input)
-        .map_err(|error| error.to_string())?;
+    let execution_id = input.execution_id.to_string();
+    let outcome = journal_or_fail(
+        &store,
+        &supervisor,
+        &execution_id,
+        store.propose_tool(input),
+    )?;
     broadcast_records(&supervisor, &outcome.records);
     supervisor.broadcast(state_update(outcome.execution));
     supervisor.broadcast(ExecutionUpdate::Approval {
@@ -818,21 +851,27 @@ pub fn agent_execute_edit(
     require_webview(&webview, AGENT_WORKER_WEBVIEW)?;
     verify_worker_effect(&store, &supervisor, &task_id, &execution_id, &approval_id)?;
     let proposal = ToolProposal::from(&edit);
-    let claim = store
-        .claim_tool_effect(&approval_id, &proposal)
-        .map_err(|error| error.to_string())?;
+    let claim = journal_or_fail(
+        &store,
+        &supervisor,
+        &execution_id,
+        store.claim_tool_effect(&approval_id, &proposal),
+    )?;
     broadcast_records(&supervisor, std::slice::from_ref(&claim.record));
     match workspace::execute_edit(&store, &task_id, edit) {
         Ok(result) => {
             let detail = format!("edited {}", result.path);
-            let settled = store
-                .settle_tool_effect(
+            let settled = journal_or_fail(
+                &store,
+                &supervisor,
+                &execution_id,
+                store.settle_tool_effect(
                     &approval_id,
                     true,
                     ToolResult::from(result.clone()),
                     Some(&detail),
-                )
-                .map_err(|error| error.to_string())?;
+                ),
+            )?;
             broadcast_records(&supervisor, &settled.records);
             supervisor.broadcast(ExecutionUpdate::Inspector {
                 task_id,
@@ -843,16 +882,19 @@ pub fn agent_execute_edit(
         }
         Err(error) => {
             let message = error.to_string();
-            let settled = store
-                .settle_tool_effect(
+            let settled = journal_or_fail(
+                &store,
+                &supervisor,
+                &execution_id,
+                store.settle_tool_effect(
                     &approval_id,
                     false,
                     ToolResult::Failure {
                         message: message.clone(),
                     },
                     Some(&message),
-                )
-                .map_err(|cause| cause.to_string())?;
+                ),
+            )?;
             broadcast_records(&supervisor, &settled.records);
             Err(message)
         }
@@ -872,29 +914,42 @@ pub async fn agent_run_shell(
     require_webview(&webview, AGENT_WORKER_WEBVIEW)?;
     verify_worker_effect(&store, &supervisor, &task_id, &execution_id, &approval_id)?;
     let proposal = ToolProposal::from(&shell);
-    let claim = store
-        .claim_tool_effect(&approval_id, &proposal)
-        .map_err(|error| error.to_string())?;
+    let claim = journal_or_fail(
+        &store,
+        &supervisor,
+        &execution_id,
+        store.claim_tool_effect(&approval_id, &proposal),
+    )?;
     broadcast_records(&supervisor, std::slice::from_ref(&claim.record));
     let store_for_shell = Arc::clone(store.inner());
     let task_for_shell = task_id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let result = match tauri::async_runtime::spawn_blocking(move || {
         workspace::execute_shell(&store_for_shell, &task_for_shell, shell)
     })
     .await
-    .map_err(|error| format!("workspace shell worker failed: {error}"))?;
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let message = format!("workspace shell worker failed: {error}");
+            let _ = fail_execution(&store, &supervisor, &execution_id, message.clone());
+            return Err(message);
+        }
+    };
     match result {
         Ok(result) => {
             let succeeded = result.exit_code == 0;
             let detail = format!("exit {} in {} ms", result.exit_code, result.duration_ms);
-            let settled = store
-                .settle_tool_effect(
+            let settled = journal_or_fail(
+                &store,
+                &supervisor,
+                &execution_id,
+                store.settle_tool_effect(
                     &approval_id,
                     succeeded,
                     ToolResult::from(result.clone()),
                     Some(&detail),
-                )
-                .map_err(|error| error.to_string())?;
+                ),
+            )?;
             broadcast_records(&supervisor, &settled.records);
             supervisor.broadcast(ExecutionUpdate::Inspector {
                 task_id,
@@ -905,16 +960,19 @@ pub async fn agent_run_shell(
         }
         Err(error) => {
             let message = error.to_string();
-            let settled = store
-                .settle_tool_effect(
+            let settled = journal_or_fail(
+                &store,
+                &supervisor,
+                &execution_id,
+                store.settle_tool_effect(
                     &approval_id,
                     false,
                     ToolResult::Failure {
                         message: message.clone(),
                     },
                     Some(&message),
-                )
-                .map_err(|cause| cause.to_string())?;
+                ),
+            )?;
             broadcast_records(&supervisor, &settled.records);
             Err(message)
         }
