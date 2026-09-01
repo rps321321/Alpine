@@ -49,6 +49,9 @@ outcome. Pi runs in an isolated `agent-worker` webview and reports bounded event
 over a Tauri channel; worker-originated calls are checked against both webview
 identity and the active Task/Execution pair.
 
+The worker start command boxes its comparatively large launch specification so
+routine steering, cancellation, and approval commands remain small values.
+
 The worker proposes an exact effect for approval; it does not expose the
 renderer-era row-mutation API. Approval persistence and state transitions remain
 host-owned.
