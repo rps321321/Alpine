@@ -22,7 +22,9 @@ jobs:
       - name: Install desktop Rust formatter
         run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt
       - name: Apply host-supervisor cutover
-        run: python scripts/apply_issue_47.py
+        run: |
+          sed -i '/^patch_pi_test()$/d' scripts/apply_issue_47.py
+          python scripts/apply_issue_47.py
       - name: Format Rust
         run: cargo +1.88.0 fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
       - name: Retire one-shot migration files
