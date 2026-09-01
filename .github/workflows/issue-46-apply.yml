@@ -1,0 +1,66 @@
+name: issue-46-apply
+
+on:
+  push:
+    branches:
+      - codex/issue-46-execution-aggregate
+    paths:
+      - .github/workflows/issue-46-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: codex/issue-46-execution-aggregate
+          fetch-depth: 0
+      - name: Recover and apply reviewed patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/issue-46-invariants.yml').read_text(encoding='utf-8')
+          opening = "          python - <<'PY'\n"
+          closing = "\n          PY\n"
+          start = workflow.index(opening) + len(opening)
+          end = workflow.index(closing, start)
+          lines = workflow[start:end].splitlines()
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+          Path('/tmp/issue46_invariants.py').write_text(script, encoding='utf-8')
+          PY
+          python /tmp/issue46_invariants.py
+      - name: Apply exact Clippy diagnostics
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('apps/desktop/src-tauri/src/store/execution.rs')
+          text = path.read_text(encoding='utf-8')
+          old = '''    validate_optional, validate_optional_identifier,\n'''
+          if text.count(old) != 1:
+              raise SystemExit('validator import marker changed')
+          text = text.replace(old, '''    validate_optional_identifier,\n''', 1)
+          old = '''fn validate_transition_failure<'a>(\n    next: ExecutionState,\n    failure: Option<&'a str>,\n) -> Result<Option<&'a str>, StoreError> {'''
+          new = '''fn validate_transition_failure(\n    next: ExecutionState,\n    failure: Option<&str>,\n) -> Result<Option<&str>, StoreError> {'''
+          if text.count(old) != 1:
+              raise SystemExit('transition failure lifetime marker changed')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+      - name: Format and validate patch
+        shell: bash
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+          cargo +1.88.0 fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
+          git diff --check
+      - name: Commit reviewed fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop/src-tauri/src/store/execution.rs apps/desktop/src-tauri/tests/desktop_store.rs apps/desktop/src-tauri/tests/workspace.rs apps/desktop/src/task-execution.ts apps/desktop/src/task-execution.test.ts
+          git commit -m "fix: preserve authoritative execution outcomes"
+          git push origin HEAD:codex/issue-46-execution-aggregate
