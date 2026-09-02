@@ -1329,10 +1329,7 @@ fn decode_task_journal_event(event_json: &str) -> Result<TaskJournalEvent, Store
         }
     };
     for key in object.keys() {
-        if !allowed
-            .iter()
-            .any(|allowed_key| key.as_str() == *allowed_key)
-        {
+        if !allowed.contains(&key.as_str()) {
             return Err(StoreError::message(format!(
                 "Task Journal event '{event_type}' contains unknown field '{key}'"
             )));
