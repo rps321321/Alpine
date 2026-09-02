@@ -1,0 +1,33 @@
+name: apply-issue-48-unknown-fields-fix
+
+on:
+  push:
+    branches:
+      - codex/issue-48-task-journal
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Enforce strict Task Journal fields
+        run: python scripts/fix_issue_48_unknown_fields.py
+      - name: Install Rust formatter
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+      - name: Format desktop Rust
+        run: cargo +1.88.0 fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all
+      - name: Retire one-shot script
+        run: rm scripts/fix_issue_48_unknown_fields.py
+      - name: Commit strict decoder
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: reject unknown task journal event fields"
+          git push origin HEAD:codex/issue-48-task-journal
