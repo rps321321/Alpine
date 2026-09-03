@@ -1,10 +1,10 @@
 use alpine_desktop::store::{
-    ApprovalState, CreateExecution, CreateTask, DesktopStore, ExecutionState, MessageRole,
-    ModelSource, NewExecutionSpecification, NewTaskEvent, NewTaskMessage, NewToolApproval,
-    RegisterModelArtifact, TaskSummary,
+    ApprovalState, CreateTask, DesktopStore, ExecutionId, ExecutionState, LegacyCausalOrder,
+    LegacySource, ModelSource, NewExecutionSpecification, NewToolApproval, RegisterModelArtifact,
+    TaskJournalEvent, TaskSummary, ToolProposal, ToolResult, ToolSettlementState,
 };
-use rusqlite::Connection;
-use std::path::Path;
+use rusqlite::{Connection, params};
+use std::path::{Path, PathBuf};
 
 fn specification(seed: char) -> NewExecutionSpecification {
     NewExecutionSpecification {
@@ -44,82 +44,77 @@ fn setup() -> (tempfile::TempDir, DesktopStore, String) {
     (temporary, store, task.id)
 }
 
+fn active_execution(store: &DesktopStore, task_id: &str, seed: char) -> ExecutionId {
+    let execution = store
+        .accept_prompt(task_id, "Run the task", specification(seed))
+        .unwrap()
+        .execution;
+    store
+        .record_execution_state(execution.id.as_str(), ExecutionState::Preparing)
+        .unwrap();
+    store
+        .record_execution_state(execution.id.as_str(), ExecutionState::Running)
+        .unwrap();
+    execution.id
+}
+
+fn assert_contiguous_journal(store: &DesktopStore, task_id: &str) {
+    let records = store.load_journal(task_id).unwrap();
+    for (index, record) in records.iter().enumerate() {
+        assert_eq!(record.sequence, i64::try_from(index + 1).unwrap());
+        assert_eq!(record.version, 1);
+    }
+}
+
 #[test]
 fn multiple_executions_preserve_failure_retry_identity_and_ordered_history() {
     let (temporary, store, task_id) = setup();
-    let first = store
-        .create_execution(CreateExecution {
-            task_id: task_id.clone(),
-            specification: specification('a'),
-        })
+    let first = active_execution(&store, &task_id, 'a');
+    store
+        .record_assistant_message(first.as_str(), "The first attempt failed.")
         .unwrap();
     store
-        .transition_execution(first.id.as_str(), ExecutionState::Preparing, None)
-        .unwrap();
-    store
-        .transition_execution(first.id.as_str(), ExecutionState::Running, None)
-        .unwrap();
-    store
-        .append_message(NewTaskMessage {
-            task_id: task_id.clone(),
-            execution_id: first.id.clone(),
-            role: MessageRole::Assistant,
-            content: "The first attempt failed.".to_owned(),
-        })
-        .unwrap();
-    store
-        .append_event(NewTaskEvent {
-            task_id: task_id.clone(),
-            execution_id: first.id.clone(),
-            kind: "execution.metrics".to_owned(),
-            payload: serde_json::json!({"durationMs": 12}),
-        })
-        .unwrap();
-    store
-        .transition_execution(
-            first.id.as_str(),
+        .finish_execution(
+            first.as_str(),
             ExecutionState::Failed,
             Some("provider stopped"),
+            Some(12),
+            Some(25),
         )
         .unwrap();
 
-    let second = store
-        .create_execution(CreateExecution {
-            task_id: task_id.clone(),
-            specification: specification('e'),
-        })
-        .unwrap();
-    assert_ne!(first.id, second.id);
-    assert_ne!(first.execution_spec_id, second.execution_spec_id);
+    let second = active_execution(&store, &task_id, 'e');
+    assert_ne!(first, second);
     store
-        .transition_execution(second.id.as_str(), ExecutionState::Preparing, None)
-        .unwrap();
-    store
-        .transition_execution(second.id.as_str(), ExecutionState::Running, None)
-        .unwrap();
-    store
-        .transition_execution(second.id.as_str(), ExecutionState::Completed, None)
+        .finish_execution(
+            second.as_str(),
+            ExecutionState::Completed,
+            None,
+            Some(20),
+            Some(8),
+        )
         .unwrap();
     assert!(
         store
-            .transition_execution(second.id.as_str(), ExecutionState::Running, None)
+            .record_execution_state(second.as_str(), ExecutionState::Running)
             .is_err()
     );
+    assert_contiguous_journal(&store, &task_id);
     drop(store);
 
     let reopened = DesktopStore::open(temporary.path().join("desktop.sqlite3")).unwrap();
     let detail = reopened.load_task(&task_id).unwrap().unwrap();
     assert_eq!(detail.task.summary, TaskSummary::Done);
     assert_eq!(detail.task.active_execution_id, None);
-    assert_eq!(detail.task.latest_execution_id.as_ref(), Some(&second.id));
+    assert_eq!(detail.task.latest_execution_id.as_ref(), Some(&second));
     assert_eq!(detail.executions.len(), 2);
-    assert_eq!(detail.executions[0].id, first.id);
+    assert_eq!(detail.executions[0].id, first);
     assert_eq!(detail.executions[0].state, ExecutionState::Failed);
     assert_eq!(
         detail.executions[0].failure.as_deref(),
         Some("provider stopped")
     );
-    assert_eq!(detail.executions[1].id, second.id);
+    assert_eq!(detail.executions[1].id, second);
     assert_eq!(detail.executions[1].state, ExecutionState::Completed);
     assert_eq!(
         detail.executions[0].specification.model_sha256.as_deref(),
@@ -129,28 +124,49 @@ fn multiple_executions_preserve_failure_retry_identity_and_ordered_history() {
         detail.executions[1].specification.model_sha256.as_deref(),
         Some("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
     );
-    assert_eq!(detail.messages[0].execution_id, first.id);
-    assert_eq!(detail.events[0].execution_id, first.id);
+    assert!(
+        detail
+            .messages
+            .iter()
+            .any(|message| message.execution_id == first)
+    );
+    assert!(
+        detail
+            .messages
+            .iter()
+            .any(|message| message.execution_id == second)
+    );
+    assert!(
+        detail
+            .events
+            .iter()
+            .all(|record| record.execution_id.is_some())
+    );
 }
 
 #[test]
 fn cancellation_is_a_validated_execution_lifecycle() {
     let (_temporary, store, task_id) = setup();
     let execution = store
-        .create_execution(CreateExecution {
-            task_id: task_id.clone(),
-            specification: specification('a'),
-        })
+        .accept_prompt(&task_id, "Cancel this", specification('a'))
+        .unwrap()
+        .execution;
+    store
+        .record_execution_state(execution.id.as_str(), ExecutionState::Preparing)
         .unwrap();
     store
-        .transition_execution(execution.id.as_str(), ExecutionState::Preparing, None)
-        .unwrap();
-    store
-        .transition_execution(execution.id.as_str(), ExecutionState::Cancelling, None)
+        .record_execution_state(execution.id.as_str(), ExecutionState::Cancelling)
         .unwrap();
     let cancelled = store
-        .transition_execution(execution.id.as_str(), ExecutionState::Cancelled, None)
-        .unwrap();
+        .finish_execution(
+            execution.id.as_str(),
+            ExecutionState::Cancelled,
+            None,
+            Some(4),
+            Some(0),
+        )
+        .unwrap()
+        .execution;
     assert!(cancelled.finished_at_ms.is_some());
     assert_eq!(
         store.load_task(&task_id).unwrap().unwrap().task.summary,
@@ -158,8 +174,16 @@ fn cancellation_is_a_validated_execution_lifecycle() {
     );
     assert!(
         store
-            .transition_execution(execution.id.as_str(), ExecutionState::Completed, None)
-            .is_err()
+            .finish_execution(
+                execution.id.as_str(),
+                ExecutionState::Completed,
+                None,
+                Some(5),
+                Some(0),
+            )
+            .unwrap()
+            .records
+            .is_empty()
     );
 }
 
@@ -167,18 +191,70 @@ fn cancellation_is_a_validated_execution_lifecycle() {
 fn queued_cancellation_does_not_invent_a_start_timestamp() {
     let (_temporary, store, task_id) = setup();
     let execution = store
-        .create_execution(CreateExecution {
-            task_id,
-            specification: specification('a'),
-        })
-        .unwrap();
+        .accept_prompt(&task_id, "Cancel before launch", specification('a'))
+        .unwrap()
+        .execution;
 
     let cancelled = store
-        .transition_execution(execution.id.as_str(), ExecutionState::Cancelled, None)
-        .unwrap();
+        .finish_execution(
+            execution.id.as_str(),
+            ExecutionState::Cancelled,
+            None,
+            Some(0),
+            Some(0),
+        )
+        .unwrap()
+        .execution;
 
     assert_eq!(cancelled.started_at_ms, None);
     assert!(cancelled.finished_at_ms.is_some());
+}
+
+#[test]
+fn crash_between_prompt_acceptance_and_provider_launch_is_explicitly_interrupted() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project_root = temporary.path().join("selected-project");
+    std::fs::create_dir(&project_root).unwrap();
+    let database = temporary.path().join("desktop.sqlite3");
+    let store = DesktopStore::open(&database).unwrap();
+    let project = store.create_project("Alpine", &project_root).unwrap();
+    let task = store
+        .create_task(CreateTask {
+            project_id: project.id,
+            title: "Crash before provider".to_owned(),
+            model_repo_id: "local/alpine-install".to_owned(),
+            model_filename: "model.gguf".to_owned(),
+            profile: "stable-16k".to_owned(),
+        })
+        .unwrap();
+    let execution = store
+        .accept_prompt(&task.id, "Persist me before launch", specification('a'))
+        .unwrap()
+        .execution;
+    drop(store);
+
+    let reopened = DesktopStore::open(&database).unwrap();
+    let detail = reopened.load_task(&task.id).unwrap().unwrap();
+    assert_eq!(detail.messages.len(), 1);
+    assert_eq!(detail.messages[0].content, "Persist me before launch");
+    assert_eq!(detail.executions[0].id, execution.id);
+    assert_eq!(detail.executions[0].state, ExecutionState::Interrupted);
+    assert!(matches!(
+        detail.events[0].event,
+        TaskJournalEvent::UserPromptAccepted { .. }
+    ));
+    assert!(matches!(
+        detail.events[1].event,
+        TaskJournalEvent::ExecutionQueued { .. }
+    ));
+    assert!(matches!(
+        &detail.events.last().unwrap().event,
+        TaskJournalEvent::ExecutionFinished {
+            outcome: alpine_desktop::store::ExecutionOutcome::Interrupted,
+            ..
+        }
+    ));
+    assert_contiguous_journal(&reopened, &task.id);
 }
 
 #[test]
@@ -198,32 +274,24 @@ fn restart_interrupts_the_exact_execution_and_its_pending_approval() {
             profile: "stable-16k".to_owned(),
         })
         .unwrap();
-    let execution = store
-        .create_execution(CreateExecution {
-            task_id: task.id.clone(),
-            specification: specification('a'),
-        })
-        .unwrap();
-    store
-        .transition_execution(execution.id.as_str(), ExecutionState::Preparing, None)
-        .unwrap();
-    store
-        .transition_execution(execution.id.as_str(), ExecutionState::Running, None)
-        .unwrap();
+    let execution_id = active_execution(&store, &task.id, 'a');
     let approval = store
-        .request_tool_approval(NewToolApproval {
+        .propose_tool(NewToolApproval {
             task_id: task.id.clone(),
-            execution_id: execution.id.clone(),
+            execution_id: execution_id.clone(),
             tool_call_id: "call-1".to_owned(),
-            operation: "shell".to_owned(),
-            proposal: serde_json::json!({"command": "cargo test", "timeoutSeconds": 30}),
+            proposal: ToolProposal::Shell {
+                command: "cargo test".to_owned(),
+                timeout_seconds: 30,
+            },
         })
-        .unwrap();
+        .unwrap()
+        .approval;
     drop(store);
 
     let reopened = DesktopStore::open(&database).unwrap();
     let restored = reopened
-        .get_execution(execution.id.as_str())
+        .get_execution(execution_id.as_str())
         .unwrap()
         .unwrap();
     assert_eq!(restored.state, ExecutionState::Interrupted);
@@ -245,138 +313,312 @@ fn restart_interrupts_the_exact_execution_and_its_pending_approval() {
         reopened.load_task(&task.id).unwrap().unwrap().task.summary,
         TaskSummary::NeedsAttention
     );
+    let journal = reopened.load_journal(&task.id).unwrap();
+    assert!(
+        journal
+            .iter()
+            .any(|record| matches!(&record.event, TaskJournalEvent::ApprovalInterrupted { .. }))
+    );
+    assert!(journal.iter().any(|record| matches!(
+        record.event,
+        TaskJournalEvent::ToolSettled {
+            state: ToolSettlementState::Interrupted,
+            ..
+        }
+    )));
 }
 
 #[test]
-fn approvals_messages_and_events_are_bound_to_one_execution() {
-    let (_temporary, store, task_id) = setup();
-    let execution = store
-        .create_execution(CreateExecution {
-            task_id: task_id.clone(),
-            specification: specification('a'),
+fn crash_during_tool_settlement_does_not_invent_a_result() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project_root = temporary.path().join("selected-project");
+    std::fs::create_dir(&project_root).unwrap();
+    let database = temporary.path().join("desktop.sqlite3");
+    let store = DesktopStore::open(&database).unwrap();
+    let project = store.create_project("Alpine", &project_root).unwrap();
+    let task = store
+        .create_task(CreateTask {
+            project_id: project.id,
+            title: "Crash during tool".to_owned(),
+            model_repo_id: "local/alpine-install".to_owned(),
+            model_filename: "model.gguf".to_owned(),
+            profile: "stable-16k".to_owned(),
         })
         .unwrap();
-    let proposal = serde_json::json!({"path": "README.md", "oldText": "old", "newText": "new"});
-    let pending = store
-        .request_tool_approval(NewToolApproval {
-            task_id: task_id.clone(),
-            execution_id: execution.id.clone(),
-            tool_call_id: "call-1".to_owned(),
-            operation: "edit".to_owned(),
+    let execution_id = active_execution(&store, &task.id, 'a');
+    let proposal = ToolProposal::Edit {
+        path: "README.md".to_owned(),
+        old_text: "old".to_owned(),
+        new_text: "new".to_owned(),
+    };
+    let approval = store
+        .propose_tool(NewToolApproval {
+            task_id: task.id.clone(),
+            execution_id: execution_id.clone(),
+            tool_call_id: "edit-crash".to_owned(),
             proposal: proposal.clone(),
         })
-        .unwrap();
-    let decision = store
-        .decide_tool_approval_with_event(&pending.id, true)
-        .unwrap();
-    assert_eq!(decision.approval.execution_id, execution.id);
-    assert_eq!(decision.event.execution_id, execution.id);
+        .unwrap()
+        .approval;
     store
-        .claim_tool_approval(&pending.id, "edit", &proposal)
+        .decide_tool_approval_recorded(&approval.id, true)
         .unwrap();
+    store.claim_tool_effect(&approval.id, &proposal).unwrap();
+    drop(store);
+
+    let reopened = DesktopStore::open(&database).unwrap();
+    let journal = reopened.load_journal(&task.id).unwrap();
     assert!(
-        store
-            .claim_tool_approval(&pending.id, "edit", &proposal)
-            .is_err()
+        journal
+            .iter()
+            .any(|record| matches!(&record.event, TaskJournalEvent::ToolStarted { .. }))
     );
-}
-
-#[test]
-fn approval_decision_atomically_resumes_its_waiting_execution() {
-    let (_temporary, store, task_id) = setup();
-    let execution = store
-        .create_execution(CreateExecution {
-            task_id: task_id.clone(),
-            specification: specification('a'),
-        })
-        .unwrap();
-    store
-        .transition_execution(execution.id.as_str(), ExecutionState::Preparing, None)
-        .unwrap();
-    store
-        .transition_execution(execution.id.as_str(), ExecutionState::Running, None)
-        .unwrap();
-    store
-        .transition_execution(
-            execution.id.as_str(),
-            ExecutionState::WaitingForApproval,
-            None,
-        )
-        .unwrap();
-    let approval = store
-        .request_tool_approval(NewToolApproval {
-            task_id,
-            execution_id: execution.id.clone(),
-            tool_call_id: "call-atomic".to_owned(),
-            operation: "shell".to_owned(),
-            proposal: serde_json::json!({"command": "cargo test", "timeoutSeconds": 30}),
-        })
-        .unwrap();
-
-    let decision = store
-        .decide_tool_approval_with_event(&approval.id, true)
-        .unwrap();
-
-    assert_eq!(decision.approval.state, ApprovalState::Approved);
-    assert_eq!(decision.event.execution_id, execution.id);
+    assert!(
+        !journal
+            .iter()
+            .any(|record| matches!(&record.event, TaskJournalEvent::ToolResultRecorded { .. }))
+    );
+    assert!(journal.iter().any(|record| matches!(
+        record.event,
+        TaskJournalEvent::ToolSettled {
+            state: ToolSettlementState::Interrupted,
+            ..
+        }
+    )));
     assert_eq!(
-        store
-            .get_execution(execution.id.as_str())
+        reopened
+            .get_tool_approval(&approval.id)
             .unwrap()
             .unwrap()
             .state,
-        ExecutionState::Running
+        ApprovalState::Interrupted
+    );
+    assert_eq!(
+        reopened
+            .get_execution(execution_id.as_str())
+            .unwrap()
+            .unwrap()
+            .state,
+        ExecutionState::Interrupted
     );
 }
 
 #[test]
-fn deleting_a_task_cascades_all_execution_owned_records() {
+fn approval_decision_and_execution_resume_share_one_journal_transaction() {
     let (_temporary, store, task_id) = setup();
-    let execution = store
-        .create_execution(CreateExecution {
-            task_id: task_id.clone(),
-            specification: specification('a'),
-        })
-        .unwrap();
+    let execution_id = active_execution(&store, &task_id, 'a');
     let approval = store
-        .request_tool_approval(NewToolApproval {
-            task_id: task_id.clone(),
-            execution_id: execution.id.clone(),
+        .propose_tool(NewToolApproval {
+            task_id,
+            execution_id: execution_id.clone(),
+            tool_call_id: "call-atomic".to_owned(),
+            proposal: ToolProposal::Shell {
+                command: "cargo test".to_owned(),
+                timeout_seconds: 30,
+            },
+        })
+        .unwrap()
+        .approval;
+
+    let decision = store
+        .decide_tool_approval_recorded(&approval.id, true)
+        .unwrap();
+
+    assert_eq!(decision.approval.state, ApprovalState::Approved);
+    assert_eq!(decision.execution.state, ExecutionState::Running);
+    assert_eq!(decision.records.len(), 2);
+    assert!(matches!(
+        decision.records[0].event,
+        TaskJournalEvent::ApprovalDecided { approved: true, .. }
+    ));
+    assert!(matches!(
+        decision.records[1].event,
+        TaskJournalEvent::ExecutionResumed { .. }
+    ));
+    assert_eq!(
+        decision.records[1].sequence,
+        decision.records[0].sequence + 1
+    );
+}
+
+#[test]
+fn exact_tool_claim_is_bound_to_one_execution_and_one_typed_proposal() {
+    let (_temporary, store, task_id) = setup();
+    let execution_id = active_execution(&store, &task_id, 'a');
+    let proposal = ToolProposal::Edit {
+        path: "README.md".to_owned(),
+        old_text: "old".to_owned(),
+        new_text: "new".to_owned(),
+    };
+    let pending = store
+        .propose_tool(NewToolApproval {
+            task_id,
+            execution_id: execution_id.clone(),
             tool_call_id: "call-1".to_owned(),
-            operation: "edit".to_owned(),
-            proposal: serde_json::json!({"path": "README.md", "oldText": "a", "newText": "b"}),
+            proposal: proposal.clone(),
         })
+        .unwrap()
+        .approval;
+    let decision = store
+        .decide_tool_approval_recorded(&pending.id, true)
+        .unwrap();
+    assert_eq!(decision.approval.execution_id, execution_id);
+    assert!(
+        decision
+            .records
+            .iter()
+            .all(|record| record.execution_id.as_ref() == Some(&execution_id))
+    );
+    store.claim_tool_effect(&pending.id, &proposal).unwrap();
+    assert!(store.claim_tool_effect(&pending.id, &proposal).is_err());
+}
+
+#[test]
+fn projection_rebuild_is_deterministic_for_transcript_summary_approvals_and_tools() {
+    let (_temporary, store, task_id) = setup();
+    let execution_id = active_execution(&store, &task_id, 'a');
+    store
+        .record_assistant_message(execution_id.as_str(), "I will edit README.")
+        .unwrap();
+    let proposal = ToolProposal::Edit {
+        path: "README.md".to_owned(),
+        old_text: "old".to_owned(),
+        new_text: "new".to_owned(),
+    };
+    let approval = store
+        .propose_tool(NewToolApproval {
+            task_id: task_id.clone(),
+            execution_id: execution_id.clone(),
+            tool_call_id: "edit-1".to_owned(),
+            proposal: proposal.clone(),
+        })
+        .unwrap()
+        .approval;
+    store
+        .decide_tool_approval_recorded(&approval.id, true)
+        .unwrap();
+    store.claim_tool_effect(&approval.id, &proposal).unwrap();
+    store
+        .settle_tool_effect(
+            &approval.id,
+            true,
+            ToolResult::Edit {
+                path: "README.md".to_owned(),
+                replacements: 1,
+                diff: "-old\n+new".to_owned(),
+            },
+            Some("edited README.md"),
+        )
         .unwrap();
     store
-        .append_message(NewTaskMessage {
-            task_id: task_id.clone(),
-            execution_id: execution.id.clone(),
-            role: MessageRole::User,
-            content: "Delete me".to_owned(),
-        })
+        .finish_execution(
+            execution_id.as_str(),
+            ExecutionState::Completed,
+            None,
+            Some(42),
+            Some(18),
+        )
         .unwrap();
-    store
-        .append_event(NewTaskEvent {
+
+    let before = store.load_task(&task_id).unwrap().unwrap();
+    let before_events = before
+        .events
+        .iter()
+        .map(|record| (record.sequence, record.version, record.event.clone()))
+        .collect::<Vec<_>>();
+    let before_messages = before
+        .messages
+        .iter()
+        .map(|message| (message.sequence, message.role, message.content.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        store
+            .get_tool_approval(&approval.id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ApprovalState::Completed
+    );
+
+    store.rebuild_task_projections(&task_id).unwrap();
+
+    let after = store.load_task(&task_id).unwrap().unwrap();
+    assert_eq!(after.task.summary, TaskSummary::Done);
+    assert_eq!(after.executions.len(), 1);
+    assert_eq!(after.executions[0].state, ExecutionState::Completed);
+    assert_eq!(
+        after
+            .messages
+            .iter()
+            .map(|message| (message.sequence, message.role, message.content.clone()))
+            .collect::<Vec<_>>(),
+        before_messages
+    );
+    assert_eq!(
+        after
+            .events
+            .iter()
+            .map(|record| (record.sequence, record.version, record.event.clone()))
+            .collect::<Vec<_>>(),
+        before_events
+    );
+    assert_eq!(
+        store
+            .get_tool_approval(&approval.id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ApprovalState::Completed
+    );
+    assert!(store.list_pending_approvals(&task_id).unwrap().is_empty());
+    assert!(after.events.iter().any(|record| matches!(
+        &record.event,
+        TaskJournalEvent::ToolResultRecorded {
+            result: ToolResult::Edit { diff, .. },
+            ..
+        } if diff == "-old\n+new"
+    )));
+    assert!(after.events.iter().any(|record| matches!(
+        record.event,
+        TaskJournalEvent::ExecutionFinished {
+            outcome: alpine_desktop::store::ExecutionOutcome::Completed,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn deleting_a_task_cascades_journal_and_all_execution_projections() {
+    let (_temporary, store, task_id) = setup();
+    let execution_id = active_execution(&store, &task_id, 'a');
+    let approval = store
+        .propose_tool(NewToolApproval {
             task_id: task_id.clone(),
-            execution_id: execution.id.clone(),
-            kind: "agent.started".to_owned(),
-            payload: serde_json::json!({}),
+            execution_id: execution_id.clone(),
+            tool_call_id: "call-1".to_owned(),
+            proposal: ToolProposal::Edit {
+                path: "README.md".to_owned(),
+                old_text: "a".to_owned(),
+                new_text: "b".to_owned(),
+            },
         })
-        .unwrap();
+        .unwrap()
+        .approval;
 
     store.delete_task(&task_id).unwrap();
     assert!(store.load_task(&task_id).unwrap().is_none());
     assert!(
         store
-            .get_execution(execution.id.as_str())
+            .get_execution(execution_id.as_str())
             .unwrap()
             .is_none()
     );
     assert!(store.get_tool_approval(&approval.id).unwrap().is_none());
+    assert!(store.load_journal(&task_id).unwrap().is_empty());
 }
 
 #[test]
-fn schema_three_history_migrates_to_explicitly_unverified_synthetic_execution() {
+fn schema_three_history_migrates_with_explicit_unverified_legacy_provenance() {
     let temporary = tempfile::tempdir().unwrap();
     let database = temporary.path().join("desktop.sqlite3");
     let connection = Connection::open(&database).unwrap();
@@ -448,7 +690,30 @@ fn schema_three_history_migrates_to_explicitly_unverified_synthetic_execution() 
         "legacy-unverified"
     );
     assert_eq!(detail.messages[0].execution_id, execution.id);
-    assert_eq!(detail.events[0].execution_id, execution.id);
+    assert_eq!(detail.events.len(), 4);
+    assert!(detail.events.iter().all(|record| matches!(
+        record.event,
+        TaskJournalEvent::LegacyImported {
+            causal_order: LegacyCausalOrder::Unverified,
+            ..
+        }
+    )));
+    assert!(detail.events.iter().any(|record| matches!(
+        record.event,
+        TaskJournalEvent::LegacyImported {
+            source: LegacySource::Message,
+            source_sequence: Some(1),
+            ..
+        }
+    )));
+    assert!(detail.events.iter().any(|record| matches!(
+        record.event,
+        TaskJournalEvent::LegacyImported {
+            source: LegacySource::Event,
+            source_sequence: Some(1),
+            ..
+        }
+    )));
     assert_eq!(
         store
             .get_tool_approval("approval-legacy")
@@ -457,6 +722,110 @@ fn schema_three_history_migrates_to_explicitly_unverified_synthetic_execution() 
             .execution_id,
         execution.id
     );
+    drop(store);
+
+    let connection = Connection::open(&database).unwrap();
+    let old_event_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'task_events'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_event_tables, 0);
+}
+
+fn completed_database() -> (tempfile::TempDir, PathBuf, String, ExecutionId) {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("selected-project");
+    std::fs::create_dir(&root).unwrap();
+    let database = temporary.path().join("desktop.sqlite3");
+    let store = DesktopStore::open(&database).unwrap();
+    let project = store.create_project("Alpine", &root).unwrap();
+    let task = store
+        .create_task(CreateTask {
+            project_id: project.id,
+            title: "Contract boundary".to_owned(),
+            model_repo_id: "local/alpine-install".to_owned(),
+            model_filename: "model.gguf".to_owned(),
+            profile: "stable-16k".to_owned(),
+        })
+        .unwrap();
+    let execution_id = active_execution(&store, &task.id, 'a');
+    store
+        .finish_execution(
+            execution_id.as_str(),
+            ExecutionState::Completed,
+            None,
+            Some(1),
+            Some(1),
+        )
+        .unwrap();
+    drop(store);
+    (temporary, database, task.id, execution_id)
+}
+
+fn inject_journal_row(
+    database: &Path,
+    task_id: &str,
+    execution_id: &ExecutionId,
+    id: &str,
+    version: i64,
+    event_json: &str,
+) {
+    let connection = Connection::open(database).unwrap();
+    let sequence: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_journal WHERE task_id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO task_journal
+             (id, task_id, execution_id, sequence, version, event_json, occurred_at_ms, source_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 999, NULL)",
+            params![
+                id,
+                task_id,
+                execution_id.as_str(),
+                sequence,
+                version,
+                event_json
+            ],
+        )
+        .unwrap();
+}
+
+#[test]
+fn persistence_boundary_rejects_unsupported_journal_versions() {
+    let (_temporary, database, task_id, execution_id) = completed_database();
+    inject_journal_row(
+        &database,
+        &task_id,
+        &execution_id,
+        "unsupported-version",
+        2,
+        r#"{"type":"execution-preparing"}"#,
+    );
+    let store = DesktopStore::open(&database).unwrap();
+    assert!(store.load_journal(&task_id).is_err());
+}
+
+#[test]
+fn persistence_boundary_rejects_unknown_fields_in_typed_events() {
+    let (_temporary, database, task_id, execution_id) = completed_database();
+    inject_journal_row(
+        &database,
+        &task_id,
+        &execution_id,
+        "unknown-field",
+        1,
+        r#"{"type":"execution-preparing","unexpected":true}"#,
+    );
+    let store = DesktopStore::open(&database).unwrap();
+    assert!(store.load_journal(&task_id).is_err());
 }
 
 #[test]

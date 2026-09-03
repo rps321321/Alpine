@@ -1,6 +1,6 @@
 //! Project-scoped file and shell capabilities used by the Pi Agent Runtime Adapter.
 
-use crate::store::{DesktopStore, StoreError};
+use crate::store::{DesktopStore, StoreError, ToolProposal, ToolResult};
 use alpine_control_plane::sanitized_process_environment;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
@@ -187,20 +187,29 @@ pub fn edit_project_file(
     approval_id: &str,
     edit: WorkspaceEdit,
 ) -> Result<WorkspaceEditResult, StoreError> {
-    let proposal = serde_json::to_value(&edit)
-        .map_err(|cause| error(format!("failed to encode edit proposal: {cause}")))?;
-    let approval = store.claim_tool_approval(approval_id, "edit", &proposal)?;
-    if approval.task_id != task_id {
-        store.settle_tool_approval(approval_id, false, Some("Task mismatch"))?;
-        return Err(error("the Tool Approval belongs to a different Task"));
-    }
+    let proposal = ToolProposal::from(&edit);
+    store.claim_tool_effect(approval_id, &proposal)?;
     let result = execute_edit(store, task_id, edit);
     match &result {
         Ok(value) => {
-            store.settle_tool_approval(approval_id, true, Some(&value.diff))?;
+            let detail = format!("edited {}", value.path);
+            store.settle_tool_effect(
+                approval_id,
+                true,
+                ToolResult::from(value.clone()),
+                Some(&detail),
+            )?;
         }
         Err(cause) => {
-            store.settle_tool_approval(approval_id, false, Some(&cause.to_string()))?;
+            let message = cause.to_string();
+            store.settle_tool_effect(
+                approval_id,
+                false,
+                ToolResult::Failure {
+                    message: message.clone(),
+                },
+                Some(&message),
+            )?;
         }
     }
     result
@@ -212,27 +221,36 @@ pub fn run_project_shell(
     approval_id: &str,
     shell: WorkspaceShell,
 ) -> Result<WorkspaceShellResult, StoreError> {
-    let proposal = serde_json::to_value(&shell)
-        .map_err(|cause| error(format!("failed to encode shell proposal: {cause}")))?;
-    let approval = store.claim_tool_approval(approval_id, "shell", &proposal)?;
-    if approval.task_id != task_id {
-        store.settle_tool_approval(approval_id, false, Some("Task mismatch"))?;
-        return Err(error("the Tool Approval belongs to a different Task"));
-    }
+    let proposal = ToolProposal::from(&shell);
+    store.claim_tool_effect(approval_id, &proposal)?;
     let result = execute_shell(store, task_id, shell);
     match &result {
         Ok(value) => {
+            let succeeded = value.exit_code == 0;
             let detail = format!("exit {} in {} ms", value.exit_code, value.duration_ms);
-            store.settle_tool_approval(approval_id, value.exit_code == 0, Some(&detail))?;
+            store.settle_tool_effect(
+                approval_id,
+                succeeded,
+                ToolResult::from(value.clone()),
+                Some(&detail),
+            )?;
         }
         Err(cause) => {
-            store.settle_tool_approval(approval_id, false, Some(&cause.to_string()))?;
+            let message = cause.to_string();
+            store.settle_tool_effect(
+                approval_id,
+                false,
+                ToolResult::Failure {
+                    message: message.clone(),
+                },
+                Some(&message),
+            )?;
         }
     }
     result
 }
 
-fn execute_edit(
+pub(crate) fn execute_edit(
     store: &DesktopStore,
     task_id: &str,
     edit: WorkspaceEdit,
@@ -262,7 +280,7 @@ fn execute_edit(
     })
 }
 
-fn execute_shell(
+pub(crate) fn execute_shell(
     store: &DesktopStore,
     task_id: &str,
     shell: WorkspaceShell,

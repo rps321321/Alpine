@@ -8,6 +8,7 @@ import {
 import { streamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import type { Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import type { ToolProposal } from "../generated/task-journal";
 import type {
   MessageRole,
   TaskMessage,
@@ -47,8 +48,7 @@ export interface PiToolClient {
     taskId: string;
     executionId: string;
     toolCallId: string;
-    operation: "edit" | "shell";
-    proposal: Record<string, unknown>;
+    proposal: ToolProposal;
   }): Promise<ToolApproval>;
   waitForApproval(approvalId: string, signal?: AbortSignal): Promise<void>;
   executeApprovedEdit(
@@ -265,7 +265,8 @@ function createProjectTools(
     parameters: editFileSchema,
     executionMode: "sequential",
     async execute(toolCallId, edit, signal) {
-      const proposal = {
+      const proposal: ToolProposal = {
+        type: "edit",
         path: edit.path,
         oldText: edit.oldText,
         newText: edit.newText,
@@ -274,7 +275,6 @@ function createProjectTools(
         taskId,
         executionId,
         toolCallId,
-        operation: "edit",
         proposal,
       });
       await tools.waitForApproval(approval.id, signal);
@@ -282,7 +282,7 @@ function createProjectTools(
         taskId,
         executionId,
         approval.id,
-        proposal,
+        edit,
       );
       return {
         content: [
@@ -304,12 +304,12 @@ function createProjectTools(
         command: input.command,
         timeoutSeconds: input.timeoutSeconds ?? 120,
       };
+      const proposal: ToolProposal = { type: "shell", ...shell };
       const approval = await tools.proposeEffectApproval({
         taskId,
         executionId,
         toolCallId,
-        operation: "shell",
-        proposal: shell,
+        proposal,
       });
       onUpdate?.({
         content: [{ type: "text", text: "Waiting for operator approval…" }],

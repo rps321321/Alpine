@@ -36,7 +36,7 @@ type AgentWorkerCommand =
   | { type: "follow-up"; executionId: string; text: string }
   | { type: "approval-decision"; approvalId: string; approved: boolean };
 
-type AgentWorkerEvent =
+type AgentWorkerEventPayload =
   | { type: "started"; taskId: string; executionId: string }
   | { type: "delta"; taskId: string; executionId: string; delta: string }
   | {
@@ -47,7 +47,7 @@ type AgentWorkerEvent =
       content: string;
     }
   | {
-      type: "event";
+      type: "trace";
       taskId: string;
       executionId: string;
       kind: string;
@@ -69,6 +69,8 @@ type AgentWorkerEvent =
       responseCharacters: number;
     };
 
+type AgentWorkerEvent = AgentWorkerEventPayload & { sequence: number };
+
 type ActiveWorkerRun = {
   taskId: string;
   executionId: string;
@@ -79,6 +81,7 @@ type ActiveWorkerRun = {
   responseCharacters: number;
   deltaBuffer: string;
   deltaTimer: number | null;
+  reportSequence: number;
   reportQueue: Promise<void>;
   reportFailure: Error | null;
 };
@@ -98,11 +101,17 @@ function duration(run: ActiveWorkerRun) {
   return Math.max(0, Math.round(performance.now() - run.startedAt));
 }
 
-function queueReport(run: ActiveWorkerRun, event: AgentWorkerEvent) {
+function sequenceReport(run: ActiveWorkerRun, event: AgentWorkerEventPayload) {
+  run.reportSequence += 1;
+  return { ...event, sequence: run.reportSequence } as AgentWorkerEvent;
+}
+
+function queueReport(run: ActiveWorkerRun, event: AgentWorkerEventPayload) {
+  const sequenced = sequenceReport(run, event);
   run.reportQueue = run.reportQueue
     .then(async () => {
       if (run.reportFailure) return;
-      await invoke<void>("agent_worker_event", { event });
+      await invoke<void>("agent_worker_event", { event: sequenced });
     })
     .catch((error: unknown) => {
       run.reportFailure = asError(error);
@@ -154,7 +163,7 @@ function handlePiEvent(run: ActiveWorkerRun, event: PiHarnessEvent) {
     return;
   }
   queueReport(run, {
-    type: "event",
+    type: "trace",
     taskId: run.taskId,
     executionId: run.executionId,
     kind: event.kind,
@@ -218,16 +227,16 @@ function toolClient(): PiToolClient {
 
 async function start(command: Extract<AgentWorkerCommand, { type: "start" }>) {
   if (active) {
-    await invoke<void>("agent_worker_event", {
-      event: {
-        type: "failed",
-        taskId: command.taskId,
-        executionId: command.executionId,
-        error: `Agent Worker already owns Execution ${active.executionId}`,
-        durationMs: 0,
-        responseCharacters: 0,
-      } satisfies AgentWorkerEvent,
-    });
+    const event: AgentWorkerEvent = {
+      type: "failed",
+      taskId: command.taskId,
+      executionId: command.executionId,
+      error: `Agent Worker already owns Execution ${active.executionId}`,
+      durationMs: 0,
+      responseCharacters: 0,
+      sequence: 1,
+    };
+    await invoke<void>("agent_worker_event", { event });
     return;
   }
 
@@ -247,6 +256,7 @@ async function start(command: Extract<AgentWorkerCommand, { type: "start" }>) {
     responseCharacters: 0,
     deltaBuffer: "",
     deltaTimer: null,
+    reportSequence: 0,
     reportQueue: Promise.resolve(),
     reportFailure: null,
   };
@@ -295,16 +305,15 @@ async function start(command: Extract<AgentWorkerCommand, { type: "start" }>) {
   } catch (error) {
     const failure = asError(error);
     if (!run.reportFailure) {
-      await invoke<void>("agent_worker_event", {
-        event: {
-          type: run.cancelled ? "cancelled" : "failed",
-          taskId: run.taskId,
-          executionId: run.executionId,
-          ...(run.cancelled ? {} : { error: failure.message }),
-          durationMs: duration(run),
-          responseCharacters: run.responseCharacters,
-        } as AgentWorkerEvent,
-      }).catch(() => undefined);
+      const event = sequenceReport(run, {
+        type: run.cancelled ? "cancelled" : "failed",
+        taskId: run.taskId,
+        executionId: run.executionId,
+        ...(run.cancelled ? {} : { error: failure.message }),
+        durationMs: duration(run),
+        responseCharacters: run.responseCharacters,
+      } as AgentWorkerEventPayload);
+      await invoke<void>("agent_worker_event", { event }).catch(() => undefined);
     }
   } finally {
     clearDeltaTimer(run);

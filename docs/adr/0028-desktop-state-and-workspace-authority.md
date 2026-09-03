@@ -2,16 +2,24 @@
 
 ## Status
 
-Accepted — 2026-08-23
+Accepted — 2026-08-23  
+Amended — 2026-09-01
 
 ## Context
 
 ADR 0027 establishes Pi as a replaceable Agent Runtime Adapter and leaves durable
-task recovery, tool lifecycle and project-scoped coding work as open gates. A
-useful desktop coding application must survive restarts, restore its task rail,
-show exact tool history and let the model inspect or change a Selected Project.
-Neither Pi's in-memory transcript nor formatted terminal output can become that
-authority.
+task recovery, tool lifecycle and project-scoped coding work as Alpine-owned
+responsibilities. A useful desktop coding application must survive restarts,
+restore its task rail, show exact tool history and let the model inspect or
+change a Selected Project. Neither Pi's in-memory transcript nor formatted
+terminal output can become that authority.
+
+The original desktop schema persisted Task Messages, generic Task Events and Tool
+Approvals in separate tables. Each table allocated its own per-task sequence, so
+a transcript row, lifecycle row, approval transition and tool result could not be
+replayed as one causally ordered history. The host-owned supervisor introduced in
+ADR 0027 removed renderer write authority, but split persistence still left a
+recovery ambiguity at crash boundaries.
 
 The desktop also needs a clear trust boundary. Read-only project inspection may
 run inside the selected root, while writes and shell execution can create
@@ -19,20 +27,58 @@ consequential effects. Filesystem reachability is not operator consent.
 
 ## Decision
 
-Amended 2026-09-01: durable task facts are written only by the Tauri host's
-`TaskSupervisor` and workspace services. The visible renderer has no arbitrary
-message/event/status append commands. The isolated Agent Worker can propose
-exact effects and report bounded adapter events, but host-side webview identity
-checks, Execution identity checks and SQLite transitions remain authoritative.
-Approval decisions are persisted by the host and delivered directly to the
-specific waiting worker continuation; the database is not polled as a message
-queue.
+Alpine's authoritative durable Task history is a **versioned append-only Task
+Journal** owned by the Tauri host. Every Task Journal record has one task-wide
+monotonic sequence, an optional durable Execution ID, an event-contract version
+and a tagged `TaskJournalEvent`. The event type is defined in Rust and a checked
+generator emits the TypeScript discriminated union consumed by the renderer.
+Unknown fields and unsupported event versions are rejected at the persistence
+boundary.
 
-Alpine Desktop stores Desktop Project Records, Tasks, Task Messages and typed Task
-Events in an app-local SQLite database owned by the Tauri host. The database uses
-explicit schema migrations, foreign keys and ordered per-task sequences. Pi may
-be reconstructed from Alpine-owned Messages, but its private state is never the
-recovery source of truth.
+The journal contains product facts rather than provider callbacks. Its typed
+families include user prompt/direction acceptance, Execution queue/start/wait/
+resume/cancel/finish facts, completed assistant messages, exact tool proposals,
+approval decisions, tool claims/results/settlements and explicit restart
+interruption. Provider-internal trace events remain adapter diagnostics; they do
+not become durable product history merely because Pi emitted them.
+
+Prompt acceptance and immutable Execution creation happen in one SQLite
+transaction **before provider launch**. A crash after that commit therefore
+recovers an accepted prompt and exact queued Execution, which startup then marks
+interrupted; it cannot silently lose the user intent or invent that the provider
+ran. Approval decision and waiting-Execution resumption are likewise committed
+together before the exact worker continuation is awakened.
+
+Tool effects use a typed proposal (`edit` or `shell`) bound to one Task,
+Execution, tool call and approval. Claiming an approved effect appends
+`tool-started` before the host effect executes. A successful or failed effect is
+then recorded as a typed result plus settlement in one transaction. If Alpine
+restarts after the claim but before settlement, recovery records the approval and
+Execution as interrupted; it never fabricates a tool result or silently replays
+the effect.
+
+Task Messages, Execution rows and Tool Approval rows remain SQLite **projections**
+for efficient UI/query access. They are rebuildable from the Task Journal and are
+not independent sources of truth. The former `task_events` table is removed in
+schema 5; there is no production dual-write path. Workspace Changes and Terminal
+views consume typed tool-result journal records instead of decoding an arbitrary
+`kind` plus untyped JSON payload.
+
+Legacy schema-3/4 history is migrated into explicit `legacy-imported` journal
+records. The migration preserves the source record identifier, source-local
+sequence when available and recorded timestamp, but marks causal ordering as
+`unverified`; Alpine does not manufacture an ordering guarantee the old schema
+never possessed. Existing legacy projections remain usable, and projection
+rebuild can deterministically reconstruct them from those provenance records.
+
+Durable task facts are written only by the Tauri host's `TaskSupervisor`, journal
+store and workspace services. The visible renderer has no arbitrary
+message/event/status append commands. The isolated Agent Worker can propose exact
+effects and report bounded, monotonically sequenced adapter messages, but
+host-side webview identity checks, Execution identity checks and journal
+transactions remain authoritative. Duplicate worker delivery is idempotent;
+sequence gaps are rejected and fail the exact active Execution rather than being
+silently reordered.
 
 The same database owns the desktop Model Registry. A registered artifact records
 its source, exact Hugging Face repository and immutable revision when applicable,
@@ -40,69 +86,62 @@ observed bytes, SHA-256 digest, canonical local path, origin URL and verificatio
 time. Imported GGUF files are copied into managed storage without overwriting a
 different artifact. Download completion and import both converge on this record;
 a filename in the models directory alone is not equivalent to verified
-provenance. A Hugging Face search result cannot become the desktop default until
-that exact repository, immutable revision and filename are present in the
-registry, preventing a remote label from masquerading as a runnable local model.
-
-Desktop Settings schema 4 binds every newly selected default to the exact Model
-Registry identifier and SHA-256 digest as well as repository, immutable revision
-and filename. Imported artifacts use `local/import/<full-sha256>` as their
-machine-local Task identity. The trusted host validates the complete tuple
-against the Registry; the renderer cannot promote an unregistered scan result,
-and two artifacts that share a filename remain distinct.
+provenance.
 
 Every project root is canonicalized before persistence. All workspace commands
 resolve their requested paths against that canonical root and reject traversal
 or symlink escape. Read, list and search operations may execute without a Tool
-Approval. Exact-text edits and shell commands require a pending Tool Approval
-whose decision is persisted before execution. Each approval is bound to one
-Task, operation kind and structured proposal; it cannot authorize later work by
-category alone.
-
-A Tool Approval decision and its `approval.decided` Task Event are committed in
-one SQLite transaction and returned as one typed decision. The renderer no
-longer performs a second event append after deciding, so the approval row and
-durable Task history cannot diverge between those writes.
-
-The Desktop Interface exposes durable project/task operations and normalized
-tool events. The Pi Adapter maps Pi lifecycle events into that interface and
-uses small Alpine-owned Agent Tools. It does not receive a general filesystem or
-process handle. Cancellation settles the Task visibly and leaves the local
-Inference Session governed by Alpine's existing transactional lifecycle.
+Approval. Exact-text edits and shell commands require the exact typed Tool
+Approval described above. Approved shell commands still execute as the current
+Windows user; this boundary is policy and accountability, not an Attack-Lab
+sandbox.
 
 ## Alternatives considered
 
+### Keep Task Messages and Task Events as independent authoritative streams
+
+Rejected. Independent sequence allocators cannot express one causal replay order
+and make crash recovery depend on correlating rows after the fact.
+
+### Dual-write the old and new event stores
+
+Rejected for the production cutover. The host supervisor is already the single
+writer, so schema 5 can migrate old history once and then make the journal the
+only authoritative event store. Maintaining two authorities would create a new
+equivalence problem without a migration benefit.
+
 ### Persist Pi sessions directly
 
-Rejected. It would make a disposable candidate's schema and recovery behavior a
-permanent product authority and would not satisfy ADR 0026's recovery evidence
-gap.
+Rejected. It would make a disposable adapter's schema and recovery behavior a
+permanent product authority and would violate ADR 0026's provider-neutrality
+boundary.
 
-### Store the desktop state in JSON files
+### Store desktop state in JSON files
 
-Rejected. Ordered concurrent event appends, schema migration, referential
-integrity and atomic approval settlement are deeper than a collection of mutable
-documents.
+Rejected. Ordered concurrent appends, schema migration, referential integrity,
+atomic approval settlement and projection rebuilding are transactional database
+concerns.
 
-### Give Pi the built-in Node filesystem and shell tools
+### Give Pi ambient filesystem and shell authority
 
-Rejected. The Tauri webview should not acquire ambient Node authority, and a
+Rejected. The Tauri webview must not acquire ambient Node authority, and a
 generic execution environment would bypass project-root checks and Alpine-owned
 approval evidence.
 
 ## Consequences
 
-The native host gains a small SQLite module and project-scoped workspace module.
-The webview remains independently previewable through a typed Desktop Interface.
-Task content remains machine-local and is excluded from diagnostics by default.
+Crash recovery and UI projection now derive from one durable ordered history.
+The journal is deliberately stricter than provider event payloads: changing the
+contract requires an explicit versioned Rust change plus regenerated TypeScript.
+This adds schema discipline but removes a much larger class of partial-history
+and renderer/host disagreement bugs.
 
-Crash recovery can reconstruct task history and identify interrupted runs, but
-replaying an interrupted consequential tool call is prohibited. A pending or
-running Tool Approval must settle as interrupted and be proposed again after a
-restart. This favors visible recovery over silent duplicate effects.
+A failed authoritative journal write is an Execution failure, not a best-effort
+logging failure. Once provider work is active, the supervisor stops/fails the
+exact Execution rather than continuing with unrecorded facts. Consequential tool
+calls are never automatically replayed after an interrupted settlement.
 
-This decision does not broaden the Harness Policy Boundary into an Attack-Lab
-Isolation Boundary. Approved shell commands still run as the Windows user inside
-the Selected Project and must be presented honestly as consequential host work.
-The model registry similarly proves local identity and provenance, not checkpoint
-quality, trustworthiness or runtime Qualification.
+The model registry still proves local identity and provenance, not checkpoint
+quality, trustworthiness or runtime Qualification. The Task Journal similarly
+proves Alpine's durable product history; it does not turn provider-private trace
+state into product truth.
